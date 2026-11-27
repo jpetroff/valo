@@ -1,0 +1,6 @@
+# The middle operand of a comparison chain is evaluated once.
+fn mid() -> int:
+    print(0)
+    5
+
+print(1 < mid() < 10)

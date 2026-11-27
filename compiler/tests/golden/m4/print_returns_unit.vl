@@ -1,0 +1,3 @@
+print(print(1))
+let u = print(2)
+print(u == ())

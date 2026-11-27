@@ -1,0 +1,10 @@
+fn double(x: int) -> int = x * 2
+fn add(a: int, b: int) -> int = a + b
+fn sub(a: int, b: int) -> int = a - b
+
+5 |> double |> add(1) |> print
+let r = 10
+    |> sub(3)
+    |> add(100)
+    |> double
+print(r)

@@ -1,0 +1,5 @@
+error[R0207]: `add` takes 2 arguments but 1 was given
+  --> arity_dynamic.vl:2:49
+stack trace (most recent call first):
+  0: apply  at arity_dynamic.vl:2:49
+  1: <main> at arity_dynamic.vl:3:7

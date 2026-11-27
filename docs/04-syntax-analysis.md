@@ -133,10 +133,17 @@ return it).
 ### Statements: recursive descent
 
 ```text
-program := ( NEWLINE | DEDENT | item )* EOF          Parser::program
-item    := ( let_binding | expr ) ( NEWLINE | EOF )  Parser::item
-let_binding := 'let' NAME ( ':' type )? '=' expr     Parser::let_binding
+program := ( NEWLINE | DEDENT | item )* EOF                    Parser::program
+item    := ( let_binding | fn_def | expr ) ( NEWLINE | EOF )   Parser::item
+let_binding := 'let' NAME ( ':' type )? '=' expr               Parser::let_binding
+fn_def  := 'fn' NAME ( '[' NAME, … ']' )? '(' params ')' ( '->' type )?
+           ( ':' branch | '=' expr | '=' NEWLINE INDENT expr DEDENT )   Parser::fn_def
+param   := NAME ( ':' type )?                                  Parser::params
 ```
+
+Every parameter and the return type need an annotation (syntax.md S13). A
+missing one is reported as E0410 but parsing goes on, so one run lists all of
+them. Trailing commas are allowed in parameter and argument lists.
 
 An `INDENT` that no `:` opened is an error: "E0101 unexpected indentation".
 
@@ -153,17 +160,32 @@ is a function type whose parameters are the tuple's elements.
 
 | Operator | `l_bp` | `r_bp` | Effect |
 |----------|--------|--------|--------|
-| `or` | 3 | 4 | left-assoc, weakest |
+| `\|>` | 1 | 2 | left-assoc, weakest: `a + 1 \|> f` is `f(a + 1)` |
+| `or` | 3 | 4 | left-assoc |
 | `and` | 5 | 6 | left-assoc |
 | prefix `not` | — | 7 | `PREFIX_NOT_BP`: `not a == b` is `not (a == b)` |
 | `== != < <= > >=` | 8 | 9 | chained (see below) |
 | `+` `-` | 10 | 11 | left-assoc |
 | `*` `/` `//` `%` | 20 | 21 | left-assoc |
 | prefix `-` | — | 30 | `PREFIX_NEG_BP` |
-| `**` | 41 | 40 | right-assoc, strongest |
+| `**` | 41 | 40 | right-assoc |
+| call `f(…)` | 50 | — | postfix, strongest: `-f(x) ** 2` is `-((f(x)) ** 2)` |
+
+**Calls** are a postfix row: when `(` follows an expression, `call_args`
+reads the arguments up to `)` — positional expressions, `name=value`
+keyword arguments (no positional argument may follow one) and the
+placeholder `_` (partial application, accepted from M6). `f(1)(2)` chains.
+Inside parentheses the lexer suppresses `NEWLINE`/`INDENT`, so arguments may
+span lines.
+
+**Pipes** build an `ExprKind::Pipe`; a line starting with `|>` continues the
+previous one (the lexer drops the `NEWLINE`). The pipe is then rewritten by
+`desugar.rs`, a small pass between parsing and name resolution:
+`x |> f(a)` becomes the call `f(x, a)` and `x |> f` becomes `f(x)`. `--dump
+ast` shows the tree *before* this rewrite.
 
 `Parser::prefix` handles what can *start* an expression: a literal (`Int`,
-`Float`, `true`, `false`), a name, prefix `-` (parses its operand with
+`Float`, `true`, `false`, `()`), a name, prefix `-` (parses its operand with
 `expr(30)`), `not` (with `expr(7)`), `(` (parses an expression with `expr(0)`
 and expects `)`), `if` and `assert`.
 
@@ -250,7 +272,7 @@ pass overflow the stack.
 ### Constructs of later milestones
 
 The parser recognises tokens that are valid valo but not implemented yet —
-calls `f(`, `[`, `.`, `?`, `|>`, `in`, `fn`, `match`, `none` — and reports
+`[`, `.`, `?`, `in`, `match`, `none` — and reports
 `E0009 … is not supported yet` instead of a confusing "unexpected token".
 These checks are in `Parser::prefix` (things that start an expression) and in
 the operator table of `Parser::expr` (things that follow one).
@@ -282,9 +304,10 @@ the next line.
 | E0101 | unexpected token / expected X | `1 +` (missing operand), `1 2`, `(1 2)`, `let = 1` |
 | E0102 | `if` without `else` | `if x > 0: 1` alone |
 | E0103 | unclosed `(` (label on the opening parenthesis) | `(4 + 5` at end of file |
-| E0104 | block ends with a `let` | an indented branch whose last line is `let t = 1` |
+| E0104 | block ends with a `let` or `fn` | an indented branch whose last line is `let t = 1` |
 | E0105 | expression nested too deeply | 150 nested parentheses |
-| E0009 | valid syntax, not supported yet | `f(1)`, `[1, 2]` |
+| E0410 | missing parameter or return annotation | `fn f(x) -> int = x` |
+| E0009 | valid syntax, not supported yet | `[1, 2]`, `x.y` |
 
 ## 4.5 Where to change things
 
@@ -293,10 +316,11 @@ the next line.
 | new binary operator | 1. `BinOp` + `as_str` (`ast.rs`); 2. a row `(BinOp::X, l_bp, r_bp)` in `Parser::expr`; 3. an opcode mapping in `codegen.rs` |
 | change precedence | the numbers in `Parser::expr` / `PREFIX_NEG_BP` |
 | new expression start (lambdas, strings) | new `ExprKind` variant + arm in `Parser::prefix` |
-| postfix forms (calls, `.field`, `?`) | in the `Parser::expr` loop, before the infix table (they bind tightest) |
-| new statements (`fn`, `def`) | `Parser::item`: dispatch on the first token, as for `let` (`let_binding`) |
+| postfix forms (`.field`, `?`) | a row in the `Parser::expr` table with a high `l_bp`, like calls (`Infix::Call`, `call_args`) |
+| new statements (`def`) | `Parser::item`: dispatch on the first token, as for `let` and `fn` |
 | type annotation syntax | `type_expr` → `type_result` → `type_union` → `type_primary` (one function per precedence level) |
-| a construct with an indented body (`fn`, M4) | after its `:`, call `branch` (or `block` directly) |
+| a construct with an indented body | after its `:`, call `branch` (or `block` directly), as `fn_def` does |
+| a new rewrite of syntax into simpler syntax | `desugar.rs` |
 
 ## 4.6 Exercises
 

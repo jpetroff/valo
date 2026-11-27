@@ -4,7 +4,7 @@ valo is a functional, indentation-based scripting language. Source is compiled
 to bytecode and executed by a register-based virtual machine; Lua 5.x is the
 guiding model for the VM and runtime.
 
-Status: early MVP. Bindings, ints, floats, bools and conditionals run (milestones M0–M3).
+Status: early MVP. Bindings, ints, floats, bools, conditionals, functions, calls and `print` run (milestones M0–M4).
 
 File extensions (tentative): source files use `.vl`, compiled bytecode uses `.vlc`.
 
@@ -27,14 +27,16 @@ like Lua running `luac` output).
 
 ## Status
 
-Milestones M0–M3 of `.memory/plan-mvp.md` are done: `let` bindings with shadowing,
+Milestones M0–M4 of `.memory/plan-mvp.md` are done: `let` bindings with shadowing,
 indented blocks, ints, floats, bools, comparisons (chained), `and`/`or`/`not`,
-`if`/`elif`/`else` and `assert` run end to end (indentation-aware lexer → Pratt parser →
-name resolver → register bytecode → VM).
+`if`/`elif`/`else`, `assert`, top-level `fn` definitions (hoisted, annotated), calls with
+compile-time argument-count checks, pipes `|>`, and the built-ins `print`, `int`, `float`
+run end to end (indentation-aware lexer → Pratt parser → desugaring → name resolver →
+register bytecode → VM with call frames and stack traces).
 
 ```sh
-printf 'let x = 7\nif 0 < x <= 10: x / 2\nelse: 0.0\nassert x * 2 == 15\n' > demo.vl
-cargo run -q --bin valo -- run demo.vl --echo        # prints 3.5, then error[R0701]
+printf 'fn fact(n: int) -> int:\n    if n <= 1: 1\n    else: n * fact(n - 1)\n\n20 |> fact |> print\n' > demo.vl
+cargo run -q --bin valo -- run demo.vl                 # 2432902008176640000
 cargo run -q --bin valo -- check demo.vl --dump bytecode
 ```
 

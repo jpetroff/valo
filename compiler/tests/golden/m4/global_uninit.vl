@@ -1,0 +1,3 @@
+fn scaled(x: int) -> int = x * limit
+print(scaled(2))
+let limit = 10

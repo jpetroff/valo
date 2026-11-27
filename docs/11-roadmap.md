@@ -3,9 +3,9 @@
 M0–M1 built the complete pipeline for the smallest useful language: integer
 arithmetic. M2–M3 added `let` bindings and blocks (the resolver, globals,
 locals in registers), bools, floats, comparisons, `and`/`or`/`not`, `if` and
-`assert` (jumps with backpatching). Every later milestone widens the same
-pipeline; no stage is
-replaced. This chapter maps each planned milestone onto the files you have
+`assert` (jumps with backpatching). M4 added functions: `fn` definitions,
+calls with frames, built-ins and the pipe (a desugaring pass). Every later
+milestone widens the same pipeline; no stage is replaced. This chapter maps each planned milestone onto the files you have
 now read. The authoritative plan is `.memory/plan-mvp.md`; syntax is in
 `.memory/syntax.md`.
 
@@ -13,7 +13,7 @@ now read. The authoritative plan is `.memory/plan-mvp.md`; syntax is in
 |-----------|------------------|-------|--------------|---------|---------|----|
 | ~~M2~~ (done) | `let` bindings, names, indented blocks | — | `Item::Let`, `ExprKind::Name`, blocks from `INDENT…DEDENT` | scopes, locals → registers, globals table | `MOVE`, `GETGLOBAL`, `SETGLOBAL` | globals array |
 | ~~M3~~ (done) | `bool`, `float`, `== < …`, `and/or/not`, `if/elif/else`, `assert` | — | comparisons and logic in the Pratt table, `if` expressions | — | `TEST` + `JMP` with backpatching, `DIV` | `Value::Bool/Float`, comparisons, jumps |
-| **M4** | `fn` definitions, calls, `print`, pipes `\|>` | — | `Item::Fn`, call postfix, type annotations parsed | function scopes, arity checks, pipe rewriting | a stack of `FuncState`s, `CLOSURE`, `CALL` | frames, `RETURN` to caller, native functions in `builtins.rs` |
+| ~~M4~~ (done) | `fn` definitions, calls, `print`, pipes `\|>` | — | `Item::Fn`, call postfix, type annotations parsed | function scopes, arity checks, pipe rewriting (`desugar.rs`) | a stack of `FuncState`s, `CLOSURE`, `CALL` | frames, `RETURN` to caller, native functions in `builtins.rs` |
 | **M4b** | keyword and default arguments | — | `name=value` arguments | normalise to positional | `LOADMISSING`, `JMPIFSET` | missing-argument sentinel |
 | **M5** | recursion without stack growth | — | — | tail position | `TAILCALL` | frame reuse, stack limits |
 | **M6** | lambdas `x => …`, closures, `f(a, _)` | — | lambda syntax | captures (upvalues), `_` rewriting | `GETUPVAL`, `GETSELF` | closures capture by value |

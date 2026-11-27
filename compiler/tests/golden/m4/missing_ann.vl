@@ -1,0 +1,1 @@
+fn grade(p) -> int = p

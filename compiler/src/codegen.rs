@@ -34,7 +34,9 @@
 //! | I want to…                                  | Look at                                          |
 //! |---------------------------------------------|--------------------------------------------------|
 //! | compile a new expression kind               | `FuncState::expr`, add a `match` arm              |
-//! | compile a new top-level item (`fn`, `def`)  | `compile`, the `for item in &program.items` loop  |
+//! | compile a new top-level item (`def`)        | `compile`, the `for item in &program.items` loop  |
+//! | change how a function is compiled           | `compile_fn` (parameters, body, `RETURN`)         |
+//! | change how calls are compiled               | `FuncState::call` (the argument window)           |
 //! | change how names are loaded                 | `FuncState::name` (globals: `GETGLOBAL`, locals: `MOVE`) |
 //! | map an operator to an opcode                | `ExprKind::Binary` arm (`let opcode = match op`) |
 //! | add a constant type (string, M7)            | `ConstKey` + `FuncState::constant` + `Const` in `vm/src/chunk.rs` |
@@ -42,6 +44,28 @@
 //! | change how blocks use registers             | `FuncState::block`                               |
 //! | add an optimisation (constant folding…)     | `FuncState::expr` (see the `-<literal>` fold)    |
 //! | change register limits                      | `MAX_REGS`, `FuncState::alloc`                   |
+//!
+//! ## Functions and calls (M4)
+//!
+//! - Every `fn` becomes its own `Proto`, compiled by its own `FuncState`
+//!   (`compile_fn`); top-level fns are children of `<main>`
+//!   (`Proto::protos`). Parameters are `R0..R(arity-1)`.
+//! - Top-level fns are hoisted (plan D4): `<main>` starts with
+//!   `CLOSURE r k; SETGLOBAL r g` for each of them, before any other code.
+//! - A call reserves a *window* of consecutive registers
+//!   `[base, base+1, …, base+n]` first — callee, then the arguments — and
+//!   only then evaluates into it (`FuncState::call`). `CALL base n` leaves
+//!   the result in `base`.
+//!
+//! ```text
+//! f(1, g(2))  into R0       R0 = window base (dst is the top register)
+//!   GETGLOBAL 0 f           callee
+//!   LOADI     1 1           argument 1
+//!   GETGLOBAL 2 g           argument 2 = inner call, window [2, 3]
+//!   LOADI     3 2
+//!   CALL      2 1           R2 = g(2)
+//!   CALL      0 2           R0 = f(R1, R2)
+//! ```
 //!
 //! Code generation error codes: E0301 limit exceeded, E0009 not supported yet.
 //!
@@ -56,12 +80,12 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use valo_vm::chunk::{Const, GlobalDesc, Program, Proto, SrcSpan};
+use valo_vm::chunk::{Const, GlobalDesc, GlobalKind, NativeId, Program, Proto, SrcSpan};
 use valo_vm::opcode::{Instr, MAX_SJ, MIN_SJ, OpCode};
 
-use crate::ast::{self, BinOp, CmpLink, CmpOp, Expr, ExprKind, Item, LogicOp, UnaryOp};
+use crate::ast::{self, Arg, BinOp, CmpLink, CmpOp, Expr, ExprKind, FnDef, Item, LogicOp, UnaryOp};
 use crate::diagnostic::Diagnostic;
-use crate::resolve::{BindingId, GlobalId, Res, Resolved};
+use crate::resolve::{BindingId, GlobalId, GlobalSlot, Res, Resolved};
 use crate::span::{SourceMap, Span};
 
 /// Code generation options.
@@ -73,9 +97,11 @@ pub struct Options {
 
 /// Compile a parsed and resolved program into the `<main>` prototype.
 ///
-/// Every top-level expression is evaluated into a temporary (and echoed with
-/// `--echo`); every top-level `let` stores its value into a global slot
-/// (`SETGLOBAL`, plan D4). The program ends with `LOADUNIT` + `RETURN`.
+/// `<main>` first creates every top-level fn (`CLOSURE` + `SETGLOBAL`,
+/// hoisting, plan D4). Then every top-level expression is evaluated into a
+/// temporary (and echoed with `--echo`); every top-level `let` stores its
+/// value into a global slot (`SETGLOBAL`). The program ends with `LOADUNIT`
+/// + `RETURN`.
 pub fn compile(
     program: &ast::Program,
     resolved: &Resolved,
@@ -83,9 +109,32 @@ pub fn compile(
     opts: Options,
 ) -> Result<Program, Vec<Diagnostic>> {
     let mut fs = FuncState::new("<main>", Span::new(0, 0), resolved);
-    // EXTEND: new `Item` kinds (fn, def, ...) get arms here.
+    let mut diags = Vec::new();
+    for item in &program.items {
+        let Item::Fn(d) = item else { continue };
+        let child = match compile_fn(d, resolved) {
+            Ok(p) => p,
+            Err(ds) => {
+                diags.extend(ds);
+                continue;
+            }
+        };
+        let Some(Some(Res::Global(g))) = resolved.lets.get(&d.id).copied() else {
+            // A duplicate fn (E0207) has no slot; resolution failed anyway.
+            continue;
+        };
+        let k = fs.child(child, d.name_span);
+        let r = fs.alloc(d.name_span);
+        fs.emit(Instr::abx(OpCode::CLOSURE, r, k), d.name_span);
+        let bx = fs.global_index(g, d.name_span);
+        fs.emit(Instr::abx(OpCode::SETGLOBAL, r, bx), d.name_span);
+        fs.free_to(r);
+    }
+    // EXTEND: new `Item` kinds (def, ...) get arms here.
     for item in &program.items {
         match item {
+            // Already created by the prologue above.
+            Item::Fn(_) => {}
             Item::Expr(e) => {
                 let dst = fs.alloc(e.span);
                 fs.expr(e, dst);
@@ -111,7 +160,15 @@ pub fn compile(
     let r = fs.alloc(end);
     fs.emit(Instr::abc(OpCode::LOADUNIT, r, 0, 0), end);
     fs.emit(Instr::abc(OpCode::RETURN, r, 0, 0), end);
-    let main = fs.finish()?;
+    let main = fs.finish();
+    let main = match main {
+        Ok(m) if diags.is_empty() => m,
+        Ok(_) => return Err(diags),
+        Err(ds) => {
+            diags.extend(ds);
+            return Err(diags);
+        }
+    };
     Ok(Program {
         main: Rc::new(main),
         globals: resolved
@@ -119,6 +176,10 @@ pub fn compile(
             .iter()
             .map(|g| GlobalDesc {
                 name: g.name.as_str().into(),
+                kind: match g.slot {
+                    GlobalSlot::Native(i) => GlobalKind::Native(NativeId(i)),
+                    GlobalSlot::Fn | GlobalSlot::Let => GlobalKind::User,
+                },
             })
             .collect(),
         source_name: sm.name.as_str().into(),
@@ -126,8 +187,25 @@ pub fn compile(
     })
 }
 
+/// Compile one `fn` into its own prototype: parameters in `R0..`, the body
+/// into the next register, then `RETURN`.
+fn compile_fn(d: &FnDef, resolved: &Resolved) -> Result<Proto, Vec<Diagnostic>> {
+    let mut fs = FuncState::new(&d.name, d.name_span, resolved);
+    for p in &d.params {
+        let r = fs.alloc(p.span);
+        if let Some(Some(Res::Local(b))) = resolved.lets.get(&p.id).copied() {
+            fs.locals.insert(b, r);
+        }
+    }
+    fs.proto.arity = d.params.len().min(255) as u8;
+    let dst = fs.alloc(d.body.span);
+    fs.expr(&d.body, dst);
+    fs.emit(Instr::abc(OpCode::RETURN, dst, 0, 0), d.body.span);
+    fs.finish()
+}
+
 /// Per-function compilation state (Lua `FuncState`). One per function being
-/// compiled; M4 will keep a stack of them for nested functions.
+/// compiled (`compile` for `<main>`, `compile_fn` for each `fn`).
 // RUST: `'r` ties the borrowed resolver output to the FuncState's lifetime.
 struct FuncState<'r> {
     /// Name resolution results (which slot each name refers to).
@@ -170,6 +248,7 @@ impl<'r> FuncState<'r> {
                 consts: Vec::new(),
                 spans: Vec::new(),
                 def_span: def_span.into(),
+                protos: Vec::new(),
             },
             free_reg: 0,
             max_reg: 0,
@@ -244,6 +323,21 @@ impl<'r> FuncState<'r> {
         self.proto.consts.push(k);
         self.consts.insert(key, i);
         i
+    }
+
+    /// Add a nested prototype; returns its `CLOSURE` index.
+    fn child(&mut self, p: Proto, span: Span) -> u16 {
+        self.proto.protos.push(Rc::new(p));
+        u16::try_from(self.proto.protos.len() - 1).unwrap_or_else(|_| {
+            if !self.diags.iter().any(|d| d.code == "E0301") {
+                self.diags.push(Diagnostic::new(
+                    "E0301",
+                    "too many functions (max 65536)",
+                    span,
+                ));
+            }
+            0
+        })
     }
 
     /// A global's index as a 16-bit `Bx` operand (E0301 if too many).
@@ -334,6 +428,13 @@ impl<'r> FuncState<'r> {
             ExprKind::Bool(b) => {
                 self.emit(Instr::abc(OpCode::LOADBOOL, dst, u8::from(*b), 0), e.span)
             }
+            ExprKind::Unit => self.emit(Instr::abc(OpCode::LOADUNIT, dst, 0, 0), e.span),
+            ExprKind::Call {
+                callee,
+                args,
+                piped,
+            } => self.call(e, callee, args, *piped, dst),
+            ExprKind::Pipe { .. } => unreachable!("pipes are removed by desugar.rs"),
             ExprKind::Name(_) => self.name(e, dst),
             ExprKind::Unary {
                 op: UnaryOp::Neg,
@@ -388,6 +489,42 @@ impl<'r> FuncState<'r> {
         }
     }
 
+    /// A call (see the module docs). The window `[base, base+n]` is reserved
+    /// before anything is evaluated, so the arguments can be computed in any
+    /// order straight into their slots: a piped argument first (Q17), then
+    /// the callee, then the rest in source order.
+    fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg], piped: bool, dst: u8) {
+        // Reuse dst as the window base when it is the topmost register.
+        let base = if u16::from(dst) + 1 == self.free_reg {
+            dst
+        } else {
+            self.alloc(callee.span)
+        };
+        let slots: Vec<u8> = args.iter().map(|a| self.alloc(arg_span(a))).collect();
+        let skip = usize::from(piped && !args.is_empty());
+        if skip == 1 {
+            if let Some(x) = arg_value(&args[0]) {
+                self.expr(x, slots[0]);
+            }
+        }
+        self.expr(callee, base);
+        for (a, &r) in args.iter().zip(&slots).skip(skip) {
+            if let Some(x) = arg_value(a) {
+                self.expr(x, r);
+            }
+        }
+        self.emit(
+            Instr::abc(OpCode::CALL, base, args.len().min(255) as u8, 0),
+            e.span,
+        );
+        if base != dst {
+            self.emit(Instr::abc(OpCode::MOVE, dst, base, 0), e.span);
+            self.free_to(base);
+        } else {
+            self.free_to(base + 1);
+        }
+    }
+
     /// Indented block: each `let` gets the next free register for the rest
     /// of the block; the last expression goes into `dst`; then every
     /// register the block allocated is released, so the next block reuses
@@ -403,6 +540,8 @@ impl<'r> FuncState<'r> {
                     self.expr(e, tmp);
                     self.free_to(tmp);
                 }
+                // Nested fns are rejected by the resolver until M6.
+                Item::Fn(_) => {}
                 Item::Let(b) => {
                     let r = self.alloc(b.init.span);
                     self.expr(&b.init, r);
@@ -547,6 +686,23 @@ impl<'r> FuncState<'r> {
     }
 }
 
+/// The expression of a call argument (`None` for `_`, which the resolver
+/// rejects until M6).
+fn arg_value(a: &Arg) -> Option<&Expr> {
+    match a {
+        Arg::Positional(x) | Arg::Keyword { value: x, .. } => Some(x),
+        Arg::Placeholder(_) => None,
+    }
+}
+
+/// Source span of a call argument.
+fn arg_span(a: &Arg) -> Span {
+    match a {
+        Arg::Positional(x) | Arg::Keyword { value: x, .. } => x.span,
+        Arg::Placeholder(s) => *s,
+    }
+}
+
 /// Whether `e` produces a bool by construction (no runtime check needed when
 /// it is the right operand of `and`/`or`).
 fn is_bool_syntax(e: &Expr) -> bool {
@@ -652,5 +808,15 @@ mod tests {
         );
         let sm = SourceMap::new("t.vl", ifs);
         assert!(compile_source(&sm, CompileOptions::default()).is_ok());
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__codegen__tests__two_functions.snap
+    #[test]
+    fn two_functions() {
+        insta::assert_snapshot!(disasm(
+            "print(sq(3) + add(1, sq(2)))\nfn sq(x: int) -> int = x * x\n\
+             fn add(a: int, b: int) -> int:\n    let s = a + b\n    s\n\
+             let r = 5 |> add(1)\nr |> print"
+        ));
     }
 }

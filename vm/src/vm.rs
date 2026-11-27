@@ -25,7 +25,9 @@
 //! | change conditions and jumps                  | `TEST`, `JMP`, `ASSERT` arms in `execute`           |
 //! | change the stack trace contents              | `Vm::unwind`                                       |
 //! | change `--trace-exec` output                 | `Vm::trace_instr`                                  |
-//! | add function calls (M4)                      | `Frame`, `RETURN` arm in `execute`, `Vm::run`      |
+//! | change how calls work                        | `Vm::call` (CALL), `RETURN` arm, `Frame`            |
+//! | change stack/recursion limits                | `MAX_FRAMES`, `MAX_STACK`                           |
+//! | let natives do I/O                           | `Vm::write_stdout` (natives get `&mut Vm`)          |
 //! | change how globals are stored                | `Vm::globals`, `GETGLOBAL`/`SETGLOBAL` arms         |
 //!
 //! ## Memory layout (plan §2.5)
@@ -34,9 +36,20 @@
 //!   stack: [ fn slot | R0 | R1 | R2 | ... ]
 //!             base-1   ^base
 //! ```
-//! A `Frame` remembers which prototype runs, where its registers start
-//! (`base`) and which instruction is next (`pc`). M1 has exactly one frame,
-//! `<main>`; M4 pushes one frame per call, each with its own window.
+//! A `Frame` remembers which closure runs, where its registers start
+//! (`base`) and which instruction is next (`pc`). `CALL A B` makes the
+//! callee's window start right after the function slot `R[A]`, so its
+//! arguments `R[A+1..=A+B]` are already its parameters `R0..`:
+//!
+//! ```text
+//!   caller:  [ f | R0 R1 … R[A]=g  R[A+1]  R[A+2] ]
+//!   callee:                  g  | R0'    R1'   R2' …   (base' = base+A+1)
+//! ```
+//!
+//! `RETURN X` stores `R'[X]` into the callee's function slot (the caller's
+//! `R[A]`), pops the frame and cuts the stack back to the caller's window, so
+//! values of finished calls are dropped at once. Calls between valo
+//! functions never recurse in Rust: the loop just switches frames.
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -50,11 +63,17 @@
 
 use std::rc::Rc;
 
-use crate::chunk::{Const, Program, Proto};
+use crate::builtins::NATIVES;
+use crate::chunk::{Const, GlobalKind, Program, Proto};
 use crate::error::{ErrorKind, RuntimeError, TraceEntry};
 use crate::host::Host;
 use crate::opcode::{Format, Instr, OpCode};
-use crate::value::Value;
+use crate::value::{Closure, Value};
+
+/// Most frames that may be active at once (R0301 beyond).
+pub const MAX_FRAMES: usize = 200_000;
+/// Most value-stack slots (16 MiB of values; R0301 beyond).
+pub const MAX_STACK: usize = 1 << 20;
 
 /// Interpreter options.
 #[derive(Debug, Clone, Copy, Default)]
@@ -67,12 +86,14 @@ pub struct Options {
 /// One activation record: the state of one running function.
 #[derive(Debug)]
 struct Frame {
-    /// The code being executed.
-    proto: Rc<Proto>,
+    /// The function being executed (`<main>` is a closure too).
+    closure: Rc<Closure>,
     /// Index of `R0` in the value stack; the function slot is `base - 1`.
     base: usize,
     /// Index of the next instruction ("program counter").
     pc: usize,
+    /// Frames this one replaced by tail calls (M5); shown in traces.
+    tail_calls: u32,
 }
 
 /// The virtual machine.
@@ -111,17 +132,28 @@ impl<'h> Vm<'h> {
 
     /// Run a program to completion and return `main`'s result.
     pub fn run(&mut self, program: &Program) -> Result<Value, RuntimeError> {
-        let main = Rc::clone(&program.main);
+        let main = Rc::new(Closure::new(Rc::clone(&program.main)));
         self.stack.clear();
         self.frames.clear();
-        self.globals = vec![None; program.globals.len()];
+        // Built-in slots are filled now; user slots wait for SETGLOBAL.
+        self.globals = program
+            .globals
+            .iter()
+            .map(|g| match g.kind {
+                GlobalKind::Native(id) => Some(Value::Native(id)),
+                GlobalKind::User => None,
+            })
+            .collect();
         self.global_names = program.globals.iter().map(|g| Rc::clone(&g.name)).collect();
         // Slot 0 is main's function slot (Lua convention); registers follow.
-        self.stack.resize(1 + main.num_regs as usize, Value::Unit);
+        self.stack
+            .resize(1 + main.proto.num_regs as usize, Value::Unit);
+        self.stack[0] = Value::Closure(Rc::clone(&main));
         self.frames.push(Frame {
-            proto: main,
+            closure: main,
             base: 1,
             pc: 0,
+            tail_calls: 0,
         });
         // RUST: `map_err` transforms only the error case; here it attaches
         // the stack trace before the error leaves the VM.
@@ -138,13 +170,15 @@ impl<'h> Vm<'h> {
             .iter()
             .rev()
             .map(|f| TraceEntry {
-                fn_name: Rc::clone(&f.proto.name),
+                fn_name: Rc::clone(&f.closure.proto.name),
                 span: f
+                    .closure
                     .proto
                     .spans
                     .get(f.pc.saturating_sub(1))
                     .copied()
                     .unwrap_or_default(),
+                tail_calls: f.tail_calls,
             })
             .collect();
         self.frames.clear();
@@ -160,7 +194,7 @@ impl<'h> Vm<'h> {
             let frame = self.frames.last_mut().expect("execute without a frame");
             // RUST: `let Some(x) = ... else { ... }` — take the value out of
             // the Option, or run the else block (which must leave the function).
-            let Some(&instr) = frame.proto.code.get(frame.pc) else {
+            let Some(&instr) = frame.closure.proto.code.get(frame.pc) else {
                 return Err(internal("fell off the end of the code"));
             };
             // Index of this instruction, for `--trace-exec` (jumps change pc).
@@ -169,7 +203,7 @@ impl<'h> Vm<'h> {
             let base = frame.base;
             // Cloning the Rc lets us keep using the prototype while `self`
             // is borrowed mutably below (only a counter is incremented).
-            let proto = Rc::clone(&frame.proto);
+            let proto = Rc::clone(&frame.closure.proto);
 
             // ---- decode ------------------------------------------------
             // RUST: `?` = "if this is an Err, return it from `execute` now".
@@ -186,10 +220,28 @@ impl<'h> Vm<'h> {
                 OpCode::RETURN => {
                     // `mem::replace` moves the value out and leaves `Unit` behind.
                     let v = std::mem::replace(&mut self.stack[ra], Value::Unit);
-                    self.frames.pop();
-                    // M4: if a caller frame remains, store into its slot and continue.
-                    return Ok(v);
+                    let done = self.frames.pop().expect("RETURN without a frame");
+                    let Some(caller) = self.frames.last() else {
+                        // `<main>` returned: the program is finished.
+                        return Ok(v);
+                    };
+                    // The result replaces the callee in its function slot,
+                    // which is the caller's `R[A]` of the CALL.
+                    self.stack[done.base - 1] = v;
+                    // Drop the callee's registers (and the values they hold).
+                    let end = caller.base + caller.closure.proto.num_regs as usize;
+                    self.stack.truncate(end);
+                    // Not traced: `ra` belongs to the finished frame.
+                    continue;
                 }
+                OpCode::CLOSURE => {
+                    let child = proto
+                        .protos
+                        .get(instr.bx() as usize)
+                        .ok_or_else(|| internal("function index out of range"))?;
+                    self.stack[ra] = Value::Closure(Rc::new(Closure::new(Rc::clone(child))));
+                }
+                OpCode::CALL => self.call(ra, instr.b() as usize)?,
                 OpCode::LOADI => self.stack[ra] = Value::Int(instr.sbx() as i64),
                 OpCode::LOADK => {
                     let k = proto
@@ -364,6 +416,63 @@ impl<'h> Vm<'h> {
         self.frames.last_mut().expect("execute without a frame")
     }
 
+    /// `CALL A B`: call `R[A]` with the `nargs` arguments `R[A+1..=A+nargs]`.
+    ///
+    /// - valo function: push a frame whose window starts at `A+1`; the loop
+    ///   continues in the callee and `RETURN` comes back here.
+    /// - built-in: move the arguments off the stack, run it, store the result
+    ///   in `R[A]`.
+    fn call(&mut self, ra: usize, nargs: usize) -> Result<(), RuntimeError> {
+        match &self.stack[ra] {
+            Value::Closure(c) => {
+                let c = Rc::clone(c);
+                let arity = c.proto.arity as usize;
+                check_arg_count(&c.proto.name, arity, arity, nargs)?;
+                if self.frames.len() >= MAX_FRAMES {
+                    return Err(stack_overflow());
+                }
+                let base = ra + 1;
+                let top = base + c.proto.num_regs as usize;
+                if top > MAX_STACK {
+                    return Err(stack_overflow());
+                }
+                if self.stack.len() < top {
+                    self.stack.resize(top, Value::Unit);
+                }
+                self.frames.push(Frame {
+                    closure: c,
+                    base,
+                    pc: 0,
+                    tail_calls: 0,
+                });
+                Ok(())
+            }
+            Value::Native(id) => {
+                let def = NATIVES
+                    .get(id.0 as usize)
+                    .ok_or_else(|| internal("native index out of range"))?;
+                check_arg_count(def.name, def.required(), def.params.len(), nargs)?;
+                // Owned arguments: moved out, `Unit` left behind (plan D12).
+                let args: Vec<Value> = self.stack[ra + 1..=ra + nargs]
+                    .iter_mut()
+                    .map(|v| std::mem::replace(v, Value::Unit))
+                    .collect();
+                let result = (def.f)(self, args)?;
+                self.stack[ra] = result;
+                Ok(())
+            }
+            other => Err(RuntimeError::new(
+                ErrorKind::NotCallable,
+                format!("cannot call a value of type {}", other.type_name()),
+            )),
+        }
+    }
+
+    /// Write program output (used by natives such as `print`).
+    pub fn write_stdout(&mut self, s: &str) -> Result<(), RuntimeError> {
+        self.host.write_stdout(s).map_err(host_io)
+    }
+
     /// One `--trace-exec` line: `[<main>] 0003 ADD 0 0 1 | R[0]=17`.
     fn trace_instr(
         &mut self,
@@ -402,6 +511,37 @@ fn internal(msg: impl Into<String>) -> RuntimeError {
 
 fn overflow(msg: String) -> RuntimeError {
     RuntimeError::new(ErrorKind::IntOverflow, msg)
+}
+
+/// R0301.
+fn stack_overflow() -> RuntimeError {
+    RuntimeError::new(
+        ErrorKind::StackOverflow,
+        format!("stack overflow: more than {MAX_FRAMES} nested calls"),
+    )
+}
+
+/// R0207 unless `required <= nargs <= arity`.
+fn check_arg_count(
+    name: &str,
+    required: usize,
+    arity: usize,
+    nargs: usize,
+) -> Result<(), RuntimeError> {
+    if (required..=arity).contains(&nargs) {
+        return Ok(());
+    }
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let takes = if required == arity {
+        format!("{arity} argument{}", plural(arity))
+    } else {
+        format!("{required} to {arity} arguments")
+    };
+    let given = if nargs == 1 { "was" } else { "were" };
+    Err(RuntimeError::new(
+        ErrorKind::WrongArgCount,
+        format!("`{name}` takes {takes} but {nargs} {given} given"),
+    ))
 }
 
 fn host_io(e: std::io::Error) -> RuntimeError {
@@ -497,6 +637,12 @@ pub fn values_equal(b: &Value, c: &Value) -> Result<bool, RuntimeError> {
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y,
+        _ if b.type_name() == "function" && c.type_name() == "function" => {
+            return Err(RuntimeError::new(
+                ErrorKind::NotComparable,
+                "functions cannot be compared",
+            ));
+        }
         _ => {
             return Err(mismatch(
                 format!("cannot compare {} and {}", b.type_name(), c.type_name()),
@@ -514,7 +660,7 @@ pub fn less(b: &Value, c: &Value, or_equal: bool) -> Result<bool, RuntimeError> 
     match (b, c) {
         (Value::Int(x), Value::Int(y)) => Ok(if or_equal { x <= y } else { x < y }),
         (Value::Float(x), Value::Float(y)) => Ok(if or_equal { x <= y } else { x < y }),
-        _ if std::mem::discriminant(b) == std::mem::discriminant(c) => Err(RuntimeError::new(
+        _ if b.type_name() == c.type_name() => Err(RuntimeError::new(
             ErrorKind::NotComparable,
             format!("values of type {} cannot be ordered", b.type_name()),
         )),
@@ -698,6 +844,116 @@ mod tests {
         let err = run(&p).0.unwrap_err();
         assert_eq!(err.kind.code(), "R0302");
         assert!(err.message.contains("`late`"), "{}", err.message);
+    }
+
+    /// `fn add(a, b) = a + b` as a prototype.
+    fn add_proto() -> Proto {
+        ProtoBuilder::new("add", 3)
+            .arity(2)
+            .op(Instr::abc(OpCode::ADD, 2, 0, 1))
+            .op(Instr::abc(OpCode::RETURN, 2, 0, 0))
+            .build()
+    }
+
+    /// `<main>` calling `add` with `nargs` arguments (2, 3, 4, …).
+    fn call_add(nargs: u8) -> Program {
+        let mut b = ProtoBuilder::new("<main>", 6)
+            .proto(add_proto())
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0));
+        for i in 0..nargs {
+            b = b.op(Instr::asbx(OpCode::LOADI, i + 1, i16::from(i) + 2));
+        }
+        b.op(Instr::abc(OpCode::CALL, 0, nargs, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program()
+    }
+
+    #[test]
+    fn call_and_return() {
+        let p = call_add(2);
+        let mut host = TestHost::default();
+        let mut vm = Vm::new(&mut host, Options::default());
+        assert_eq!(vm.run(&p), Ok(Value::Int(5)));
+        // The callee's registers were dropped on return.
+        assert_eq!(vm.stack.len(), 1 + 6);
+    }
+
+    #[test]
+    fn wrong_arg_count_and_not_callable() {
+        let e = run(&call_add(1)).0.unwrap_err();
+        assert_eq!(e.kind.code(), "R0207");
+        assert_eq!(e.message, "`add` takes 2 arguments but 1 was given");
+        let p = ProtoBuilder::new("<main>", 2)
+            .op(Instr::asbx(OpCode::LOADI, 0, 1))
+            .op(Instr::abc(OpCode::CALL, 0, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        let e = run(&p).0.unwrap_err();
+        assert_eq!(e.kind.code(), "R0202");
+        assert_eq!(e.message, "cannot call a value of type int");
+    }
+
+    #[test]
+    fn native_print_and_its_arg_count() {
+        let print = |nargs: u8| {
+            ProtoBuilder::new("<main>", 3)
+                .native_global(0)
+                .op(Instr::abx(OpCode::GETGLOBAL, 0, 0))
+                .op(Instr::asbx(OpCode::LOADI, 1, 7))
+                .op(Instr::asbx(OpCode::LOADI, 2, 8))
+                .op(Instr::abc(OpCode::CALL, 0, nargs, 0))
+                .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+                .program()
+        };
+        let (r, host) = run(&print(1));
+        assert_eq!(r, Ok(Value::Unit));
+        assert_eq!(host.stdout, "7\n");
+        let e = run(&print(2)).0.unwrap_err();
+        assert_eq!(e.message, "`print` takes 1 argument but 2 were given");
+    }
+
+    #[test]
+    fn trace_lists_every_frame() {
+        // <main> → outer → inner, which divides by zero.
+        let inner = ProtoBuilder::new("inner", 2)
+            .op(Instr::asbx(OpCode::LOADI, 0, 1))
+            .op(Instr::asbx(OpCode::LOADI, 1, 0))
+            .op(Instr::abc(OpCode::IDIV, 0, 0, 1))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        let outer = ProtoBuilder::new("outer", 1)
+            .global("inner")
+            .op(Instr::abx(OpCode::GETGLOBAL, 0, 0))
+            .op(Instr::abc(OpCode::CALL, 0, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        let p = ProtoBuilder::new("<main>", 1)
+            .global("inner")
+            .global("outer")
+            .proto(inner)
+            .proto(outer)
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+            .op(Instr::abx(OpCode::SETGLOBAL, 0, 0))
+            .op(Instr::abx(OpCode::CLOSURE, 0, 1))
+            .op(Instr::abx(OpCode::SETGLOBAL, 0, 1))
+            .op(Instr::abc(OpCode::CALL, 0, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        let e = run(&p).0.unwrap_err();
+        assert_eq!(e.kind.code(), "R0102");
+        let names: Vec<&str> = e.trace.iter().map(|t| &*t.fn_name).collect();
+        assert_eq!(names, ["inner", "outer", "<main>"]);
+    }
+
+    #[test]
+    fn functions_display_and_do_not_compare() {
+        let f = Value::Closure(Rc::new(Closure::new(Rc::new(add_proto()))));
+        assert_eq!(f.to_string(), "<fn add/2>");
+        assert_eq!(
+            Value::Native(crate::chunk::NativeId(0)).to_string(),
+            "<native print/1>"
+        );
+        assert_eq!(values_equal(&f, &f).unwrap_err().kind.code(), "R0205");
     }
 
     fn float(x: f64) -> Value {

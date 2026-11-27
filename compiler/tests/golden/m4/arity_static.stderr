@@ -1,0 +1,15 @@
+[E0205] Error: `add` takes 2 arguments but 1 was given
+   ╭─[ arity_static.vl:2:7 ]
+   │
+ 2 │ print(add(1))
+   │       ───┬──  
+   │          ╰──── called with 1 argument
+   │
+   ├─[ arity_static.vl:2:7 ]
+   │
+ 1 │ fn add(a: int, b: int) -> int = a + b
+   │    ─┬─  
+   │     ╰─── defined here
+   │ 
+   │ Help: to fix only some arguments, use a partial: `add(a, _)`
+───╯

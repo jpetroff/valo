@@ -49,7 +49,7 @@ use valo_compiler::span::SourceMap;
 use valo_compiler::{
     CompileOptions, ast, compile_source, lexer, parse_source, resolve, resolve_source,
 };
-use valo_vm::host::StdHost;
+use valo_vm::host::{Host, StdHost};
 use valo_vm::vm::{Options as VmOptions, Vm};
 
 const EXIT_RUNTIME: u8 = 1;
@@ -226,10 +226,18 @@ fn run(path: &Path, echo: bool, trace_exec: bool, dump: Option<Dump>) -> ExitCod
         Err(diags) => return report(&sm, &diags),
     };
     // The real host: the program's output goes to this process's stdout.
-    let mut host = StdHost;
-    let mut vm = Vm::new(&mut host, VmOptions { trace_exec });
-    match vm.run(&program) {
-        Ok(_) => ExitCode::SUCCESS,
+    let mut host = StdHost::new();
+    let result = Vm::new(&mut host, VmOptions { trace_exec }).run(&program);
+    // Buffered program output goes out before any error message.
+    let flushed = host.flush();
+    match result {
+        Ok(_) => match flushed {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error[R0501]: cannot write output: {e}");
+                ExitCode::from(EXIT_RUNTIME)
+            }
+        },
         Err(err) => {
             eprint!("{}", diagnostic::render_runtime(&sm, &err));
             ExitCode::from(EXIT_RUNTIME)

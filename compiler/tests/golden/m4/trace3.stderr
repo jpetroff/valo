@@ -1,0 +1,7 @@
+error[R0102]: division by zero: 10 // 0
+  --> trace3.vl:1:27
+stack trace (most recent call first):
+  0: inner  at trace3.vl:1:27
+  1: middle at trace3.vl:2:28
+  2: outer  at trace3.vl:4:13
+  3: <main> at trace3.vl:7:7

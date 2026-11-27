@@ -11,9 +11,9 @@
 //!
 //! ## Technique
 //!
-//! - **Recursive descent** for statements, blocks, `if` and type annotations:
-//!   one method per grammar rule (`program`, `item`, `let_binding`,
-//!   `if_expr`, `branch`, `block`, `type_expr`…).
+//! - **Recursive descent** for statements, blocks, `if`, `fn` definitions and
+//!   type annotations: one method per grammar rule (`program`, `item`,
+//!   `let_binding`, `fn_def`, `if_expr`, `branch`, `block`, `type_expr`…).
 //! - **Pratt parsing** (top-down operator precedence) for expressions:
 //!   `expr(min_bp)` with a *binding power* per operator (`Parser::expr`).
 //! - **Error recovery**: on an error the parser records a diagnostic and
@@ -22,13 +22,14 @@
 //!
 //! ## Precedence (syntax.md S11, Python order)
 //!
-//! `|>` (M4) < `or` < `and` < `not` < comparisons < `+ -` < `* / // %`
-//! < unary `-` < `**` (right-assoc) < postfix (M4+). As in Python, `-2 ** 2`
+//! `|>` < `or` < `and` < `not` < comparisons < `+ -` < `* / // %`
+//! < unary `-` < `**` (right-assoc) < call `f(…)`. As in Python, `-2 ** 2`
 //! is `-(2 ** 2)`, the right operand of `**` may be negated (`2 ** -1`), and
 //! `not a == b` is `not (a == b)`.
 //!
 //! | operator                   | left bp | right bp | associativity |
 //! |----------------------------|---------|----------|---------------|
+//! | `|>`                       | 1       | 2        | left          |
 //! | `or`                       | 3       | 4        | left          |
 //! | `and`                      | 5       | 6        | left          |
 //! | prefix `not`               | —       | 7        | prefix        |
@@ -37,6 +38,7 @@
 //! | `*` `/` `//` `%`           | 20      | 21       | left          |
 //! | prefix `-`                 | —       | 30       | prefix        |
 //! | `**`                       | 41      | 40       | right         |
+//! | call `f(args)`             | 50      | —        | postfix       |
 //!
 //! Comparisons *chain* (Python): `a < b <= c` becomes one `Compare` node
 //! with two links, not `(a < b) <= c` (`Parser::compare_chain`).
@@ -60,15 +62,18 @@
 //! | add a binary operator / change precedence   | `Parser::expr`, the `match t.kind` table (`Infix`, `l_bp`, `r_bp`) |
 //! | add a prefix form (literals, lambdas)       | `Parser::prefix`                                      |
 //! | change `if` syntax                          | `if_expr`, `if_block_rest`, `branch`                  |
-//! | add postfix forms (calls `f(x)`, `.field`)  | `Parser::expr` loop (currently reports E0009 for `(` `[` `.` `?`) |
-//! | add statements (`fn`, `def`)                | `Parser::item` (dispatch on the first token; see `let_binding`) |
+//! | add postfix forms (`.field`, `[i]`, `?`)    | `Parser::expr` loop (calls: `call_args`; the others still report E0009) |
+//! | change call arguments (keywords, `_`)       | `call_args`                                           |
+//! | change `fn` definitions                     | `fn_def`, `params`                                    |
+//! | add statements (`def`)                      | `Parser::item` (dispatch on the first token; see `let_binding`) |
 //! | change type annotation syntax               | `type_expr`, `type_result`, `type_union`, `type_primary` |
 //! | add a construct with an indented body       | call `branch` (or `block`) after its `:`              |
 //! | change error recovery                       | `sync_line`, `skip_block`                             |
 //!
 //! Syntax error codes: E0101 unexpected token, E0102 `if` without `else`,
-//! E0103 unclosed `(`, E0104 block ends with a `let`, E0009 construct not
-//! supported yet.
+//! E0103 unclosed `(`, E0104 block ends with a `let`/`fn`, E0105 nesting too
+//! deep, E0410 missing parameter or return annotation (S13), E0009 construct
+//! not supported yet.
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -80,8 +85,8 @@
 //! - `.clone()` of a token to keep it while advancing (*Ownership and borrowing*).
 
 use crate::ast::{
-    BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, Item, LogicOp, NodeId, Program, TypeExpr,
-    TypeKind, UnaryOp,
+    Arg, BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, FnDef, Item, LogicOp, NodeId, Param,
+    Program, TypeExpr, TypeKind, UnaryOp,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -102,11 +107,16 @@ const PREFIX_NOT_BP: u8 = 7;
 /// `CMP_BP + 1`, so a comparison never swallows another comparison.
 const CMP_BP: u8 = 8;
 
+/// Left binding power of a call's `(`: tighter than every operator.
+const CALL_BP: u8 = 50;
+
 /// What an infix token does (rows of the Pratt table in `Parser::expr`).
 enum Infix {
     Arith(BinOp),
     Logic(LogicOp),
     Compare,
+    Pipe,
+    Call,
 }
 
 /// The comparison operator a token spells, if any.
@@ -214,12 +224,13 @@ impl Parser<'_> {
         Program { items }
     }
 
-    /// item := (let_binding | expr) (NEWLINE | EOF)
+    /// item := (let_binding | fn_def | expr) (NEWLINE | EOF)
     ///
-    /// EXTEND: look at the first token here to dispatch to `fn`, `def`, …
+    /// EXTEND: look at the first token here to dispatch to `def`, …
     fn item(&mut self) -> PResult<Item> {
         let item = match self.peek().kind {
             TokenKind::Kw(Keyword::Let) => Item::Let(self.let_binding()?),
+            TokenKind::Kw(Keyword::Fn) => Item::Fn(self.fn_def()?),
             _ => Item::Expr(self.expr(0)?),
         };
         self.end_of_line()?;
@@ -256,6 +267,204 @@ impl Parser<'_> {
             ann,
             init,
         })
+    }
+
+    /// ```text
+    /// fn_def := 'fn' NAME ('[' NAME (',' NAME)* ','? ']')? '(' params ')'
+    ///           ('->' type)? fn_body
+    /// fn_body := ':' branch                      block (or inline) body
+    ///          | '=' expr                        one-liner
+    ///          | '=' NEWLINE INDENT expr DEDENT  one-liner continued below
+    /// ```
+    ///
+    /// Missing annotations are reported (E0410, S13) without stopping.
+    fn fn_def(&mut self) -> PResult<FnDef> {
+        let kw = self.bump();
+        let t = self.bump();
+        let TokenKind::Ident(name) = t.kind else {
+            if matches!(t.kind, TokenKind::Newline | TokenKind::Eof) {
+                self.pos -= usize::from(t.kind != TokenKind::Eof);
+            }
+            return Err(self.error(
+                Diagnostic::new(
+                    "E0101",
+                    format!(
+                        "expected a function name after `fn`, found {}",
+                        t.kind.describe()
+                    ),
+                    t.span,
+                )
+                .label("expected a name here"),
+            ));
+        };
+        let mut type_params = Vec::new();
+        if self.peek().kind == TokenKind::LBracket {
+            self.bump();
+            loop {
+                let p = self.bump();
+                let TokenKind::Ident(tv) = p.kind else {
+                    return Err(self.error(
+                        Diagnostic::new(
+                            "E0101",
+                            format!("expected a type variable, found {}", p.kind.describe()),
+                            p.span,
+                        )
+                        .label("expected a name such as `T` here"),
+                    ));
+                };
+                type_params.push((tv, p.span));
+                if self.peek().kind == TokenKind::Comma {
+                    self.bump();
+                    if self.peek().kind != TokenKind::RBracket {
+                        continue;
+                    }
+                }
+                self.expect(&TokenKind::RBracket, "`]`")?;
+                break;
+            }
+        }
+        self.expect(&TokenKind::LParen, "`(` and the parameters")?;
+        let (params, close) = self.params(&name)?;
+        let ret = if self.peek().kind == TokenKind::Arrow {
+            self.bump();
+            Some(self.type_expr()?)
+        } else {
+            self.diags.push(
+                Diagnostic::new(
+                    "E0410",
+                    format!("fn {name} needs a return type, e.g. -> int"),
+                    t.span.to(close),
+                )
+                .label("add `-> type` after the parameters")
+                .help(
+                    "every fn declares its return type (use `-> ()` if it returns nothing useful)",
+                ),
+            );
+            None
+        };
+        let body = match self.peek().kind {
+            TokenKind::Colon => {
+                self.bump();
+                self.branch()?
+            }
+            TokenKind::Eq => {
+                self.bump();
+                self.one_liner_body()?
+            }
+            _ => {
+                let at = self.peek().clone();
+                return Err(self.error(
+                    Diagnostic::new(
+                        "E0101",
+                        format!(
+                            "expected `:` or `=` before the body, found {}",
+                            at.kind.describe()
+                        ),
+                        at.span,
+                    )
+                    .label("expected `:` (block body) or `=` (one-line body) here"),
+                ));
+            }
+        };
+        Ok(FnDef {
+            id: self.id(),
+            name,
+            name_span: t.span,
+            type_params,
+            params,
+            ret,
+            span: kw.span.to(body.span),
+            body,
+        })
+    }
+
+    /// `params := (param (',' param)* ','?)? ')'`, `param := NAME (':' type)?`.
+    /// Returns the parameters and the span of `)`.
+    fn params(&mut self, fn_name: &str) -> PResult<(Vec<Param>, Span)> {
+        let mut params = Vec::new();
+        loop {
+            if self.peek().kind == TokenKind::RParen {
+                return Ok((params, self.bump().span));
+            }
+            let t = self.bump();
+            let TokenKind::Ident(name) = t.kind else {
+                if matches!(t.kind, TokenKind::Newline | TokenKind::Eof) {
+                    self.pos -= usize::from(t.kind != TokenKind::Eof);
+                }
+                return Err(self.error(
+                    Diagnostic::new(
+                        "E0101",
+                        format!("expected a parameter name, found {}", t.kind.describe()),
+                        t.span,
+                    )
+                    .label("expected a parameter name or `)` here"),
+                ));
+            };
+            let ann = if self.peek().kind == TokenKind::Colon {
+                self.bump();
+                Some(self.type_expr()?)
+            } else {
+                self.diags.push(
+                    Diagnostic::new(
+                        "E0410",
+                        format!(
+                            "parameter {name} of fn {fn_name} needs a type annotation, e.g. {name}: int"
+                        ),
+                        t.span,
+                    )
+                    .label("missing `: type`"),
+                );
+                None
+            };
+            params.push(Param {
+                id: self.id(),
+                name,
+                span: t.span,
+                ann,
+                default: None,
+            });
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+                continue;
+            }
+            if self.peek().kind != TokenKind::RParen {
+                let at = self.peek().clone();
+                return Err(self.error(
+                    Diagnostic::new(
+                        "E0101",
+                        format!("expected `,` or `)`, found {}", at.kind.describe()),
+                        at.span,
+                    )
+                    .label("expected `,` or `)` here"),
+                ));
+            }
+        }
+    }
+
+    /// After `=` in a fn header: one expression, either on the same line or
+    /// alone on an indented line below (S2, provisional).
+    fn one_liner_body(&mut self) -> PResult<Expr> {
+        let indented = self.peek().kind == TokenKind::Newline
+            && self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Indent);
+        if !indented {
+            return self.expr(0);
+        }
+        self.bump();
+        self.bump();
+        let e = self.expr(0)?;
+        if self.peek().kind == TokenKind::Newline {
+            self.bump();
+        }
+        if self.peek().kind == TokenKind::Dedent {
+            self.bump();
+            return Ok(e);
+        }
+        let at = self.peek().span;
+        Err(self.error(
+            Diagnostic::new("E0101", "a `=` body is a single expression", at)
+                .label("this line continues the body")
+                .help("use `:` instead of `=` for a body with several lines"),
+        ))
     }
 
     /// Consume a token of kind `kind`, or report E0101 "expected {what}".
@@ -544,11 +753,11 @@ impl Parser<'_> {
                 // Right-associative; the right side starts over at prefix level,
                 // which admits `2 ** -1`.
                 TokenKind::StarStar => (Infix::Arith(BinOp::Pow), 41, 40),
+                TokenKind::PipeGt => (Infix::Pipe, 1, 2),
+                TokenKind::LParen => (Infix::Call, CALL_BP, 0),
                 // Known operators of later milestones: say so clearly
                 // instead of a confusing "expected end of line".
-                TokenKind::PipeGt
-                | TokenKind::Kw(Keyword::In)
-                | TokenKind::LParen
+                TokenKind::Kw(Keyword::In)
                 | TokenKind::LBracket
                 | TokenKind::Dot
                 | TokenKind::Question => {
@@ -571,6 +780,20 @@ impl Parser<'_> {
                 lhs = self.compare_chain(lhs)?;
                 continue;
             }
+            if let Infix::Call = op {
+                let open = self.bump();
+                let (args, close) = self.call_args(open.span)?;
+                lhs = Expr {
+                    id: self.id(),
+                    span: lhs.span.to(close),
+                    kind: ExprKind::Call {
+                        callee: Box::new(lhs),
+                        args,
+                        piped: false,
+                    },
+                };
+                continue;
+            }
             self.bump();
             let rhs = self.expr(r_bp)?;
             let span = lhs.span.to(rhs.span);
@@ -588,7 +811,12 @@ impl Parser<'_> {
                     lhs: lhs_box,
                     rhs: rhs_box,
                 },
-                Infix::Compare => unreachable!("handled above"),
+                Infix::Pipe => ExprKind::Pipe {
+                    op_span: t.span,
+                    lhs: lhs_box,
+                    rhs: rhs_box,
+                },
+                Infix::Compare | Infix::Call => unreachable!("handled above"),
             };
             lhs = Expr {
                 id: self.id(),
@@ -597,6 +825,80 @@ impl Parser<'_> {
             };
         }
         Ok(lhs)
+    }
+
+    /// Arguments after `(` (already consumed; its span is `open`):
+    ///
+    /// ```text
+    /// args := (arg (',' arg)* ','?)? ')'
+    /// arg  := NAME '=' expr        keyword argument (S19)
+    ///       | '_'                  placeholder (S1; accepted from M6)
+    ///       | expr                 positional; not after a keyword argument
+    /// ```
+    ///
+    /// Returns the arguments and the span of `)`.
+    fn call_args(&mut self, open: Span) -> PResult<(Vec<Arg>, Span)> {
+        let mut args = Vec::new();
+        let mut seen_keyword = false;
+        loop {
+            if self.peek().kind == TokenKind::RParen {
+                return Ok((args, self.bump().span));
+            }
+            let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+            let arg = match (&self.peek().kind, next) {
+                (TokenKind::Ident(name), Some(TokenKind::Eq)) => {
+                    let name = name.clone();
+                    let name_span = self.bump().span;
+                    self.bump();
+                    seen_keyword = true;
+                    Arg::Keyword {
+                        name,
+                        name_span,
+                        value: self.expr(0)?,
+                    }
+                }
+                (TokenKind::Ident(name), Some(TokenKind::Comma | TokenKind::RParen))
+                    if name == "_" =>
+                {
+                    Arg::Placeholder(self.bump().span)
+                }
+                _ => {
+                    let e = self.expr(0)?;
+                    if seen_keyword {
+                        return Err(self.error(
+                            Diagnostic::new(
+                                "E0101",
+                                "positional argument after a keyword argument",
+                                e.span,
+                            )
+                            .label("move this argument before the keyword arguments"),
+                        ));
+                    }
+                    Arg::Positional(e)
+                }
+            };
+            args.push(arg);
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+                continue;
+            }
+            if self.peek().kind == TokenKind::RParen {
+                continue;
+            }
+            let at = self.peek().clone();
+            let d = if matches!(at.kind, TokenKind::Newline | TokenKind::Eof) {
+                Diagnostic::new("E0103", "unclosed `(`", open).label("opened here, never closed")
+            } else {
+                Diagnostic::new(
+                    "E0101",
+                    format!("expected `,` or `)`, found {}", at.kind.describe()),
+                    at.span,
+                )
+                .label("expected `,` or `)` here")
+                .with(open, "in the call starting here")
+            };
+            return Err(self.error(d));
+        }
     }
 
     /// `first op1 x1 op2 x2 …` while the next token is a comparison: one
@@ -765,9 +1067,17 @@ impl Parser<'_> {
         let first_span = match &items[0] {
             Item::Expr(e) => e.span,
             Item::Let(b) => b.name_span,
+            Item::Fn(d) => d.span,
         };
         let span = match last {
             Item::Expr(e) => first_span.to(e.span),
+            Item::Fn(d) => {
+                self.diags.push(
+                    Diagnostic::new("E0104", "block ends with a `fn` definition", d.span)
+                        .label("a block's value is its last line, which must be an expression"),
+                );
+                first_span.to(d.span)
+            }
             Item::Let(b) => {
                 // Recorded, but not fatal: the surrounding `if` can still be
                 // parsed (the pipeline stops after the parser anyway).
@@ -790,8 +1100,8 @@ impl Parser<'_> {
         })
     }
 
-    /// Prefix position: literals, names, `-x`, `not x`, `if`, `assert`,
-    /// parenthesised groups.
+    /// Prefix position: literals, `()`, names, `-x`, `not x`, `if`,
+    /// `assert`, parenthesised groups.
     /// EXTEND: lambdas (M6), strings (M7) and list literals (M8) start here.
     fn prefix(&mut self) -> PResult<Expr> {
         let t = self.bump();
@@ -846,6 +1156,15 @@ impl Parser<'_> {
                     },
                 })
             }
+            // `()`: the unit value.
+            TokenKind::LParen if self.peek().kind == TokenKind::RParen => {
+                let close = self.bump();
+                Ok(Expr {
+                    id: self.id(),
+                    span: t.span.to(close.span),
+                    kind: ExprKind::Unit,
+                })
+            }
             TokenKind::LParen => {
                 // Grouping: parse the inside at the lowest binding power.
                 // No AST node is created for the parentheses themselves; the
@@ -873,8 +1192,7 @@ impl Parser<'_> {
             }
             // Valid syntax of later milestones: report "not supported yet".
             TokenKind::Kw(
-                Keyword::Fn
-                | Keyword::Def
+                Keyword::Def
                 | Keyword::Match
                 | Keyword::None
                 | Keyword::Import
@@ -950,7 +1268,7 @@ mod tests {
         assert_eq!(parse_codes("1 +\n2 2\n3\n(1"), ["E0101", "E0101", "E0103"]);
         assert_eq!(parse_codes("  1"), ["E0101"]);
         assert_eq!(
-            parse_codes("f(1)\n[1]\nx in y\nx |> f"),
+            parse_codes("[1]\nx in y\nx.y\nx?"),
             ["E0009", "E0009", "E0009", "E0009"]
         );
         assert_eq!(
@@ -1021,5 +1339,40 @@ mod tests {
              let t: (int, dict[str, (int,)]) = a\na * b"
         ));
         assert_eq!(parse_codes("(1 2)"), ["E0101"]);
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__parser__tests__functions_and_calls.snap
+    #[test]
+    fn functions_and_calls() {
+        insta::assert_snapshot!(parse_ok(
+            "fn add(x: int, y: int) -> int = x + y\n\
+             fn fact(n: int) -> int:\n    if n <= 1: 1\n    else: n * fact(n - 1)\n\
+             fn first[T, U](xs: list[T], f: T -> U,) -> T | none =\n    g(xs)\n\
+             fn unit() -> () = ()\n\
+             f()\nf(1)(2, 3,)\n-f(x) ** 2\nadd(\n    1,\n    2,\n)\n\
+             x |> f |> g(1) |> h(k=2)\n\
+             1 + 2 |> f\n  |> g\n\
+             f(a, _, b=1)"
+        ));
+    }
+
+    #[test]
+    fn function_errors() {
+        // Missing annotations are reported, and parsing goes on.
+        assert_eq!(
+            parse_codes("fn f(x, y: int):\n    x\nfn g(a: int) = a\n1 +"),
+            ["E0410", "E0410", "E0410", "E0101"]
+        );
+        assert_eq!(parse_codes("fn (x: int) -> int = x"), ["E0101"]);
+        assert_eq!(parse_codes("fn f(x: int) -> int x"), ["E0101"]);
+        assert_eq!(parse_codes("fn f(1) -> int = 1"), ["E0101"]);
+        assert_eq!(parse_codes("fn f() -> int =\n    1\n    2"), ["E0101"]);
+        assert_eq!(parse_codes("f(1 2)"), ["E0101"]);
+        assert_eq!(parse_codes("f(a=1, 2)"), ["E0101"]);
+        assert_eq!(parse_codes("f(1"), ["E0103"]);
+        assert_eq!(
+            parse_codes("let v = if a:\n    fn f() -> int = 1\nelse: 2"),
+            ["E0104"]
+        );
     }
 }

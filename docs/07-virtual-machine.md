@@ -23,10 +23,10 @@ value stack:  [ fn slot | R0 | R1 | R2 | ... ]
                  base-1   ^base
 ```
 
-Slot `base - 1` holds the function being run (a Lua convention; it will hold
-the closure from M4 on). When calls arrive (M4), a callee's window starts just
-above the caller's arguments, so arguments are passed without copying. M1 has
-only one frame, `<main>`, with `base = 1`.
+Slot `base - 1` holds the function being run (a Lua convention). A callee's
+window starts right after its function slot, where the caller put the
+arguments, so arguments are passed without copying (section 7.6). `<main>`
+is the first frame, with `base = 1`.
 
 ## 7.2 Values
 
@@ -34,17 +34,21 @@ File: [`vm/src/value.rs`](../vm/src/value.rs)
 
 ```rust
 pub enum Value {
-    Unit,        // ()  — also the initial content of every register
-    Bool(bool),  // true / false
-    Int(i64),    // valo int
-    Float(f64),  // valo float
+    Unit,                  // ()  — also the initial content of every register
+    Bool(bool),            // true / false
+    Int(i64),              // valo int
+    Float(f64),            // valo float
+    Closure(Rc<Closure>),  // a valo fn: Closure { proto, captures }
+    Native(NativeId),      // a built-in: index into builtins::NATIVES
 }
 ```
 
 Each register holds one `Value`. Rust's `enum` is a tagged union: the tag
 says which variant it is, so the VM can check operand types at runtime
 (**dynamic typing** at the VM level; valo's annotations add checks on top in
-M10). Later variants: closures and natives (M4),
+M10). Functions are values: `Closure` (compiled code plus captured values;
+captures stay empty until M6) and `Native` (a built-in), both of type
+`function`, printed `<fn fact/1>` / `<native print/1>`. Later variants:
 strings, `none`, `Ok`/`Err` (M7), lists (M8). Heap values will be shared with
 `Rc` — safe because valo values are immutable, and enough for memory
 management because immutable values in a strict language cannot form cycles
@@ -196,10 +200,51 @@ stack trace (most recent call first):
   0: <main> at div_zero.vl:2:1
 ```
 
-With function calls (M4) the trace will list every caller — the main tool for
+The trace lists every active call, innermost first — the main tool for
 debugging scripts on remote machines.
 
-## 7.6 The host: one door to the outside world
+## 7.6 Calls and frames
+
+```rust
+struct Frame { closure: Rc<Closure>, base: usize, pc: usize, tail_calls: u32 }
+```
+
+`Vm::frames` is the call stack; the last frame runs. Calls between valo
+functions never recurse in Rust: `CALL` pushes a frame and the same loop
+continues in the callee, `RETURN` pops it and continues in the caller.
+
+```text
+CALL A B   (callee in R[A], arguments in R[A+1..=A+B])
+
+ caller window:  [ R0 … R[A]=g  R[A+1]  R[A+2] … ]
+ callee window:              g | R0'    R1'    R2' …     base' = base + A + 1
+
+RETURN X (in g):  stack[base'-1] = R'[X]   → the caller finds the result in R[A]
+                  pop frame; cut the stack back to the caller's window
+```
+
+- **valo function** (`Value::Closure`): the argument count must equal the
+  arity, else R0207 (the compiler already rejects most such calls with
+  E0205; R0207 catches calls through a function *value*). The stack grows to
+  `base' + num_regs` and a frame is pushed.
+- **built-in** (`Value::Native`): its `NativeDef` (`builtins.rs`) gives the
+  name, parameters and a Rust function `fn(&mut Vm, Vec<Value>) -> Result<…>`.
+  The arguments are *moved* off the stack into the `Vec` (plan D12), the
+  function runs, and its result goes to `R[A]`. No frame is pushed: an error
+  inside a built-in is reported at the call.
+- anything else: R0202 "cannot call a value of type int".
+- **Limits**: more than `MAX_FRAMES` (200 000) frames or `MAX_STACK` (2^20)
+  slots is R0301, a clean error instead of exhausting memory.
+- **`RETURN` cuts the stack** back to the caller's window, so values of
+  finished calls are freed at once (with `Rc`, a value lives as long as a
+  stack slot still points to it).
+
+Globals start empty except the built-in slots: `run` fills them with
+`Value::Native(id)` from `GlobalDesc::kind` before `<main>` starts.
+`<main>`'s first instructions create the top-level fns (`CLOSURE` +
+`SETGLOBAL`), so every fn exists before any top-level line runs.
+
+## 7.7 The host: one door to the outside world
 
 File: [`vm/src/host.rs`](../vm/src/host.rs)
 
@@ -207,13 +252,16 @@ File: [`vm/src/host.rs`](../vm/src/host.rs)
 pub trait Host {
     fn write_stdout(&mut self, s: &str) -> io::Result<()>;
     fn write_stderr(&mut self, s: &str) -> io::Result<()>;
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 ```
 
 The VM never touches `std::io` directly. Every effect goes through the
 `Host` it was given:
 
-- `StdHost` — the real process streams (used by `valo run`);
+- `StdHost` — the real process streams (used by `valo run`). Stdout is
+  buffered (`BufWriter`): flushed before anything is written to stderr and
+  by the CLI when the program ends, normally or with an error;
 - `TestHost` — collects output in two `String`s (used by unit tests).
 
 This is the seed of a key valo feature from the feasibility report: because
@@ -225,29 +273,31 @@ file access to the trait.
 A write failure (e.g. stdout is a closed pipe) becomes R0501 instead of a
 crash.
 
-## 7.7 Where to change things
+## 7.8 Where to change things
 
 | Task | Where |
 |------|-------|
 | execute a new opcode | `Vm::execute`, new `match` arm |
 | float arithmetic | `float_arith`; type dispatch in `arith` |
 | what `==` / `<` accept | `values_equal`, `less` |
-| function calls (M4) | push a `Frame` in `CALL`; in `RETURN`, pop and store into the caller's `R[A]` instead of returning |
+| how calls work | `Vm::call` (CALL), the `RETURN` arm, `Frame` |
+| add a built-in | `builtins.rs`: a function + an entry appended to `NATIVES` |
+| recursion limits | `MAX_FRAMES`, `MAX_STACK` |
 | a new effect | method on `Host` + both implementations |
 | change number formatting | `impl Display for Value` |
 
-## 7.8 Exercises
+## 7.9 Exercises
 
 1. Run `valo run f.vl --echo --trace-exec` on `2 ** 3 ** 2` and match each
    trace line to the disassembly.
 2. Write a VM unit test (in `vm.rs`, using `ProtoBuilder`) that executes
    `NEG` on `i64::MIN` loaded via `LOADK`, and asserts `ErrorKind::IntOverflow`.
 3. Why does `Vm::execute` clone the `Rc<Proto>` (`let proto =
-   Rc::clone(&frame.proto)`) instead of keeping a reference to the frame?
+   Rc::clone(&frame.closure.proto)`) instead of keeping a reference to the frame?
    (Hint: chapter 1, *Ownership and borrowing*, the "cannot borrow as mutable"
    error.)
 
-## 7.9 Further reading
+## 7.10 Further reading
 
 - *The Implementation of Lua 5.0*, §7.
 - *Crafting Interpreters*, ch. 15 "A Virtual Machine".

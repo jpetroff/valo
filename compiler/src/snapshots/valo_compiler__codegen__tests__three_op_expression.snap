@@ -2,7 +2,7 @@
 source: compiler/src/codegen.rs
 expression: "disasm(\"(1 + 70000) * -3 - 2 ** 2\")"
 ---
-function <main> arity=0 regs=3 consts=1   ; t.vl:1:1
+function <main> arity=0 regs=3 consts=1 protos=0   ; t.vl:1:1
   0000  [1:2]   LOADI     0 1
   0001  [1:6]   LOADK     1 0      ; 70000
   0002  [1:1]   ADD       0 0 1

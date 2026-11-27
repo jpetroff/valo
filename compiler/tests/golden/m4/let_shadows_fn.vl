@@ -1,0 +1,8 @@
+fn g() -> int = f()     # written before `let f`: sees the fn
+print(f())              # hoisted: callable before its definition
+let f = 2
+print(f)                # the `let` shadows the fn from here on
+print(g())
+fn f() -> int = 1
+fn h() -> int = f       # written after `let f`: sees the let
+print(h())
