@@ -33,7 +33,7 @@
 use std::fmt::Write as _;
 
 use ariadne::{Config, IndexType, Label, Report, ReportKind, Source};
-use valo_vm::error::RuntimeError;
+use valo_vm::error::{ErrorKind, RuntimeError};
 
 use crate::span::{SourceMap, Span};
 
@@ -147,20 +147,33 @@ fn clamp(sm: &SourceMap, s: Span) -> Span {
     }
 }
 
-/// Render a runtime error: header, location and stack trace (plan §5). The
-/// source snippet is added in M9.
+/// Render a runtime error: header, location, notes and stack trace
+/// (plan §5). The source snippet is added in M9.
 ///
 /// ```text
-/// error[R0102]: division by zero: 7 // 0
-///   --> div_zero.vl:2:1
+/// error[R0701]: assertion failed: a == b
+///   --> t.vl:3:8
+///   left: 4
+///   right: 5
 /// stack trace (most recent call first):
-///   0: <main> at div_zero.vl:2:1
+///   0: <main> at t.vl:3:8
 /// ```
+///
+/// A failed `assert` quotes its source text: the VM has no source, but the
+/// span of the `ASSERT` instruction is the asserted expression.
 pub fn render_runtime(sm: &SourceMap, err: &RuntimeError) -> String {
-    let mut out = format!("error[{}]: {}\n", err.kind.code(), err.message);
+    let mut out = format!("error[{}]: {}", err.kind.code(), err.message);
+    if let (ErrorKind::AssertionFailed, Some(span)) = (err.kind, err.primary_span()) {
+        let s = clamp(sm, Span::new(span.start as usize, span.end as usize));
+        let _ = write!(out, ": {}", &sm.text[s.range()]);
+    }
+    out.push('\n');
     if let Some(span) = err.primary_span() {
         let (l, c) = sm.line_col(span.start);
         let _ = writeln!(out, "  --> {}:{l}:{c}", sm.name);
+    }
+    for note in &err.notes {
+        let _ = writeln!(out, "  {note}");
     }
     if !err.trace.is_empty() {
         out.push_str("stack trace (most recent call first):\n");

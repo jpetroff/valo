@@ -1,0 +1,20 @@
+---
+source: compiler/src/resolve.rs
+expression: "resolve_src(\"let x = 1\\nlet y = if true:\\n    let x = x + 1\\n    let x = x * 10\\n    \\\n                 if x > 0:\\n        let x = 0\\n        x\\n    else: x\\nelse: x\\nx + y\").unwrap()"
+---
+globals:
+  global#0   x            1:5
+  global#1   y            2:5
+locals:
+  local#0   x            3:9
+  local#1   x            4:9
+  local#2   x            6:13
+uses:
+  3:13    x -> global#0
+  4:13    x -> local#0
+  5:8     x -> local#1
+  7:9     x -> local#2
+  8:11    x -> local#1
+  9:7     x -> global#0
+  10:1    x -> global#0
+  10:5    y -> global#1

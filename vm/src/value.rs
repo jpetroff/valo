@@ -23,8 +23,12 @@
 //! (strings, lists — later) will be shared with `Rc` rather than mutated in
 //! place. There is no nil: optional values use `none` (M7), and registers
 //! start out as `Unit`. Variants arrive milestone by milestone:
-//! `Bool`, `Float` (M3), `Closure`, `Native` (M4), `Str`, `None`, `Ok`, `Err`
-//! (M7), `List` (M8), `Tuple`, `Dict` (M8b), `Missing` (M4b, internal).
+//! `Closure`, `Native` (M4), `Str`, `None`, `Ok`, `Err` (M7), `List` (M8),
+//! `Tuple`, `Dict` (M8b), `Missing` (M4b, internal).
+//!
+//! The derived `PartialEq` is for tests only. The language's `==` has its own
+//! rules (no int/float mixing, NaN ≠ NaN) and lives in `vm.rs`
+//! (`values_equal`).
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -40,8 +44,13 @@ use std::fmt;
 pub enum Value {
     /// The unit value `()`.
     Unit,
+    /// `true` / `false`.
+    Bool(bool),
     /// 64-bit signed integer; arithmetic is checked (D8).
     Int(i64),
+    /// 64-bit IEEE float; arithmetic follows IEEE (overflow gives `inf`),
+    /// except that division by zero is an error (Q20).
+    Float(f64),
 }
 
 impl Value {
@@ -51,7 +60,9 @@ impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Unit => "()",
+            Value::Bool(_) => "bool",
             Value::Int(_) => "int",
+            Value::Float(_) => "float",
         }
     }
 }
@@ -61,8 +72,49 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Unit => f.write_str("()"),
+            Value::Bool(b) => write!(f, "{b}"),
             // RUST: `{n}` inside the format string prints the variable `n`.
             Value::Int(n) => write!(f, "{n}"),
+            // `{:?}` always shows a decimal point or exponent (`1.0`, `1e100`)
+            // and spells the specials `inf`, `-inf`, `NaN` (plan §2.4).
+            Value::Float(x) => write!(f, "{x:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display() {
+        let shown: Vec<String> = [
+            Value::Unit,
+            Value::Bool(true),
+            Value::Int(-3),
+            Value::Float(1.0),
+            Value::Float(0.1 + 0.2),
+            Value::Float(1e100),
+            Value::Float(f64::INFINITY),
+            Value::Float(f64::NAN),
+            Value::Float(-0.0),
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+        assert_eq!(
+            shown,
+            [
+                "()",
+                "true",
+                "-3",
+                "1.0",
+                "0.30000000000000004",
+                "1e100",
+                "inf",
+                "NaN",
+                "-0.0"
+            ]
+        );
     }
 }

@@ -1,0 +1,11 @@
+---
+source: compiler/src/parser.rs
+expression: "parse_ok(\"not a < b and c or d\\na or b and c\\n0 < x <= 10 != y\\nnot not true\\n\\\n             1 + 2 == 3 * 1\\nx == y == z\\n-1.5 * 2.0 >= 3e2\")"
+---
+(expr (or (and (not (< a b)) c) d))
+(expr (or a (and b c)))
+(expr (chain 0 < x <= 10 != y))
+(expr (not (not true)))
+(expr (== (+ 1 2) (* 3 1)))
+(expr (chain x == y == z))
+(expr (>= (* (neg 1.5) 2.0) 300.0))

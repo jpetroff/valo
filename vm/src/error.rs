@@ -44,8 +44,14 @@ pub enum ErrorKind {
     NegativeExponent,
     /// R0201 operand type mismatch.
     TypeMismatch,
+    /// R0203 a condition (`if`, `and`/`or` operand, `assert`) is not a bool.
+    ConditionNotBool,
+    /// R0205 values of this type have no order (`<` on bools).
+    NotComparable,
     /// R0302 global read before its `SETGLOBAL` ran.
     GlobalUninit,
+    /// R0701 `assert` failed.
+    AssertionFailed,
     /// R0501 writing to stdout/stderr failed.
     HostIo,
     /// R0901 malformed bytecode or an opcode this build does not implement.
@@ -60,7 +66,10 @@ impl ErrorKind {
             ErrorKind::DivisionByZero => "R0102",
             ErrorKind::NegativeExponent => "R0104",
             ErrorKind::TypeMismatch => "R0201",
+            ErrorKind::ConditionNotBool => "R0203",
+            ErrorKind::NotComparable => "R0205",
             ErrorKind::GlobalUninit => "R0302",
+            ErrorKind::AssertionFailed => "R0701",
             ErrorKind::HostIo => "R0501",
             ErrorKind::Internal => "R0901",
         }
@@ -86,6 +95,9 @@ pub struct RuntimeError {
     pub kind: ErrorKind,
     /// Human-readable message, without the code.
     pub message: String,
+    /// Extra lines printed under the location: the two sides of a failed
+    /// `assert a == b` (`left: …`, `right: …`), or a `help: …` hint.
+    pub notes: Vec<String>,
     /// Stack trace, innermost frame first.
     pub trace: Vec<TraceEntry>,
 }
@@ -96,8 +108,15 @@ impl RuntimeError {
         RuntimeError {
             kind,
             message: message.into(),
+            notes: Vec::new(),
             trace: Vec::new(),
         }
+    }
+
+    /// Add a note line.
+    pub fn note(mut self, line: impl Into<String>) -> RuntimeError {
+        self.notes.push(line.into());
+        self
     }
 
     /// Span of the innermost frame, if any.

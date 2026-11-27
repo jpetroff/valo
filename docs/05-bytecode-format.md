@@ -45,9 +45,9 @@ isJ  |                 sJ (i24, two's complement)    |    opcode     |
 ```
 
 - `A`, `B`, `C`: 8-bit register numbers → at most 255 registers per function.
-- `Bx`: 16-bit unsigned — constant index (`LOADK`), global index (M2).
+- `Bx`: 16-bit unsigned — constant index (`LOADK`), global index (`GETGLOBAL`, `SETGLOBAL`).
 - `sBx`: 16-bit signed — small integer immediates (`LOADI`, −32768…32767).
-- `sJ`: 24-bit signed — jump offsets (M3), relative to the next instruction.
+- `sJ`: 24-bit signed — jump offsets (`JMP`), relative to the next instruction.
 
 Lua 5.4 packs fields more tightly (7-bit opcode, 17-bit Bx); valo uses
 byte-aligned fields because decoding is just shifts and the format is easier
@@ -73,7 +73,7 @@ mnemonic table (`OpCode::name`) and the format table (`OpCode::format`)
 cannot disagree. **All 41 opcodes of the MVP plan are declared now**, so their
 numbers never change; the VM implements them milestone by milestone.
 
-Implemented in M1:
+Implemented so far (M1–M3):
 
 | Opcode | Format | Semantics |
 |--------|--------|-----------|
@@ -81,12 +81,23 @@ Implemented in M1:
 | `RETURN A` | A | return `R[A]` from the function |
 | `LOADI A sBx` | AsBx | `R[A] = sBx` (small integer immediate) |
 | `LOADK A Bx` | ABx | `R[A] = K[Bx]` (constant pool) |
-| `ADD/SUB/MUL/IDIV/MOD/POW A B C` | ABC | `R[A] = R[B] op R[C]` |
+| `LOADBOOL A B` | AB | `R[A] = (B != 0)` |
+| `ADD/SUB/MUL/DIV/IDIV/MOD/POW A B C` | ABC | `R[A] = R[B] op R[C]` (`DIV` = true division, always float) |
 | `NEG A B` | AB | `R[A] = -R[B]` |
+| `NOT A B` | AB | `R[A] = not R[B]` (bool only) |
+| `EQ/NE/LT/LE A B C` | ABC | `R[A] = R[B] cmp R[C]`; `>`/`>=` are `LT`/`LE` with B and C swapped |
+| `MOVE A B` | AB | `R[A] = R[B]` |
+| `GETGLOBAL A Bx` | ABx | `R[A] = G[Bx]` (R0302 if not set yet) |
+| `SETGLOBAL A Bx` | ABx | `G[Bx] = R[A]` |
+| `TEST A B` | AB | `R[A]` must be a bool (R0203); if `R[A] != B`, skip the next instruction |
+| `JMP sJ` | sJ | `pc += sJ` |
+| `ASSERT A B` | AB | `R[A]` must be true, else R0701; with B=1, `R[A+1]`/`R[A+2]` hold the two sides for the message |
 | `ECHO A` | A | print `R[A]` (debug aid for `--echo`) |
 
-Declared for later: `MOVE`, `GETGLOBAL`, `SETGLOBAL` (M2); `DIV`, `LOADBOOL`,
-`EQ`, `NE`, `LT`, `LE`, `NOT`, `TEST`, `JMP`, `ASSERT` (M3); `CALL`,
+`TEST` + `JMP` is Lua's branch pair: `TEST` decides whether the following
+`JMP` runs (it runs when `R[A] == B`).
+
+Declared for later: `CALL`,
 `CLOSURE` (M4); `TAILCALL` (M5); `GETUPVAL`, `GETSELF` (M6); `CONCAT`,
 `LOADNONE`, `TRY` (M7); `NEWLIST`, `INDEX` (M8); `NEWTUPLE`, `NEWDICT`,
 `GETFIELD` (M8b); `LOADMISSING`, `JMPIFSET` (M4b); `CHECKTYPE` (M10). The
@@ -113,10 +124,11 @@ pub struct Proto {
     pub def_span: SrcSpan,      // where the function is defined
 }
 
-pub enum Const { Int(i64) }     // M3 adds Float, M7 Str
+pub enum Const { Int(i64), Float(f64) }     // M7 adds Str
 
 pub struct Program {
     pub main: Rc<Proto>,        // top-level code
+    pub globals: Vec<GlobalDesc>, // one per top-level `let` (name, for messages)
     pub source_name: Rc<str>,   // file name for messages
     pub line_starts: Vec<u32>,  // line index (chapter 2)
 }
@@ -125,10 +137,11 @@ pub struct Program {
 ### The constant pool
 
 Values that do not fit in an instruction are stored once in the prototype's
-`consts` table and loaded by index. In M1 that is any integer outside
-−32768…32767: `70000` becomes `LOADK 1 0` with `consts[0] = Int(70000)`. Each
-distinct value is stored once (deduplication in codegen, chapter 6). Strings
-and floats will use the same mechanism.
+`consts` table and loaded by index: any integer outside −32768…32767
+(`70000` becomes `LOADK 1 0` with `consts[0] = Int(70000)`) and every float.
+Each distinct value is stored once (deduplication in codegen, chapter 6;
+floats are compared by bit pattern, so `0.0` and `-0.0` stay distinct).
+Strings (M7) will use the same mechanism.
 
 ### ProtoBuilder
 

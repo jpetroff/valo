@@ -235,6 +235,12 @@ Global style: Python-like, indentation blocks (INDENT/DEDENT/NEWLINE), no `;`, s
 - No unary `+`. `-2 ** 2` = `-(2 ** 2)`, `2 ** -1` allowed (Python).
 - `int` range is i64; the literal `9223372036854775808` is out of range (E0002) even after `-`, so `i64::MIN` is written `-9223372036854775807 - 1`.
 
+## Implementation notes from M2–M3 (PROVISIONAL, chosen while building; not yet confirmed by the user)
+- Block form of `if` (S6): after an inline branch, `elif`/`else` on the next line at the same indentation continue the `if` (`if c: 1` NEWLINE `else: 2`). Branches can mix inline and indented forms.
+- A block's last line must be an expression (E0104) — user-confirmed for M2; the top level of a file may end with `let`.
+- `let _ = expr` evaluates and discards; `_` used as a value is an error (E0206).
+- `assert expr` is an expression of type `()` usable anywhere an expression is (plan D29).
+
 ## Composite example (rounds 1–6; builtin names provisional)
 
 ```

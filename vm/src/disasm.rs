@@ -122,6 +122,7 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
 fn const_repr(k: &Const) -> String {
     match k {
         Const::Int(n) => n.to_string(),
+        Const::Float(x) => format!("{x:?}"),
     }
 }
 
@@ -129,5 +130,6 @@ fn const_repr(k: &Const) -> String {
 fn const_entry(k: &Const) -> String {
     match k {
         Const::Int(n) => format!("int {n}"),
+        Const::Float(x) => format!("float {x:?}"),
     }
 }

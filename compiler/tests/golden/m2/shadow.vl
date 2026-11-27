@@ -1,0 +1,8 @@
+# an inner binding shadows the outer one only inside its block
+let x = 1
+x
+if true:
+    let x = 2
+    x
+else: 0
+x

@@ -1,0 +1,8 @@
+# a block computes intermediate locals; its value is the last line
+let price = 120
+let total = if price > 100:
+    let discount = price // 10
+    let net = price - discount
+    net * 2
+else: price
+total

@@ -37,7 +37,9 @@
 //! | compile a new top-level item (`fn`, `def`)  | `compile`, the `for item in &program.items` loop  |
 //! | change how names are loaded                 | `FuncState::name` (globals: `GETGLOBAL`, locals: `MOVE`) |
 //! | map an operator to an opcode                | `ExprKind::Binary` arm (`let opcode = match op`) |
-//! | add a constant type (float, string)         | a dedup map like `int_consts` + `Const` in `vm/src/chunk.rs` |
+//! | add a constant type (string, M7)            | `ConstKey` + `FuncState::constant` + `Const` in `vm/src/chunk.rs` |
+//! | compile a branch / jump                     | `emit_jmp` + `patch_here` (backpatching); see `if_expr`, `logic`, `compare` |
+//! | change how blocks use registers             | `FuncState::block`                               |
 //! | add an optimisation (constant folding…)     | `FuncState::expr` (see the `-<literal>` fold)    |
 //! | change register limits                      | `MAX_REGS`, `FuncState::alloc`                   |
 //!
@@ -55,9 +57,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use valo_vm::chunk::{Const, GlobalDesc, Program, Proto, SrcSpan};
-use valo_vm::opcode::{Instr, OpCode};
+use valo_vm::opcode::{Instr, MAX_SJ, MIN_SJ, OpCode};
 
-use crate::ast::{self, BinOp, Expr, ExprKind, Item, UnaryOp};
+use crate::ast::{self, BinOp, CmpLink, CmpOp, Expr, ExprKind, Item, LogicOp, UnaryOp};
 use crate::diagnostic::Diagnostic;
 use crate::resolve::{BindingId, GlobalId, Res, Resolved};
 use crate::span::{SourceMap, Span};
@@ -139,9 +141,17 @@ struct FuncState<'r> {
     /// High-water mark of `free_reg` = number of registers the frame needs.
     max_reg: u16,
     /// Value → index in `proto.consts`, so each constant is stored once.
-    int_consts: HashMap<i64, u16>,
+    consts: HashMap<ConstKey, u16>,
     /// Errors found while generating code.
     diags: Vec<Diagnostic>,
+}
+
+/// Constant-pool deduplication key. Floats are compared by bit pattern, so
+/// `0.0` and `-0.0` stay distinct (and `NaN` would be a valid key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ConstKey {
+    Int(i64),
+    Float(u64),
 }
 
 /// Registers are 8-bit operands.
@@ -163,7 +173,7 @@ impl<'r> FuncState<'r> {
             },
             free_reg: 0,
             max_reg: 0,
-            int_consts: HashMap::new(),
+            consts: HashMap::new(),
             diags: Vec::new(),
         }
     }
@@ -212,12 +222,16 @@ impl<'r> FuncState<'r> {
         self.free_reg = self.free_reg.min(reg as u16);
     }
 
-    /// Index of `n` in the constant pool, adding it if new.
-    fn int_const(&mut self, n: i64, span: Span) -> u16 {
-        if let Some(&k) = self.int_consts.get(&n) {
-            return k;
+    /// Index of a constant in the pool, adding it if new.
+    fn constant(&mut self, k: Const, span: Span) -> u16 {
+        let key = match k {
+            Const::Int(n) => ConstKey::Int(n),
+            Const::Float(x) => ConstKey::Float(x.to_bits()),
+        };
+        if let Some(&i) = self.consts.get(&key) {
+            return i;
         }
-        let Ok(k) = u16::try_from(self.proto.consts.len()) else {
+        let Ok(i) = u16::try_from(self.proto.consts.len()) else {
             if !self.diags.iter().any(|d| d.code == "E0301") {
                 self.diags.push(Diagnostic::new(
                     "E0301",
@@ -227,9 +241,9 @@ impl<'r> FuncState<'r> {
             }
             return 0;
         };
-        self.proto.consts.push(Const::Int(n));
-        self.int_consts.insert(n, k);
-        k
+        self.proto.consts.push(k);
+        self.consts.insert(key, i);
+        i
     }
 
     /// A global's index as a 16-bit `Bx` operand (E0301 if too many).
@@ -270,10 +284,45 @@ impl<'r> FuncState<'r> {
         match i16::try_from(n) {
             Ok(i) => self.emit(Instr::asbx(OpCode::LOADI, dst, i), span),
             Err(_) => {
-                let k = self.int_const(n, span);
+                let k = self.constant(Const::Int(n), span);
                 self.emit(Instr::abx(OpCode::LOADK, dst, k), span);
             }
         }
+    }
+
+    /// Load a float (always from the constant pool).
+    fn load_float(&mut self, x: f64, dst: u8, span: Span) {
+        let k = self.constant(Const::Float(x), span);
+        self.emit(Instr::abx(OpCode::LOADK, dst, k), span);
+    }
+
+    /// Emit a `JMP` with a placeholder offset; returns its index for
+    /// `patch_here` ("backpatching": the target is not known yet).
+    fn emit_jmp(&mut self, span: Span) -> usize {
+        self.emit(Instr::sj(OpCode::JMP, 0), span);
+        self.proto.code.len() - 1
+    }
+
+    /// Point the `JMP` at index `at` to the next instruction to be emitted.
+    fn patch_here(&mut self, at: usize) {
+        // Offsets are relative to the instruction after the jump.
+        let offset = self.proto.code.len() as i64 - (at as i64 + 1);
+        if !(i64::from(MIN_SJ)..=i64::from(MAX_SJ)).contains(&offset) {
+            if !self.diags.iter().any(|d| d.code == "E0301") {
+                let s = self.proto.spans[at];
+                let span = Span {
+                    start: s.start,
+                    end: s.end,
+                };
+                self.diags.push(Diagnostic::new(
+                    "E0301",
+                    "jump too far: a branch spans more than 8 million instructions",
+                    span,
+                ));
+            }
+            return;
+        }
+        self.proto.code[at] = Instr::sj(OpCode::JMP, offset as i32);
     }
 
     /// Evaluate `e` into register `dst`.
@@ -281,6 +330,10 @@ impl<'r> FuncState<'r> {
     fn expr(&mut self, e: &Expr, dst: u8) {
         match &e.kind {
             ExprKind::Int(n) => self.load_int(*n, dst, e.span),
+            ExprKind::Float(x) => self.load_float(*x, dst, e.span),
+            ExprKind::Bool(b) => {
+                self.emit(Instr::abc(OpCode::LOADBOOL, dst, u8::from(*b), 0), e.span)
+            }
             ExprKind::Name(_) => self.name(e, dst),
             ExprKind::Unary {
                 op: UnaryOp::Neg,
@@ -288,38 +341,27 @@ impl<'r> FuncState<'r> {
             } => {
                 // Fold `-<literal>`: same value, no NEG at runtime.
                 // (`-n` cannot overflow: the lexer only produces 0..=i64::MAX.)
-                if let ExprKind::Int(n) = operand.kind {
-                    return self.load_int(-n, dst, e.span);
+                match operand.kind {
+                    ExprKind::Int(n) => return self.load_int(-n, dst, e.span),
+                    ExprKind::Float(x) => return self.load_float(-x, dst, e.span),
+                    _ => {}
                 }
                 self.expr(operand, dst);
                 self.emit(Instr::abc(OpCode::NEG, dst, dst, 0), e.span);
             }
-            ExprKind::Binary {
-                op,
-                op_span,
-                lhs,
-                rhs,
-            } => {
+            ExprKind::Not(operand) => {
+                self.expr(operand, dst);
+                self.emit(Instr::abc(OpCode::NOT, dst, dst, 0), e.span);
+            }
+            ExprKind::Binary { op, lhs, rhs, .. } => {
                 let opcode = match op {
                     BinOp::Add => OpCode::ADD,
                     BinOp::Sub => OpCode::SUB,
                     BinOp::Mul => OpCode::MUL,
+                    BinOp::Div => OpCode::DIV,
                     BinOp::IDiv => OpCode::IDIV,
                     BinOp::Mod => OpCode::MOD,
                     BinOp::Pow => OpCode::POW,
-                    // EXTEND (M3): `/` becomes OpCode::DIV once floats exist.
-                    BinOp::Div => {
-                        self.diags.push(
-                            Diagnostic::new(
-                                "E0009",
-                                "true division `/` is not supported yet",
-                                *op_span,
-                            )
-                            .label("`/` always produces a float; floats are not implemented yet")
-                            .help("use `//` for integer floor division"),
-                        );
-                        return;
-                    }
                 };
                 // Left operand straight into dst, right operand into a fresh
                 // temporary, combine into dst, release the temporary.
@@ -329,8 +371,189 @@ impl<'r> FuncState<'r> {
                 self.emit(Instr::abc(opcode, dst, dst, tmp), e.span);
                 self.free_to(tmp);
             }
+            ExprKind::Logic {
+                op,
+                op_span,
+                lhs,
+                rhs,
+            } => self.logic(*op, *op_span, lhs, rhs, dst),
+            ExprKind::Compare { first, rest } => self.compare(first, rest, dst),
+            ExprKind::If {
+                cond,
+                then_br,
+                else_br,
+            } => self.if_expr(e, cond, then_br, else_br, dst),
+            ExprKind::Block(items) => self.block(items, dst),
+            ExprKind::Assert(inner) => self.assert(inner, dst),
         }
     }
+
+    /// Indented block: each `let` gets the next free register for the rest
+    /// of the block; the last expression goes into `dst`; then every
+    /// register the block allocated is released, so the next block reuses
+    /// them.
+    fn block(&mut self, items: &[Item], dst: u8) {
+        let mark = self.free_reg;
+        for (i, item) in items.iter().enumerate() {
+            let last = i + 1 == items.len();
+            match item {
+                Item::Expr(e) if last => self.expr(e, dst),
+                Item::Expr(e) => {
+                    let tmp = self.alloc(e.span);
+                    self.expr(e, tmp);
+                    self.free_to(tmp);
+                }
+                Item::Let(b) => {
+                    let r = self.alloc(b.init.span);
+                    self.expr(&b.init, r);
+                    match self.resolved.lets.get(&b.id).copied().flatten() {
+                        Some(Res::Local(id)) => {
+                            self.locals.insert(id, r);
+                        }
+                        // `let _ = …`: evaluated, then dropped.
+                        _ => self.free_to(r),
+                    }
+                }
+            }
+        }
+        self.free_to(mark as u8);
+    }
+
+    /// ```text
+    ///       cond → dst
+    ///       TEST dst 0        ; skip the JMP if cond is true
+    ///       JMP  else
+    ///       then → dst
+    ///       JMP  end
+    /// else: else → dst
+    /// end:
+    /// ```
+    fn if_expr(&mut self, e: &Expr, cond: &Expr, then_br: &Expr, else_br: &Expr, dst: u8) {
+        // The condition can use `dst`: the branches overwrite it anyway.
+        self.expr(cond, dst);
+        self.emit(Instr::abc(OpCode::TEST, dst, 0, 0), cond.span);
+        let to_else = self.emit_jmp(cond.span);
+        self.expr(then_br, dst);
+        let to_end = self.emit_jmp(e.span);
+        self.patch_here(to_else);
+        self.expr(else_br, dst);
+        self.patch_here(to_end);
+    }
+
+    /// Short circuit: `a and b` = if a then b else false; `a or b` = if a
+    /// then true else b. The result is the last operand evaluated.
+    ///
+    /// ```text
+    ///      lhs → dst
+    ///      TEST dst 0|1     ; and: jump when false; or: jump when true
+    ///      JMP  end
+    ///      rhs → dst
+    ///      [TEST dst 0; JMP +0]   only if rhs is not syntactically a bool
+    /// end:
+    /// ```
+    fn logic(&mut self, op: LogicOp, op_span: Span, lhs: &Expr, rhs: &Expr, dst: u8) {
+        self.expr(lhs, dst);
+        let jump_when = u8::from(op == LogicOp::Or);
+        self.emit(Instr::abc(OpCode::TEST, dst, jump_when, 0), lhs.span);
+        let to_end = self.emit_jmp(op_span);
+        self.expr(rhs, dst);
+        if !is_bool_syntax(rhs) {
+            // Operands must be bools (syntax.md S11). TEST checks the type;
+            // both of its outcomes continue at the same place.
+            self.emit(Instr::abc(OpCode::TEST, dst, 0, 0), rhs.span);
+            self.emit(Instr::sj(OpCode::JMP, 0), rhs.span);
+        }
+        self.patch_here(to_end);
+    }
+
+    /// Comparison chain `a op1 b op2 c …` (Python): each operand evaluated
+    /// once, in order; stop at the first false link.
+    ///
+    /// ```text
+    ///      a → dst;  b → t1
+    ///      op1 dst dst t1
+    ///      TEST dst 0; JMP end
+    ///      c → t2
+    ///      op2 dst t1 t2
+    /// end:
+    /// ```
+    fn compare(&mut self, first: &Expr, rest: &[CmpLink], dst: u8) {
+        self.expr(first, dst);
+        let mark = self.free_reg;
+        let mut lhs_reg = dst;
+        let mut lhs_span = first.span;
+        let mut to_end = Vec::new();
+        for (i, link) in rest.iter().enumerate() {
+            let r = self.alloc(link.rhs.span);
+            self.expr(&link.rhs, r);
+            self.emit_cmp(link.op, dst, lhs_reg, r, lhs_span.to(link.rhs.span));
+            if i + 1 < rest.len() {
+                self.emit(Instr::abc(OpCode::TEST, dst, 0, 0), link.op_span);
+                to_end.push(self.emit_jmp(link.op_span));
+            }
+            lhs_reg = r;
+            lhs_span = link.rhs.span;
+        }
+        self.free_to(mark as u8);
+        for at in to_end {
+            self.patch_here(at);
+        }
+    }
+
+    /// `R[dst] = R[l] op R[r]`; `>`/`>=` are `<`/`<=` with swapped operands (D18).
+    fn emit_cmp(&mut self, op: CmpOp, dst: u8, l: u8, r: u8, span: Span) {
+        let (opcode, b, c) = match op {
+            CmpOp::Eq => (OpCode::EQ, l, r),
+            CmpOp::Ne => (OpCode::NE, l, r),
+            CmpOp::Lt => (OpCode::LT, l, r),
+            CmpOp::Le => (OpCode::LE, l, r),
+            CmpOp::Gt => (OpCode::LT, r, l),
+            CmpOp::Ge => (OpCode::LE, r, l),
+        };
+        self.emit(Instr::abc(opcode, dst, b, c), span);
+    }
+
+    /// `assert e` (D29). For a single comparison `a op b`, both sides are
+    /// kept in the two registers after the result, so a failure can print
+    /// `left:` and `right:` (`ASSERT t 1`). The `ASSERT` instruction's span
+    /// is `e`, which the error renderer quotes. Value: `()`.
+    fn assert(&mut self, inner: &Expr, dst: u8) {
+        // Reuse dst as the result register when it is the topmost one, so
+        // t, t+1, t+2 are consecutive.
+        let t = if u16::from(dst) + 1 == self.free_reg {
+            dst
+        } else {
+            self.alloc(inner.span)
+        };
+        match &inner.kind {
+            ExprKind::Compare { first, rest } if rest.len() == 1 => {
+                let l = self.alloc(first.span);
+                let r = self.alloc(rest[0].rhs.span);
+                self.expr(first, l);
+                self.expr(&rest[0].rhs, r);
+                self.emit_cmp(rest[0].op, t, l, r, inner.span);
+                self.emit(Instr::abc(OpCode::ASSERT, t, 1, 0), inner.span);
+                self.free_to(l);
+            }
+            _ => {
+                self.expr(inner, t);
+                self.emit(Instr::abc(OpCode::ASSERT, t, 0, 0), inner.span);
+            }
+        }
+        if t != dst {
+            self.free_to(t);
+        }
+        self.emit(Instr::abc(OpCode::LOADUNIT, dst, 0, 0), inner.span);
+    }
+}
+
+/// Whether `e` produces a bool by construction (no runtime check needed when
+/// it is the right operand of `and`/`or`).
+fn is_bool_syntax(e: &Expr) -> bool {
+    matches!(
+        e.kind,
+        ExprKind::Bool(_) | ExprKind::Not(_) | ExprKind::Compare { .. } | ExprKind::Logic { .. }
+    )
 }
 
 // Tests: `cargo test -p valo-compiler codegen`.
@@ -343,6 +566,45 @@ mod tests {
     #[test]
     fn toplevel_globals() {
         insta::assert_snapshot!(disasm("let a = 1\nlet b = a + 2\nlet _ = b\nb * a"));
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__codegen__tests__nested_conditional.snap
+    #[test]
+    fn nested_conditional() {
+        insta::assert_snapshot!(disasm(
+            "let n = 5\nif n < 0: -1\nelif n == 0: 0\nelse: 1\nif n > 2 then 1.5 else 2.5"
+        ));
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__codegen__tests__block_registers_are_reused.snap
+    #[test]
+    fn block_registers_are_reused() {
+        // Hand count: the `if` value goes to R0 (dst). First block: a → R1,
+        // b → R2, `a + b` uses R0 and temp R3 → 4 registers. Second block:
+        // c → R1 again (the first block's registers were released) → no more.
+        let d = disasm(
+            "if true:\n    let a = 1\n    let b = 2\n    a + b\nelse: 0\n\
+             if true:\n    let c = 3\n    c\nelse: 0",
+        );
+        assert!(d.starts_with("function <main> arity=0 regs=4 "), "{d}");
+        insta::assert_snapshot!(d);
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__codegen__tests__chain_logic_assert.snap
+    #[test]
+    fn chain_logic_assert() {
+        insta::assert_snapshot!(disasm(
+            "let x = 3\n0 < x <= 10\nx > 1 and x\nx > 1 or false\nassert x * 2 == 6\nassert not false"
+        ));
+    }
+
+    #[test]
+    fn float_constants_keep_signed_zero() {
+        let d = disasm("0.0 + -0.0 + 0.0 + 1.5");
+        assert!(
+            d.contains("constants:\n  0  float 0.0\n  1  float -0.0\n  2  float 1.5\n"),
+            "{d}"
+        );
     }
 
     fn disasm(src: &str) -> String {
@@ -368,9 +630,27 @@ mod tests {
 
     #[test]
     fn register_limit_is_reported() {
-        let deep = format!("{}1{}", "(1 + ".repeat(300), ")".repeat(300));
-        let sm = SourceMap::new("t.vl", deep);
+        // A comparison chain keeps one register per operand (no recursion).
+        let operands: Vec<String> = (0..300).map(|i| i.to_string()).collect();
+        let sm = SourceMap::new("t.vl", operands.join(" < "));
         let err = compile_source(&sm, CompileOptions::default()).unwrap_err();
         assert_eq!(err.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0301"]);
+    }
+
+    #[test]
+    fn deep_nesting_compiles() {
+        // The deepest expression the parser accepts goes through every pass
+        // on a test thread's small stack.
+        let n = crate::parser::MAX_DEPTH as usize / 2 - 1;
+        let src = format!("{}1{}", "(1 + ".repeat(n), ")".repeat(n));
+        let sm = SourceMap::new("t.vl", src);
+        assert!(compile_source(&sm, CompileOptions::default()).is_ok());
+        let ifs = format!(
+            "{}1{}",
+            "if true then ".repeat(n / 2),
+            " else 0".repeat(n / 2)
+        );
+        let sm = SourceMap::new("t.vl", ifs);
+        assert!(compile_source(&sm, CompileOptions::default()).is_ok());
     }
 }

@@ -1,0 +1,9 @@
+[E0104] Error: block ends with a `let` binding
+   ╭─[ block_ends_with_let.vl:2:9 ]
+   │
+ 2 │     let t = 1
+   │         ──┬──  
+   │           ╰──── a block's value is its last line, which must be an expression
+   │ 
+   │ Help: add a line with the block's value after this binding, e.g. `t`
+───╯

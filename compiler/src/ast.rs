@@ -10,7 +10,7 @@
 //!
 //! **Textbook chapter:** `docs/04-syntax-analysis.md`.
 //!
-//! ## Structure (M2)
+//! ## Structure (M3)
 //!
 //! ```text
 //! Program { items: Vec<Item> }
@@ -18,10 +18,16 @@
 //!     ::Let(Binding)                     `let name (: type)? = init`
 //! Binding { id, name, name_span, ann: Option<TypeExpr>, init: Expr }
 //! Expr { id: NodeId, span: Span, kind: ExprKind }
-//! ExprKind::Int(i64)
+//! ExprKind::Int(i64) | Float(f64) | Bool(bool)
 //!         ::Name(String)                 a reference to a binding
-//!         ::Unary  { op: UnaryOp, operand: Box<Expr> }
-//!         ::Binary { op: BinOp, op_span, lhs: Box<Expr>, rhs: Box<Expr> }
+//!         ::Unary  { op: UnaryOp, operand }          `-x`
+//!         ::Not(operand)                             `not x`
+//!         ::Binary { op: BinOp, op_span, lhs, rhs }  arithmetic
+//!         ::Logic  { op: LogicOp, op_span, lhs, rhs } `and` / `or`
+//!         ::Compare { first, rest: Vec<CmpLink> }    `a < b <= c` (one node per chain)
+//!         ::If { cond, then_br, else_br }            both forms; `elif` = nested If
+//!         ::Block(Vec<Item>)                         indented block; last item is an Expr
+//!         ::Assert(expr)                             `assert e`, value `()`
 //! TypeExpr { span, kind: TypeKind }      annotations (checked from M10)
 //! ```
 //!
@@ -129,8 +135,48 @@ pub struct Expr {
 pub enum ExprKind {
     /// Integer literal.
     Int(i64),
+    /// Float literal.
+    Float(f64),
+    /// `true` / `false`.
+    Bool(bool),
     /// A name reference (resolved by `resolve.rs`).
     Name(String),
+    /// `not x` (bool only).
+    Not(Box<Expr>),
+    /// Short-circuit `and` / `or` (bool operands only, syntax.md S11).
+    Logic {
+        /// Operator.
+        op: LogicOp,
+        /// Span of the operator keyword.
+        op_span: Span,
+        /// Left operand (always evaluated).
+        lhs: Box<Expr>,
+        /// Right operand (evaluated only if needed).
+        rhs: Box<Expr>,
+    },
+    /// A comparison chain `first op1 x1 op2 x2 …` (Python): every operand
+    /// is evaluated at most once, and evaluation stops at the first false link.
+    Compare {
+        /// Leftmost operand.
+        first: Box<Expr>,
+        /// One entry per operator (at least one).
+        rest: Vec<CmpLink>,
+    },
+    /// Conditional expression (both forms of syntax.md S6; `elif` is a
+    /// nested `If` in `else_br`). Both branches are required (D22).
+    If {
+        /// Condition (must be a bool at runtime).
+        cond: Box<Expr>,
+        /// Value when true.
+        then_br: Box<Expr>,
+        /// Value when false.
+        else_br: Box<Expr>,
+    },
+    /// An indented block: bindings and expressions; its value is the last
+    /// item, which the parser guarantees is an `Item::Expr` (E0104).
+    Block(Vec<Item>),
+    /// `assert e`: runtime error R0701 if `e` is false; value `()` (D29).
+    Assert(Box<Expr>),
     /// Prefix operator.
     Unary {
         /// Operator.
@@ -149,6 +195,57 @@ pub enum ExprKind {
         /// Right operand.
         rhs: Box<Expr>,
     },
+}
+
+/// One `op operand` step of a comparison chain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CmpLink {
+    /// Operator.
+    pub op: CmpOp,
+    /// Span of the operator token.
+    pub op_span: Span,
+    /// Right operand.
+    pub rhs: Expr,
+}
+
+/// Comparison operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    /// `==`
+    Eq,
+    /// `!=`
+    Ne,
+    /// `<`
+    Lt,
+    /// `<=`
+    Le,
+    /// `>`
+    Gt,
+    /// `>=`
+    Ge,
+}
+
+impl CmpOp {
+    /// Source spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CmpOp::Eq => "==",
+            CmpOp::Ne => "!=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+        }
+    }
+}
+
+/// Short-circuit logic operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicOp {
+    /// `and`
+    And,
+    /// `or`
+    Or,
 }
 
 /// Prefix operators.
@@ -197,7 +294,42 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
             ExprKind::Int(n) => write!(f, "{n}"),
+            ExprKind::Float(x) => write!(f, "{x:?}"),
+            ExprKind::Bool(b) => write!(f, "{b}"),
             ExprKind::Name(n) => f.write_str(n),
+            ExprKind::Not(e) => write!(f, "(not {e})"),
+            ExprKind::Logic { op, lhs, rhs, .. } => {
+                let op = match op {
+                    LogicOp::And => "and",
+                    LogicOp::Or => "or",
+                };
+                write!(f, "({op} {lhs} {rhs})")
+            }
+            // One link prints like a binary operator; longer chains list
+            // operands and operators in source order.
+            ExprKind::Compare { first, rest } if rest.len() == 1 => {
+                write!(f, "({} {first} {})", rest[0].op.as_str(), rest[0].rhs)
+            }
+            ExprKind::Compare { first, rest } => {
+                write!(f, "(chain {first}")?;
+                for l in rest {
+                    write!(f, " {} {}", l.op.as_str(), l.rhs)?;
+                }
+                f.write_str(")")
+            }
+            ExprKind::If {
+                cond,
+                then_br,
+                else_br,
+            } => write!(f, "(if {cond} {then_br} {else_br})"),
+            ExprKind::Block(items) => {
+                f.write_str("(block")?;
+                for i in items {
+                    write!(f, " {i}")?;
+                }
+                f.write_str(")")
+            }
+            ExprKind::Assert(e) => write!(f, "(assert {e})"),
             ExprKind::Unary {
                 op: UnaryOp::Neg,
                 operand,

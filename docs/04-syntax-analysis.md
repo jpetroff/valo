@@ -67,7 +67,12 @@ File: [`compiler/src/ast.rs`](../compiler/src/ast.rs)
 
 ```rust
 pub struct Program { pub items: Vec<Item> }        // the whole file
-pub enum Item { Expr(Expr) }                        // M1: one expression per line
+pub enum Item {
+    Expr(Expr),                                     // an expression line
+    Let(Binding),                                   // let name (: type)? = init
+}
+pub struct Binding { pub id: NodeId, pub name: String, pub name_span: Span,
+                     pub ann: Option<TypeExpr>, pub init: Expr }
 
 pub struct Expr {
     pub id: NodeId,          // unique number, for side tables in later passes
@@ -75,20 +80,36 @@ pub struct Expr {
     pub kind: ExprKind,
 }
 pub enum ExprKind {
-    Int(i64),
+    Int(i64), Float(f64), Bool(bool),
+    Name(String),                                                     // x
     Unary  { op: UnaryOp, operand: Box<Expr> },                       // -x
+    Not(Box<Expr>),                                                   // not x
     Binary { op: BinOp, op_span: Span, lhs: Box<Expr>, rhs: Box<Expr> },
+    Logic  { op: LogicOp, op_span: Span, lhs: Box<Expr>, rhs: Box<Expr> }, // and, or
+    Compare { first: Box<Expr>, rest: Vec<CmpLink> },                 // a < b <= c
+    If { cond: Box<Expr>, then_br: Box<Expr>, else_br: Box<Expr> },
+    Block(Vec<Item>),                                                 // indented block
+    Assert(Box<Expr>),
 }
-pub enum UnaryOp { Neg }
-pub enum BinOp { Add, Sub, Mul, Div, IDiv, Mod, Pow }
+pub struct CmpLink { pub op: CmpOp, pub op_span: Span, pub rhs: Expr }
 ```
+
+Type annotations have their own small tree, `TypeExpr` (`int`, `list[int]`,
+`int | none`, `T ! error`, `(int, int) -> int`, tuples, `()`); it is printed
+as S-expressions too (`(list int)`, `(! (| int none) error)`).
 
 - Children are `Box<Expr>`: a heap pointer, needed because `Expr` contains
   `Expr` (chapter 1, *Ownership and borrowing*).
-- `NodeId` will let the name resolver (M2) and type checks (M10) attach
-  information to nodes in separate maps instead of mutating the tree.
+- `NodeId` lets the name resolver (`resolve.rs`, chapter 6) and later type
+  checks (M10) attach information to nodes in separate maps instead of
+  mutating the tree.
 - `op_span` keeps the operator's own position, for errors that should point
-  at the operator (e.g. "`/` is not supported yet").
+  at the operator.
+- `elif` has no node of its own: `if a: x elif b: y else: z` is
+  `If(a, x, If(b, y, z))`.
+- A comparison chain is *one* node, not nested binary nodes: `a < b <= c`
+  means `a < b and b <= c` with `b` evaluated once, which nested nodes cannot
+  express.
 - Parentheses produce no node: `(1 + 2)` is just the `Binary` node with a
   span widened to include the parentheses.
 
@@ -112,12 +133,18 @@ return it).
 ### Statements: recursive descent
 
 ```text
-program := ( NEWLINE | DEDENT | item )* EOF      Parser::program
-item    := expr ( NEWLINE | EOF )                Parser::item
+program := ( NEWLINE | DEDENT | item )* EOF          Parser::program
+item    := ( let_binding | expr ) ( NEWLINE | EOF )  Parser::item
+let_binding := 'let' NAME ( ':' type )? '=' expr     Parser::let_binding
 ```
 
-An `INDENT` at top level is an error in M1 (no construct opens a block yet):
-"E0101 unexpected indentation".
+An `INDENT` that no `:` opened is an error: "E0101 unexpected indentation".
+
+Type annotations use one function per precedence level, the
+recursive-descent version of the Pratt table: `type_expr` (`->`,
+right-associative) → `type_result` (`!`) → `type_union` (`|`) →
+`type_primary` (a name, `name[args]`, `()`, `(type)`, a tuple). `(A, B) -> C`
+is a function type whose parameters are the tuple's elements.
 
 ### Expressions: the Pratt loop
 
@@ -126,14 +153,25 @@ An `INDENT` at top level is an error in M1 (no construct opens a block yet):
 
 | Operator | `l_bp` | `r_bp` | Effect |
 |----------|--------|--------|--------|
-| `+` `-` | 10 | 11 | left-assoc, weakest |
+| `or` | 3 | 4 | left-assoc, weakest |
+| `and` | 5 | 6 | left-assoc |
+| prefix `not` | — | 7 | `PREFIX_NOT_BP`: `not a == b` is `not (a == b)` |
+| `== != < <= > >=` | 8 | 9 | chained (see below) |
+| `+` `-` | 10 | 11 | left-assoc |
 | `*` `/` `//` `%` | 20 | 21 | left-assoc |
 | prefix `-` | — | 30 | `PREFIX_NEG_BP` |
 | `**` | 41 | 40 | right-assoc, strongest |
 
-`Parser::prefix` handles what can *start* an expression: an `Int` literal,
-prefix `-` (parses its operand with `expr(30)`), or `(` (parses an
-expression with `expr(0)` and expects `)`).
+`Parser::prefix` handles what can *start* an expression: a literal (`Int`,
+`Float`, `true`, `false`), a name, prefix `-` (parses its operand with
+`expr(30)`), `not` (with `expr(7)`), `(` (parses an expression with `expr(0)`
+and expects `)`), `if` and `assert`.
+
+**Comparison chains.** When the loop meets a comparison operator it calls
+`compare_chain`, which keeps consuming `op operand` pairs (operands parsed
+with `expr(9)`, so they contain no comparison themselves) for as long as the
+next token is a comparison, and builds one `Compare` node. `0 < x <= 10 != y`
+gives `(chain 0 < x <= 10 != y)`.
 
 Worked example — `-2 ** 2`, which Python (and valo) read as `-(2 ** 2)`:
 
@@ -171,10 +209,48 @@ such cases; its expected output is in
 (expr (* (** 2 (neg 1)) 3))
 ```
 
+### Blocks and `if`: indentation in the grammar
+
+```text
+if_expr := 'if' expr 'then' expr 'else' expr                      inline form
+         | 'if' expr ':' branch ( 'elif' expr ':' branch )* 'else' ':' branch
+branch  := NEWLINE INDENT item+ DEDENT  |  expr                    Parser::branch
+```
+
+A branch after `:` is either the rest of the line or an indented block. The
+token stream of
+
+```text
+if n < 0: -1
+else:
+    let m = n * 2
+    m
+```
+
+is `if n < 0 : - 1 NEWLINE else : NEWLINE INDENT let m = n * 2 NEWLINE m
+NEWLINE DEDENT`. Two layout rules make this parse:
+
+1. After an inline branch, `NEWLINE` followed by `elif`/`else` is skipped
+   (`skip_newline_before_else`): the `else` line continues the `if`.
+2. The lexer emits the line's `NEWLINE` *before* the `DEDENT` that closes a
+   block, so a line ending with a block has nothing left to end it.
+   `end_of_line` therefore also accepts a just-consumed `DEDENT`, and
+   `sync_line` (error recovery) skips nothing after one.
+
+A block's value is its last line, which must be an expression (E0104 for a
+trailing `let`). Every `if` needs an `else` (E0102): it is an expression,
+and its value must exist in both cases (plan D22).
+
+### Nesting limit
+
+`expr` counts its recursion depth; beyond `MAX_DEPTH` (200, about 100 nested
+parentheses) it reports E0105 instead of letting this or a later recursive
+pass overflow the stack.
+
 ### Constructs of later milestones
 
 The parser recognises tokens that are valid valo but not implemented yet —
-names, `let`, `if`, `==`, calls `f(`, `[`, `.`, `?`, floats — and reports
+calls `f(`, `[`, `.`, `?`, `|>`, `in`, `fn`, `match`, `none` — and reports
 `E0009 … is not supported yet` instead of a confusing "unexpected token".
 These checks are in `Parser::prefix` (things that start an expression) and in
 the operator table of `Parser::expr` (things that follow one).
@@ -203,8 +279,11 @@ the next line.
 
 | Code | Meaning | Example |
 |------|---------|---------|
-| E0101 | unexpected token / expected X | `1 +` (missing operand), `1 2`, `(1 2)` |
+| E0101 | unexpected token / expected X | `1 +` (missing operand), `1 2`, `(1 2)`, `let = 1` |
+| E0102 | `if` without `else` | `if x > 0: 1` alone |
 | E0103 | unclosed `(` (label on the opening parenthesis) | `(4 + 5` at end of file |
+| E0104 | block ends with a `let` | an indented branch whose last line is `let t = 1` |
+| E0105 | expression nested too deeply | 150 nested parentheses |
 | E0009 | valid syntax, not supported yet | `f(1)`, `[1, 2]` |
 
 ## 4.5 Where to change things
@@ -213,16 +292,16 @@ the next line.
 |------|-------|
 | new binary operator | 1. `BinOp` + `as_str` (`ast.rs`); 2. a row `(BinOp::X, l_bp, r_bp)` in `Parser::expr`; 3. an opcode mapping in `codegen.rs` |
 | change precedence | the numbers in `Parser::expr` / `PREFIX_NEG_BP` |
-| new expression start (names, `true`, `if`) | new `ExprKind` variant + arm in `Parser::prefix` |
+| new expression start (lambdas, strings) | new `ExprKind` variant + arm in `Parser::prefix` |
 | postfix forms (calls, `.field`, `?`) | in the `Parser::expr` loop, before the infix table (they bind tightest) |
 | new statements (`fn`, `def`) | `Parser::item`: dispatch on the first token, as for `let` (`let_binding`) |
 | type annotation syntax | `type_expr` → `type_result` → `type_union` → `type_primary` (one function per precedence level) |
-| blocks (M2) | parse `NEWLINE INDENT item* DEDENT` where a `:` ends a header |
+| a construct with an indented body (`fn`, M4) | after its `:`, call `branch` (or `block` directly) |
 
 ## 4.6 Exercises
 
-1. Add comparison operators (`==`, `<`) with binding power 5/6 on paper. Where
-   do they go relative to `not` (Python: `not a == b` is `not (a == b)`)?
+1. With the binding powers above, parse `not a == b or c` and `-x ** 2 < y`
+   on paper, then check with `valo check f.vl --dump ast`.
 2. Why is `**`'s left binding power (41) higher than prefix `-`'s (30), but its
    right side parsed at 40, not at 30? What would `2 ** -1 * 3` mean if the
    right side were parsed with `expr(0)`?

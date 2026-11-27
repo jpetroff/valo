@@ -11,41 +11,64 @@
 //!
 //! ## Technique
 //!
-//! - **Recursive descent** for statements, blocks and type annotations: one
-//!   method per grammar rule (`program`, `item`, `let_binding`, `type_expr`…).
+//! - **Recursive descent** for statements, blocks, `if` and type annotations:
+//!   one method per grammar rule (`program`, `item`, `let_binding`,
+//!   `if_expr`, `branch`, `block`, `type_expr`…).
 //! - **Pratt parsing** (top-down operator precedence) for expressions:
 //!   `expr(min_bp)` with a *binding power* per operator (`Parser::expr`).
 //! - **Error recovery**: on an error the parser records a diagnostic and
 //!   skips to the end of the logical line (`sync_line`), so one run reports
 //!   several errors.
 //!
-//! ## Precedence (syntax.md S11, Python order; M1 subset in brackets)
+//! ## Precedence (syntax.md S11, Python order)
 //!
-//! `|>` < `or` < `and` < `not` < comparisons < [`+ -`] < [`* / // %`]
-//! < [unary `-`] < [`**` right-assoc] < postfix. As in Python, `-2 ** 2` is
-//! `-(2 ** 2)` and the right operand of `**` may be negated: `2 ** -1`.
+//! `|>` (M4) < `or` < `and` < `not` < comparisons < `+ -` < `* / // %`
+//! < unary `-` < `**` (right-assoc) < postfix (M4+). As in Python, `-2 ** 2`
+//! is `-(2 ** 2)`, the right operand of `**` may be negated (`2 ** -1`), and
+//! `not a == b` is `not (a == b)`.
 //!
-//! | operator           | left bp | right bp | associativity |
-//! |--------------------|---------|----------|---------------|
-//! | `+` `-`            | 10      | 11       | left          |
-//! | `*` `/` `//` `%`   | 20      | 21       | left          |
-//! | prefix `-`         | —       | 30       | prefix        |
-//! | `**`               | 41      | 40       | right         |
+//! | operator                   | left bp | right bp | associativity |
+//! |----------------------------|---------|----------|---------------|
+//! | `or`                       | 3       | 4        | left          |
+//! | `and`                      | 5       | 6        | left          |
+//! | prefix `not`               | —       | 7        | prefix        |
+//! | `== != < <= > >=`          | 8       | 9        | chained       |
+//! | `+` `-`                    | 10      | 11       | left          |
+//! | `*` `/` `//` `%`           | 20      | 21       | left          |
+//! | prefix `-`                 | —       | 30       | prefix        |
+//! | `**`                       | 41      | 40       | right         |
+//!
+//! Comparisons *chain* (Python): `a < b <= c` becomes one `Compare` node
+//! with two links, not `(a < b) <= c` (`Parser::compare_chain`).
+//!
+//! ## Layout: lines, blocks and `if` (syntax.md S6)
+//!
+//! - A block is `NEWLINE INDENT item+ DEDENT` after a `:` (`Parser::branch`);
+//!   its last item must be an expression (E0104).
+//! - The lexer emits `NEWLINE` *before* `DEDENT`, so an expression that ends
+//!   with a block has already consumed its line: `end_of_line` accepts a
+//!   just-consumed `DEDENT`.
+//! - In the block form of `if`, `elif`/`else` start a new line. After an
+//!   inline branch (`if c: a`) the token stream is `… a NEWLINE else …`, so
+//!   `NEWLINE` followed by `elif`/`else` is skipped (`skip_newline_before_else`).
+//! - Both branches are required (plan D22); a missing `else` is E0102.
 //!
 //! ## Where to change things
 //!
 //! | I want to…                                  | Look at                                               |
 //! |---------------------------------------------|-------------------------------------------------------|
-//! | add a binary operator / change precedence   | `Parser::expr`, the `match t.kind` table of `(op, l_bp, r_bp)` |
-//! | add a prefix form (`not x`, literals, names)| `Parser::prefix`                                      |
+//! | add a binary operator / change precedence   | `Parser::expr`, the `match t.kind` table (`Infix`, `l_bp`, `r_bp`) |
+//! | add a prefix form (literals, lambdas)       | `Parser::prefix`                                      |
+//! | change `if` syntax                          | `if_expr`, `if_block_rest`, `branch`                  |
 //! | add postfix forms (calls `f(x)`, `.field`)  | `Parser::expr` loop (currently reports E0009 for `(` `[` `.` `?`) |
 //! | add statements (`fn`, `def`)                | `Parser::item` (dispatch on the first token; see `let_binding`) |
 //! | change type annotation syntax               | `type_expr`, `type_result`, `type_union`, `type_primary` |
-//! | add indented blocks                         | handle `Indent` … `Dedent` tokens; see `skip_block` for the shape |
+//! | add a construct with an indented body       | call `branch` (or `block`) after its `:`              |
 //! | change error recovery                       | `sync_line`, `skip_block`                             |
 //!
-//! Syntax error codes: E0101 unexpected token, E0103 unclosed `(`,
-//! E0009 construct not supported yet.
+//! Syntax error codes: E0101 unexpected token, E0102 `if` without `else`,
+//! E0103 unclosed `(`, E0104 block ends with a `let`, E0009 construct not
+//! supported yet.
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -57,13 +80,47 @@
 //! - `.clone()` of a token to keep it while advancing (*Ownership and borrowing*).
 
 use crate::ast::{
-    BinOp, Binding, Expr, ExprKind, Item, NodeId, Program, TypeExpr, TypeKind, UnaryOp,
+    BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, Item, LogicOp, NodeId, Program, TypeExpr,
+    TypeKind, UnaryOp,
 };
 use crate::diagnostic::Diagnostic;
+use crate::span::Span;
 use crate::token::{Keyword, Token, TokenKind};
 
 /// Binding power of prefix `-`: binds tighter than `*`, looser than `**`.
 const PREFIX_NEG_BP: u8 = 30;
+/// Deepest allowed recursion of `Parser::expr` (and of `type_expr`). Every
+/// later pass recurses over the tree too, so the limit keeps the compiler
+/// from overflowing its stack on pathological input (E0105). Each level of
+/// `(1 + (…))` costs two (the group, then the right operand), so this allows
+/// about 100 nested parentheses.
+pub const MAX_DEPTH: u32 = 200;
+
+/// Binding power of prefix `not`: looser than comparisons, tighter than `and`.
+const PREFIX_NOT_BP: u8 = 7;
+/// Left binding power of the comparison operators; operands are parsed at
+/// `CMP_BP + 1`, so a comparison never swallows another comparison.
+const CMP_BP: u8 = 8;
+
+/// What an infix token does (rows of the Pratt table in `Parser::expr`).
+enum Infix {
+    Arith(BinOp),
+    Logic(LogicOp),
+    Compare,
+}
+
+/// The comparison operator a token spells, if any.
+fn cmp_op(kind: &TokenKind) -> Option<CmpOp> {
+    Some(match kind {
+        TokenKind::EqEq => CmpOp::Eq,
+        TokenKind::NotEq => CmpOp::Ne,
+        TokenKind::Lt => CmpOp::Lt,
+        TokenKind::Le => CmpOp::Le,
+        TokenKind::Gt => CmpOp::Gt,
+        TokenKind::Ge => CmpOp::Ge,
+        _ => return None,
+    })
+}
 
 /// Parse a token stream (which must end with `EOF`).
 pub fn parse(tokens: &[Token]) -> (Program, Vec<Diagnostic>) {
@@ -72,6 +129,7 @@ pub fn parse(tokens: &[Token]) -> (Program, Vec<Diagnostic>) {
         pos: 0,
         diags: Vec::new(),
         next_id: 0,
+        depth: 0,
     };
     let program = p.program();
     (program, p.diags)
@@ -92,6 +150,8 @@ struct Parser<'t> {
     diags: Vec<Diagnostic>,
     /// Next `NodeId` to hand out.
     next_id: u32,
+    /// Current expression/type nesting depth (see `MAX_DEPTH`).
+    depth: u32,
 }
 
 impl Parser<'_> {
@@ -220,6 +280,13 @@ impl Parser<'_> {
     /// result := union ('!' union)?       `!` binds looser than `|` (S10)
     /// union := primary ('|' primary)*
     fn type_expr(&mut self) -> PResult<TypeExpr> {
+        self.enter()?;
+        let r = self.type_expr_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn type_expr_inner(&mut self) -> PResult<TypeExpr> {
         let lhs = self.type_result()?;
         if self.peek().kind != TokenKind::Arrow {
             return Ok(lhs);
@@ -358,7 +425,9 @@ impl Parser<'_> {
         }
     }
 
-    /// Expect the end of a logical line.
+    /// Expect the end of a logical line. A line whose expression ended with
+    /// an indented block is already complete: the `NEWLINE` came before the
+    /// block's `DEDENT`, which was just consumed.
     fn end_of_line(&mut self) -> PResult<()> {
         match self.peek().kind {
             TokenKind::Newline => {
@@ -366,6 +435,7 @@ impl Parser<'_> {
                 Ok(())
             }
             TokenKind::Eof => Ok(()),
+            _ if self.pos > 0 && self.tokens[self.pos - 1].kind == TokenKind::Dedent => Ok(()),
             _ => {
                 let t = self.peek().clone();
                 Err(self.error(
@@ -382,8 +452,13 @@ impl Parser<'_> {
 
     // ---- error recovery ------------------------------------------------
 
-    /// Skip to just after the next NEWLINE (or to EOF).
+    /// Skip to just after the next NEWLINE (or to EOF). If the failed line
+    /// ended with an indented block, its DEDENT was just consumed and the
+    /// cursor is already at the start of the next line: skip nothing.
     fn sync_line(&mut self) {
+        if self.pos > 0 && self.tokens[self.pos - 1].kind == TokenKind::Dedent {
+            return;
+        }
         loop {
             match self.bump().kind {
                 TokenKind::Newline | TokenKind::Eof => break,
@@ -426,30 +501,53 @@ impl Parser<'_> {
     /// (`10 - 4 - 3 = (10 - 4) - 3`); `r_bp < l_bp` makes it right-associative
     /// (`2 ** 3 ** 2 = 2 ** (3 ** 2)`).
     fn expr(&mut self, min_bp: u8) -> PResult<Expr> {
+        self.enter()?;
+        let r = self.expr_inner(min_bp);
+        self.depth -= 1;
+        r
+    }
+
+    /// Count one nesting level; E0105 beyond `MAX_DEPTH`.
+    fn enter(&mut self) -> PResult<()> {
+        if self.depth >= MAX_DEPTH {
+            let span = self.peek().span;
+            return Err(self.error(
+                Diagnostic::new("E0105", "expression is nested too deeply", span)
+                    .label(format!("more than {MAX_DEPTH} levels of nesting"))
+                    .help("split it into several `let` bindings"),
+            ));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn expr_inner(&mut self, min_bp: u8) -> PResult<Expr> {
         let mut lhs = self.prefix()?;
         loop {
             let t = self.peek().clone();
             // EXTEND: new infix operators get a row here.
             let (op, l_bp, r_bp) = match t.kind {
-                TokenKind::Plus => (BinOp::Add, 10, 11),
-                TokenKind::Minus => (BinOp::Sub, 10, 11),
-                TokenKind::Star => (BinOp::Mul, 20, 21),
-                TokenKind::Slash => (BinOp::Div, 20, 21),
-                TokenKind::SlashSlash => (BinOp::IDiv, 20, 21),
-                TokenKind::Percent => (BinOp::Mod, 20, 21),
-                // Right-associative; the right side starts over at prefix level,
-                // which admits `2 ** -1`.
-                TokenKind::StarStar => (BinOp::Pow, 41, 40),
-                // Known operators of later milestones: say so clearly
-                // instead of a confusing "expected end of line".
+                TokenKind::Kw(Keyword::Or) => (Infix::Logic(LogicOp::Or), 3, 4),
+                TokenKind::Kw(Keyword::And) => (Infix::Logic(LogicOp::And), 5, 6),
                 TokenKind::EqEq
                 | TokenKind::NotEq
                 | TokenKind::Lt
                 | TokenKind::Le
                 | TokenKind::Gt
-                | TokenKind::Ge
-                | TokenKind::PipeGt
-                | TokenKind::Kw(Keyword::And | Keyword::Or | Keyword::In)
+                | TokenKind::Ge => (Infix::Compare, CMP_BP, CMP_BP + 1),
+                TokenKind::Plus => (Infix::Arith(BinOp::Add), 10, 11),
+                TokenKind::Minus => (Infix::Arith(BinOp::Sub), 10, 11),
+                TokenKind::Star => (Infix::Arith(BinOp::Mul), 20, 21),
+                TokenKind::Slash => (Infix::Arith(BinOp::Div), 20, 21),
+                TokenKind::SlashSlash => (Infix::Arith(BinOp::IDiv), 20, 21),
+                TokenKind::Percent => (Infix::Arith(BinOp::Mod), 20, 21),
+                // Right-associative; the right side starts over at prefix level,
+                // which admits `2 ** -1`.
+                TokenKind::StarStar => (Infix::Arith(BinOp::Pow), 41, 40),
+                // Known operators of later milestones: say so clearly
+                // instead of a confusing "expected end of line".
+                TokenKind::PipeGt
+                | TokenKind::Kw(Keyword::In)
                 | TokenKind::LParen
                 | TokenKind::LBracket
                 | TokenKind::Dot
@@ -469,26 +567,232 @@ impl Parser<'_> {
             if l_bp < min_bp {
                 break;
             }
+            if let Infix::Compare = op {
+                lhs = self.compare_chain(lhs)?;
+                continue;
+            }
             self.bump();
             let rhs = self.expr(r_bp)?;
             let span = lhs.span.to(rhs.span);
+            let (lhs_box, rhs_box) = (Box::new(lhs), Box::new(rhs));
+            let kind = match op {
+                Infix::Arith(op) => ExprKind::Binary {
+                    op,
+                    op_span: t.span,
+                    lhs: lhs_box,
+                    rhs: rhs_box,
+                },
+                Infix::Logic(op) => ExprKind::Logic {
+                    op,
+                    op_span: t.span,
+                    lhs: lhs_box,
+                    rhs: rhs_box,
+                },
+                Infix::Compare => unreachable!("handled above"),
+            };
             lhs = Expr {
                 id: self.id(),
                 span,
-                kind: ExprKind::Binary {
-                    op,
-                    op_span: t.span,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                },
+                kind,
             };
         }
         Ok(lhs)
     }
 
-    /// Prefix position: literals, names, unary operators, parenthesised groups.
-    /// EXTEND: `true/false` (M3), `if` (M3), lambdas (M6), strings (M7) and
-    /// list literals (M8) start here.
+    /// `first op1 x1 op2 x2 …` while the next token is a comparison: one
+    /// `Compare` node for the whole chain (Python semantics).
+    fn compare_chain(&mut self, first: Expr) -> PResult<Expr> {
+        let mut rest = Vec::new();
+        while let Some(op) = cmp_op(&self.peek().kind) {
+            let op_span = self.bump().span;
+            let rhs = self.expr(CMP_BP + 1)?;
+            rest.push(CmpLink { op, op_span, rhs });
+        }
+        let span = first
+            .span
+            .to(rest.last().expect("at least one link").rhs.span);
+        Ok(Expr {
+            id: self.id(),
+            span,
+            kind: ExprKind::Compare {
+                first: Box::new(first),
+                rest,
+            },
+        })
+    }
+
+    // ---- conditionals and blocks ---------------------------------------
+
+    /// After `if` (already consumed as `kw`):
+    ///
+    /// ```text
+    /// if_expr := 'if' expr 'then' expr 'else' expr        inline form
+    ///          | 'if' if_block_rest                       block form
+    /// ```
+    ///
+    /// The inline form has no `elif`; nest `if … then … else if …` instead.
+    fn if_expr(&mut self, kw: Token) -> PResult<Expr> {
+        let cond = self.expr(0)?;
+        if self.peek().kind != TokenKind::Kw(Keyword::Then) {
+            return self.if_block_rest(kw.span, cond);
+        }
+        self.bump();
+        let then_br = self.expr(0)?;
+        if self.peek().kind != TokenKind::Kw(Keyword::Else) {
+            return Err(self.missing_else(kw.span));
+        }
+        self.bump();
+        let else_br = self.expr(0)?;
+        Ok(self.make_if(kw.span, cond, then_br, else_br))
+    }
+
+    /// ```text
+    /// if_block_rest := ':' branch ( 'elif' expr if_block_rest | 'else' ':' branch )
+    /// ```
+    ///
+    /// `elif c: …` becomes a nested `If` in the else branch, spanning from
+    /// the `elif` keyword.
+    fn if_block_rest(&mut self, start: Span, cond: Expr) -> PResult<Expr> {
+        self.expect(&TokenKind::Colon, "`:` or `then` after the condition")?;
+        let then_br = self.branch()?;
+        self.skip_newline_before_else();
+        let t = self.peek().clone();
+        let else_br = match t.kind {
+            TokenKind::Kw(Keyword::Elif) => {
+                self.bump();
+                let c = self.expr(0)?;
+                self.if_block_rest(t.span, c)?
+            }
+            TokenKind::Kw(Keyword::Else) => {
+                self.bump();
+                self.expect(&TokenKind::Colon, "`:` after `else`")?;
+                self.branch()?
+            }
+            _ => return Err(self.missing_else(start)),
+        };
+        Ok(self.make_if(start, cond, then_br, else_br))
+    }
+
+    fn make_if(&mut self, start: Span, cond: Expr, then_br: Expr, else_br: Expr) -> Expr {
+        Expr {
+            id: self.id(),
+            span: start.to(else_br.span),
+            kind: ExprKind::If {
+                cond: Box::new(cond),
+                then_br: Box::new(then_br),
+                else_br: Box::new(else_br),
+            },
+        }
+    }
+
+    /// E0102 (plan D22): every `if` needs an `else`, since its value may be used.
+    fn missing_else(&mut self, if_span: Span) -> Failed {
+        let at = self.peek().span;
+        self.error(
+            Diagnostic::new("E0102", "`if` without `else`", if_span)
+                .label("this `if` has no `else` branch")
+                .with(at, "expected `elif` or `else` here")
+                .help("an `if` is an expression and needs a value in both cases: add `else: …`"),
+        )
+    }
+
+    /// After an inline branch (`if c: a`), `elif`/`else` on the next line
+    /// arrive as `NEWLINE elif …`; drop that NEWLINE.
+    fn skip_newline_before_else(&mut self) {
+        let next_is_else = matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            Some(TokenKind::Kw(Keyword::Elif | Keyword::Else))
+        );
+        if self.peek().kind == TokenKind::Newline && next_is_else {
+            self.bump();
+        }
+    }
+
+    /// branch := NEWLINE INDENT block | expr      (the body after a `:`)
+    fn branch(&mut self) -> PResult<Expr> {
+        let indented = self.peek().kind == TokenKind::Newline
+            && self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Indent);
+        if !indented {
+            return self.expr(0);
+        }
+        self.bump();
+        self.bump();
+        self.block()
+    }
+
+    /// block := item+ DEDENT   (after NEWLINE INDENT; value = last item)
+    ///
+    /// Errors inside the block are recovered line by line, so one run can
+    /// report several of them.
+    fn block(&mut self) -> PResult<Expr> {
+        let start = self.peek().span;
+        let mut items = Vec::new();
+        let mut failed = false;
+        loop {
+            match self.peek().kind {
+                TokenKind::Dedent => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Newline => {
+                    self.bump();
+                }
+                _ => match self.item() {
+                    Ok(item) => items.push(item),
+                    Err(Failed) => {
+                        failed = true;
+                        self.sync_line();
+                    }
+                },
+            }
+        }
+        if failed {
+            // The errors are recorded; return what parsed so the caller goes
+            // on with the line after the block (the pipeline stops anyway).
+            return Ok(Expr {
+                id: self.id(),
+                span: start,
+                kind: ExprKind::Block(items),
+            });
+        }
+        let Some(last) = items.last() else {
+            let span = self.peek().span;
+            return Err(self.error(
+                Diagnostic::new("E0101", "expected an indented block", span).label("empty block"),
+            ));
+        };
+        let first_span = match &items[0] {
+            Item::Expr(e) => e.span,
+            Item::Let(b) => b.name_span,
+        };
+        let span = match last {
+            Item::Expr(e) => first_span.to(e.span),
+            Item::Let(b) => {
+                // Recorded, but not fatal: the surrounding `if` can still be
+                // parsed (the pipeline stops after the parser anyway).
+                let span = b.name_span.to(b.init.span);
+                self.diags.push(
+                    Diagnostic::new("E0104", "block ends with a `let` binding", span)
+                        .label("a block's value is its last line, which must be an expression")
+                        .help(format!(
+                            "add a line with the block's value after this binding, e.g. `{}`",
+                            b.name
+                        )),
+                );
+                first_span.to(span)
+            }
+        };
+        Ok(Expr {
+            id: self.id(),
+            span,
+            kind: ExprKind::Block(items),
+        })
+    }
+
+    /// Prefix position: literals, names, `-x`, `not x`, `if`, `assert`,
+    /// parenthesised groups.
+    /// EXTEND: lambdas (M6), strings (M7) and list literals (M8) start here.
     fn prefix(&mut self) -> PResult<Expr> {
         let t = self.bump();
         match t.kind {
@@ -497,11 +801,39 @@ impl Parser<'_> {
                 span: t.span,
                 kind: ExprKind::Int(n),
             }),
+            TokenKind::Float(x) => Ok(Expr {
+                id: self.id(),
+                span: t.span,
+                kind: ExprKind::Float(x),
+            }),
+            TokenKind::Kw(kw @ (Keyword::True | Keyword::False)) => Ok(Expr {
+                id: self.id(),
+                span: t.span,
+                kind: ExprKind::Bool(kw == Keyword::True),
+            }),
             TokenKind::Ident(name) => Ok(Expr {
                 id: self.id(),
                 span: t.span,
                 kind: ExprKind::Name(name),
             }),
+            TokenKind::Kw(Keyword::Not) => {
+                let operand = self.expr(PREFIX_NOT_BP)?;
+                Ok(Expr {
+                    id: self.id(),
+                    span: t.span.to(operand.span),
+                    kind: ExprKind::Not(Box::new(operand)),
+                })
+            }
+            TokenKind::Kw(Keyword::If) => self.if_expr(t),
+            // `assert e` (plan D29): an expression of type `()`.
+            TokenKind::Kw(Keyword::Assert) => {
+                let e = self.expr(0)?;
+                Ok(Expr {
+                    id: self.id(),
+                    span: t.span.to(e.span),
+                    kind: ExprKind::Assert(Box::new(e)),
+                })
+            }
             TokenKind::Minus => {
                 let operand = self.expr(PREFIX_NEG_BP)?;
                 let span = t.span.to(operand.span);
@@ -540,26 +872,19 @@ impl Parser<'_> {
                 Err(self.error(d))
             }
             // Valid syntax of later milestones: report "not supported yet".
-            TokenKind::Float(_)
-            | TokenKind::Kw(
+            TokenKind::Kw(
                 Keyword::Fn
                 | Keyword::Def
-                | Keyword::If
                 | Keyword::Match
-                | Keyword::Not
-                | Keyword::True
-                | Keyword::False
                 | Keyword::None
                 | Keyword::Import
                 | Keyword::From
-                | Keyword::Assert
                 | Keyword::Test
                 | Keyword::Mock,
             )
             | TokenKind::LBracket
             | TokenKind::LBrace => {
                 let what = match &t.kind {
-                    TokenKind::Float(_) => "float literals are".to_string(),
                     TokenKind::LBracket => "list literals are".to_string(),
                     TokenKind::LBrace => "dict literals are".to_string(),
                     other => format!("`{other}` is"),
@@ -625,13 +950,66 @@ mod tests {
         assert_eq!(parse_codes("1 +\n2 2\n3\n(1"), ["E0101", "E0101", "E0103"]);
         assert_eq!(parse_codes("  1"), ["E0101"]);
         assert_eq!(
-            parse_codes("f(1)\n1 == 2\n1.5\nx |> f"),
+            parse_codes("f(1)\n[1]\nx in y\nx |> f"),
             ["E0009", "E0009", "E0009", "E0009"]
         );
         assert_eq!(
             parse_codes("let = 1\nlet x 1\nlet y: = 2\n1 + let"),
             ["E0101"; 4]
         );
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__parser__tests__logic_and_comparisons.snap
+    #[test]
+    fn logic_and_comparisons() {
+        insta::assert_snapshot!(parse_ok(
+            "not a < b and c or d\na or b and c\n0 < x <= 10 != y\nnot not true\n\
+             1 + 2 == 3 * 1\nx == y == z\n-1.5 * 2.0 >= 3e2"
+        ));
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__parser__tests__conditionals_and_blocks.snap
+    #[test]
+    fn conditionals_and_blocks() {
+        insta::assert_snapshot!(parse_ok(
+            "if a then 1 else if b then 2 else 3\n\
+             if a: 1\nelif b: 2\nelse: 3\n\
+             let v = if a:\n    let t = 1\n    t + 1\nelse:\n    if b: 2\n    else: 3\n\
+             assert v == 2\nassert not false\nv"
+        ));
+    }
+
+    #[test]
+    fn nesting_limit() {
+        // At the limit: fine (and must not overflow the 2 MiB test-thread
+        // stack in later passes either; see codegen's `deep_nesting_compiles`).
+        let n = MAX_DEPTH as usize / 2 - 1;
+        let ok = format!("{}1{}", "(1 + ".repeat(n), ")".repeat(n));
+        assert!(parse_codes(&ok).is_empty());
+        let deep = format!("{}1{}", "(1 + ".repeat(n + 2), ")".repeat(n + 2));
+        assert_eq!(parse_codes(&deep), ["E0105"]);
+        let deep_ty = format!("let x: {}int{} = 1", "(".repeat(250), ")".repeat(250));
+        assert_eq!(parse_codes(&deep_ty), ["E0105"]);
+    }
+
+    #[test]
+    fn conditional_errors() {
+        // E0102: missing else (both forms); the next line still parses.
+        assert_eq!(parse_codes("if a then 1\n1 +"), ["E0102", "E0101"]);
+        assert_eq!(parse_codes("if a: 1\n2\n1 +"), ["E0102", "E0101"]);
+        assert_eq!(parse_codes("if a:\n    1\n2 2"), ["E0102", "E0101"]);
+        // E0104: block ends with a binding; recovery continues after it.
+        assert_eq!(
+            parse_codes("let v = if a:\n    let t = 1\nelse: 2\n1 +"),
+            ["E0104", "E0101"]
+        );
+        // Errors inside a block are reported line by line.
+        assert_eq!(
+            parse_codes("if a:\n    1 +\n    2 2\n    3\nelse: 4\n5 5"),
+            ["E0101", "E0101", "E0101"]
+        );
+        assert_eq!(parse_codes("if a 1 else 2"), ["E0101"]);
+        assert_eq!(parse_codes("else: 1"), ["E0101"]);
     }
 
     // Snapshot: src/snapshots/valo_compiler__parser__tests__let_and_annotations.snap

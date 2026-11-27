@@ -16,7 +16,8 @@
 //! ## Rules (plan D4, syntax.md S5)
 //!
 //! - Top-level `let` bindings are **globals** (one slot each, indexed at
-//!   compile time); `let` inside a block (M3: `if` branches) is a **local**.
+//!   compile time); `let` inside a block (an indented `if` branch, later a
+//!   `fn` body) is a **local**, visible until the end of its block.
 //! - Shadowing is allowed in the same scope (Q7=b): every `let` makes a new
 //!   binding. The initialiser is resolved *before* the new name is added, so
 //!   `let x = x + 1` reads the previous `x`.
@@ -174,12 +175,36 @@ impl Resolver {
     /// EXTEND: every new `ExprKind` with children recurses here.
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Int(_) => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => {}
             ExprKind::Name(name) => self.name(e, name),
-            ExprKind::Unary { operand, .. } => self.expr(operand),
-            ExprKind::Binary { lhs, rhs, .. } => {
+            ExprKind::Unary { operand, .. }
+            | ExprKind::Not(operand)
+            | ExprKind::Assert(operand) => self.expr(operand),
+            ExprKind::Binary { lhs, rhs, .. } | ExprKind::Logic { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);
+            }
+            ExprKind::Compare { first, rest } => {
+                self.expr(first);
+                for link in rest {
+                    self.expr(&link.rhs);
+                }
+            }
+            ExprKind::If {
+                cond,
+                then_br,
+                else_br,
+            } => {
+                self.expr(cond);
+                self.expr(then_br);
+                self.expr(else_br);
+            }
+            ExprKind::Block(items) => {
+                self.scopes.push(Vec::new());
+                for item in items {
+                    self.item(item);
+                }
+                self.scopes.pop();
             }
         }
     }
@@ -340,6 +365,26 @@ mod tests {
     fn toplevel_rebinding() {
         insta::assert_snapshot!(
             resolve_src("let x = 1\nlet x = x + 1\nlet y = x * x\ny + x").unwrap()
+        );
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__resolve__tests__block_shadowing.snap
+    #[test]
+    fn block_shadowing() {
+        insta::assert_snapshot!(
+            resolve_src(
+                "let x = 1\nlet y = if true:\n    let x = x + 1\n    let x = x * 10\n    \
+                 if x > 0:\n        let x = 0\n        x\n    else: x\nelse: x\nx + y"
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn block_locals_end_with_their_block() {
+        assert_eq!(
+            resolve_src("let a = if true:\n    let t = 1\n    t\nelse: 0\nt"),
+            Err(vec!["E0201"])
         );
     }
 
