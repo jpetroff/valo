@@ -205,7 +205,7 @@ the next line.
 |------|---------|---------|
 | E0101 | unexpected token / expected X | `1 +` (missing operand), `1 2`, `(1 2)` |
 | E0103 | unclosed `(` (label on the opening parenthesis) | `(4 + 5` at end of file |
-| E0009 | valid syntax, not supported yet | `x + 1`, `1 == 2` |
+| E0009 | valid syntax, not supported yet | `f(1)`, `[1, 2]` |
 
 ## 4.5 Where to change things
 
@@ -215,7 +215,8 @@ the next line.
 | change precedence | the numbers in `Parser::expr` / `PREFIX_NEG_BP` |
 | new expression start (names, `true`, `if`) | new `ExprKind` variant + arm in `Parser::prefix` |
 | postfix forms (calls, `.field`, `?`) | in the `Parser::expr` loop, before the infix table (they bind tightest) |
-| new statements (`let`, `fn`) | `Parser::item`: dispatch on the first token |
+| new statements (`fn`, `def`) | `Parser::item`: dispatch on the first token, as for `let` (`let_binding`) |
+| type annotation syntax | `type_expr` → `type_result` → `type_union` → `type_primary` (one function per precedence level) |
 | blocks (M2) | parse `NEWLINE INDENT item* DEDENT` where a `:` ends a header |
 
 ## 4.6 Exercises

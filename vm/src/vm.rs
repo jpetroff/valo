@@ -23,6 +23,7 @@
 //! | change the stack trace contents              | `Vm::unwind`                                       |
 //! | change `--trace-exec` output                 | `Vm::trace_instr`                                  |
 //! | add function calls (M4)                      | `Frame`, `RETURN` arm in `execute`, `Vm::run`      |
+//! | change how globals are stored                | `Vm::globals`, `GETGLOBAL`/`SETGLOBAL` arms         |
 //!
 //! ## Memory layout (plan §2.5)
 //!
@@ -81,6 +82,11 @@ pub struct Vm<'h> {
     stack: Vec<Value>,
     /// Call stack; the last element is the running function.
     frames: Vec<Frame>,
+    /// Global slots (top-level bindings, plan D4). `None` = not yet set;
+    /// this is an internal state, not a language-level nil.
+    globals: Vec<Option<Value>>,
+    /// Name of each global slot, for error messages.
+    global_names: Vec<Rc<str>>,
     /// Where effects (printing) go.
     host: &'h mut dyn Host,
     options: Options,
@@ -92,6 +98,8 @@ impl<'h> Vm<'h> {
         Vm {
             stack: Vec::new(),
             frames: Vec::new(),
+            globals: Vec::new(),
+            global_names: Vec::new(),
             host,
             options,
         }
@@ -102,6 +110,8 @@ impl<'h> Vm<'h> {
         let main = Rc::clone(&program.main);
         self.stack.clear();
         self.frames.clear();
+        self.globals = vec![None; program.globals.len()];
+        self.global_names = program.globals.iter().map(|g| Rc::clone(&g.name)).collect();
         // Slot 0 is main's function slot (Lua convention); registers follow.
         self.stack.resize(1 + main.num_regs as usize, Value::Unit);
         self.frames.push(Frame {
@@ -216,6 +226,39 @@ impl<'h> Vm<'h> {
                     };
                     self.stack[ra] = v;
                 }
+                // R[A] = R[B]. Cloning a `Value` copies at most an `Rc`.
+                OpCode::MOVE => {
+                    let v = self.stack[base + instr.b() as usize].clone();
+                    self.stack[ra] = v;
+                }
+                OpCode::GETGLOBAL => {
+                    let g = instr.bx() as usize;
+                    let v = match self.globals.get(g) {
+                        Some(Some(v)) => v.clone(),
+                        // The compiler orders top-level code so this cannot
+                        // happen from `<main>`; from M4 a function may run
+                        // before the binding it reads (plan D4).
+                        Some(None) => {
+                            return Err(RuntimeError::new(
+                                ErrorKind::GlobalUninit,
+                                format!(
+                                    "global `{}` used before initialisation",
+                                    self.global_names[g]
+                                ),
+                            ));
+                        }
+                        None => return Err(internal("global index out of range")),
+                    };
+                    self.stack[ra] = v;
+                }
+                OpCode::SETGLOBAL => {
+                    let v = self.stack[ra].clone();
+                    let slot = self
+                        .globals
+                        .get_mut(instr.bx() as usize)
+                        .ok_or_else(|| internal("global index out of range"))?;
+                    *slot = Some(v);
+                }
                 OpCode::ECHO => {
                     let s = format!("{}\n", self.stack[ra]);
                     self.host.write_stdout(&s).map_err(host_io)?;
@@ -238,7 +281,8 @@ impl<'h> Vm<'h> {
         let pc = self.frames.last().map_or(0, |f| f.pc.saturating_sub(1));
         let mut line = format!("[{}] {pc:04} {instr:?}", proto.name);
         let writes_a = instr.op().is_ok_and(|op| {
-            op.format() != Format::SJ && !matches!(op, OpCode::ECHO | OpCode::RETURN)
+            op.format() != Format::SJ
+                && !matches!(op, OpCode::ECHO | OpCode::RETURN | OpCode::SETGLOBAL)
         });
         if writes_a {
             if let Some(v) = self.stack.get(ra) {
@@ -430,6 +474,32 @@ mod tests {
         assert_eq!(err.kind.code(), "R0102");
         assert_eq!(err.trace.len(), 1);
         assert_eq!(&*err.trace[0].fn_name, "<main>");
+    }
+
+    #[test]
+    fn move_and_globals_round_trip() {
+        // let g = 7; R1 = g; R2 = R1
+        let p = ProtoBuilder::new("<main>", 3)
+            .global("g")
+            .op(Instr::asbx(OpCode::LOADI, 0, 7))
+            .op(Instr::abx(OpCode::SETGLOBAL, 0, 0))
+            .op(Instr::abx(OpCode::GETGLOBAL, 1, 0))
+            .op(Instr::abc(OpCode::MOVE, 2, 1, 0))
+            .op(Instr::abc(OpCode::RETURN, 2, 0, 0))
+            .program();
+        assert_eq!(run(&p).0, Ok(Value::Int(7)));
+    }
+
+    #[test]
+    fn unset_global_is_r0302() {
+        let p = ProtoBuilder::new("<main>", 1)
+            .global("late")
+            .op(Instr::abx(OpCode::GETGLOBAL, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        let err = run(&p).0.unwrap_err();
+        assert_eq!(err.kind.code(), "R0302");
+        assert!(err.message.contains("`late`"), "{}", err.message);
     }
 
     #[test]

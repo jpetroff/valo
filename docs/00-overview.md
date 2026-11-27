@@ -135,7 +135,7 @@ valo/
 │   │   ├── lexer.rs        lex()                                  (ch. 3)
 │   │   ├── ast.rs          Program, Item, Expr, ExprKind          (ch. 4)
 │   │   ├── parser.rs       parse()                                (ch. 4)
-│   │   ├── resolve.rs      name resolution (empty until M2)
+│   │   ├── resolve.rs      name resolution: globals, locals, scopes
 │   │   ├── codegen.rs      compile()                              (ch. 6)
 │   │   ├── diagnostic.rs   Diagnostic, render, render_runtime     (ch. 8)
 │   │   └── snapshots/      expected outputs of snapshot tests     (ch. 10)

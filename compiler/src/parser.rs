@@ -11,8 +11,8 @@
 //!
 //! ## Technique
 //!
-//! - **Recursive descent** for statements and blocks: one method per grammar
-//!   rule (`program`, `item`, `end_of_line`).
+//! - **Recursive descent** for statements, blocks and type annotations: one
+//!   method per grammar rule (`program`, `item`, `let_binding`, `type_expr`…).
 //! - **Pratt parsing** (top-down operator precedence) for expressions:
 //!   `expr(min_bp)` with a *binding power* per operator (`Parser::expr`).
 //! - **Error recovery**: on an error the parser records a diagnostic and
@@ -39,7 +39,8 @@
 //! | add a binary operator / change precedence   | `Parser::expr`, the `match t.kind` table of `(op, l_bp, r_bp)` |
 //! | add a prefix form (`not x`, literals, names)| `Parser::prefix`                                      |
 //! | add postfix forms (calls `f(x)`, `.field`)  | `Parser::expr` loop (currently reports E0009 for `(` `[` `.` `?`) |
-//! | add statements (`let`, `fn`, `def`)         | `Parser::item` (dispatch on the first token)          |
+//! | add statements (`fn`, `def`)                | `Parser::item` (dispatch on the first token; see `let_binding`) |
+//! | change type annotation syntax               | `type_expr`, `type_result`, `type_union`, `type_primary` |
 //! | add indented blocks                         | handle `Indent` … `Dedent` tokens; see `skip_block` for the shape |
 //! | change error recovery                       | `sync_line`, `skip_block`                             |
 //!
@@ -55,7 +56,9 @@
 //! - nested or-patterns: `TokenKind::Kw(Keyword::And | Keyword::Or)` (*Pattern matching*).
 //! - `.clone()` of a token to keep it while advancing (*Ownership and borrowing*).
 
-use crate::ast::{BinOp, Expr, ExprKind, Item, NodeId, Program, UnaryOp};
+use crate::ast::{
+    BinOp, Binding, Expr, ExprKind, Item, NodeId, Program, TypeExpr, TypeKind, UnaryOp,
+};
 use crate::diagnostic::Diagnostic;
 use crate::token::{Keyword, Token, TokenKind};
 
@@ -151,14 +154,208 @@ impl Parser<'_> {
         Program { items }
     }
 
-    /// item := expr (NEWLINE | EOF)
+    /// item := (let_binding | expr) (NEWLINE | EOF)
     ///
-    /// EXTEND (M2+): look at the first token here to dispatch to `let`,
-    /// `fn`, `def`, `assert`, … parsers.
+    /// EXTEND: look at the first token here to dispatch to `fn`, `def`, …
     fn item(&mut self) -> PResult<Item> {
-        let e = self.expr(0)?;
+        let item = match self.peek().kind {
+            TokenKind::Kw(Keyword::Let) => Item::Let(self.let_binding()?),
+            _ => Item::Expr(self.expr(0)?),
+        };
         self.end_of_line()?;
-        Ok(Item::Expr(e))
+        Ok(item)
+    }
+
+    /// let_binding := 'let' NAME (':' type)? '=' expr   (syntax.md S5)
+    fn let_binding(&mut self) -> PResult<Binding> {
+        let kw = self.bump();
+        let t = self.bump();
+        let TokenKind::Ident(name) = t.kind else {
+            return Err(self.error(
+                Diagnostic::new(
+                    "E0101",
+                    format!("expected a name after `let`, found {}", t.kind.describe()),
+                    t.span,
+                )
+                .label("expected a name here")
+                .with(kw.span, "binding starts here"),
+            ));
+        };
+        let ann = if self.peek().kind == TokenKind::Colon {
+            self.bump();
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::Eq, "`=`")?;
+        let init = self.expr(0)?;
+        Ok(Binding {
+            id: self.id(),
+            name,
+            name_span: t.span,
+            ann,
+            init,
+        })
+    }
+
+    /// Consume a token of kind `kind`, or report E0101 "expected {what}".
+    fn expect(&mut self, kind: &TokenKind, what: &str) -> PResult<Token> {
+        if &self.peek().kind == kind {
+            return Ok(self.bump());
+        }
+        let t = self.peek().clone();
+        Err(self.error(
+            Diagnostic::new(
+                "E0101",
+                format!("expected {what}, found {}", t.kind.describe()),
+                t.span,
+            )
+            .label(format!("expected {what} here")),
+        ))
+    }
+
+    // ---- type annotations ----------------------------------------------
+
+    /// type := result ('->' type)?        `->` is right-associative (S4)
+    /// result := union ('!' union)?       `!` binds looser than `|` (S10)
+    /// union := primary ('|' primary)*
+    fn type_expr(&mut self) -> PResult<TypeExpr> {
+        let lhs = self.type_result()?;
+        if self.peek().kind != TokenKind::Arrow {
+            return Ok(lhs);
+        }
+        self.bump();
+        let ret = self.type_expr()?;
+        let span = lhs.span.to(ret.span);
+        // `(A, B) -> C` lists parameters; `() -> C` has none.
+        let params = match lhs.kind {
+            TypeKind::Unit => Vec::new(),
+            TypeKind::Tuple(ts) => ts,
+            _ => vec![lhs],
+        };
+        Ok(TypeExpr {
+            span,
+            kind: TypeKind::Fn(params, Box::new(ret)),
+        })
+    }
+
+    fn type_result(&mut self) -> PResult<TypeExpr> {
+        let ok = self.type_union()?;
+        if self.peek().kind != TokenKind::Bang {
+            return Ok(ok);
+        }
+        self.bump();
+        let err = self.type_union()?;
+        Ok(TypeExpr {
+            span: ok.span.to(err.span),
+            kind: TypeKind::Result(Box::new(ok), Box::new(err)),
+        })
+    }
+
+    fn type_union(&mut self) -> PResult<TypeExpr> {
+        let mut lhs = self.type_primary()?;
+        while self.peek().kind == TokenKind::Bar {
+            self.bump();
+            let rhs = self.type_primary()?;
+            lhs = TypeExpr {
+                span: lhs.span.to(rhs.span),
+                kind: TypeKind::Union(Box::new(lhs), Box::new(rhs)),
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// primary := NAME ('[' type (',' type)* ']')? | 'none' | '(' ')'
+    ///          | '(' type ')' | '(' type (',' type)+ ','? ')'
+    fn type_primary(&mut self) -> PResult<TypeExpr> {
+        let t = self.bump();
+        match t.kind {
+            TokenKind::Ident(name) => {
+                if self.peek().kind != TokenKind::LBracket {
+                    return Ok(TypeExpr {
+                        span: t.span,
+                        kind: TypeKind::Name(name),
+                    });
+                }
+                self.bump();
+                let (args, close) = self.type_list(&TokenKind::RBracket, "`]`")?;
+                Ok(TypeExpr {
+                    span: t.span.to(close),
+                    kind: TypeKind::Generic(name, args),
+                })
+            }
+            TokenKind::Kw(Keyword::None) => Ok(TypeExpr {
+                span: t.span,
+                kind: TypeKind::Name("none".into()),
+            }),
+            TokenKind::LParen => {
+                if self.peek().kind == TokenKind::RParen {
+                    let close = self.bump();
+                    return Ok(TypeExpr {
+                        span: t.span.to(close.span),
+                        kind: TypeKind::Unit,
+                    });
+                }
+                let first = self.type_expr()?;
+                if self.peek().kind == TokenKind::RParen {
+                    let close = self.bump();
+                    // Grouping: `(int | none)`.
+                    return Ok(TypeExpr {
+                        span: t.span.to(close.span),
+                        kind: first.kind,
+                    });
+                }
+                self.expect(&TokenKind::Comma, "`,` or `)`")?;
+                let mut elems = vec![first];
+                if self.peek().kind == TokenKind::RParen {
+                    // `(A,)`: one-element tuple.
+                    let close = self.bump();
+                    return Ok(TypeExpr {
+                        span: t.span.to(close.span),
+                        kind: TypeKind::Tuple(elems),
+                    });
+                }
+                let (rest, close) = self.type_list(&TokenKind::RParen, "`)`")?;
+                elems.extend(rest);
+                Ok(TypeExpr {
+                    span: t.span.to(close),
+                    kind: TypeKind::Tuple(elems),
+                })
+            }
+            other => {
+                if matches!(other, TokenKind::Newline | TokenKind::Eof) {
+                    self.pos -= usize::from(other != TokenKind::Eof);
+                }
+                Err(self.error(
+                    Diagnostic::new(
+                        "E0101",
+                        format!("expected a type, found {}", other.describe()),
+                        t.span,
+                    )
+                    .label("expected a type here"),
+                ))
+            }
+        }
+    }
+
+    /// `type (',' type)* ','? CLOSE`; returns the types and the closer's span.
+    fn type_list(
+        &mut self,
+        close: &TokenKind,
+        what: &str,
+    ) -> PResult<(Vec<TypeExpr>, crate::span::Span)> {
+        let mut out = Vec::new();
+        loop {
+            out.push(self.type_expr()?);
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+                if &self.peek().kind != close {
+                    continue;
+                }
+            }
+            let c = self.expect(close, what)?;
+            return Ok((out, c.span));
+        }
     }
 
     /// Expect the end of a logical line.
@@ -289,9 +486,9 @@ impl Parser<'_> {
         Ok(lhs)
     }
 
-    /// Prefix position: literals, unary operators, parenthesised groups.
-    /// EXTEND: names (M2), `true/false` (M3), `if` (M3), lambdas (M6),
-    /// strings (M7) and list literals (M8) start here.
+    /// Prefix position: literals, names, unary operators, parenthesised groups.
+    /// EXTEND: `true/false` (M3), `if` (M3), lambdas (M6), strings (M7) and
+    /// list literals (M8) start here.
     fn prefix(&mut self) -> PResult<Expr> {
         let t = self.bump();
         match t.kind {
@@ -299,6 +496,11 @@ impl Parser<'_> {
                 id: self.id(),
                 span: t.span,
                 kind: ExprKind::Int(n),
+            }),
+            TokenKind::Ident(name) => Ok(Expr {
+                id: self.id(),
+                span: t.span,
+                kind: ExprKind::Name(name),
             }),
             TokenKind::Minus => {
                 let operand = self.expr(PREFIX_NEG_BP)?;
@@ -339,10 +541,8 @@ impl Parser<'_> {
             }
             // Valid syntax of later milestones: report "not supported yet".
             TokenKind::Float(_)
-            | TokenKind::Ident(_)
             | TokenKind::Kw(
-                Keyword::Let
-                | Keyword::Fn
+                Keyword::Fn
                 | Keyword::Def
                 | Keyword::If
                 | Keyword::Match
@@ -360,7 +560,6 @@ impl Parser<'_> {
             | TokenKind::LBrace => {
                 let what = match &t.kind {
                     TokenKind::Float(_) => "float literals are".to_string(),
-                    TokenKind::Ident(_) => "names are".to_string(),
                     TokenKind::LBracket => "list literals are".to_string(),
                     TokenKind::LBrace => "dict literals are".to_string(),
                     other => format!("`{other}` is"),
@@ -426,9 +625,23 @@ mod tests {
         assert_eq!(parse_codes("1 +\n2 2\n3\n(1"), ["E0101", "E0101", "E0103"]);
         assert_eq!(parse_codes("  1"), ["E0101"]);
         assert_eq!(
-            parse_codes("x + 1\n1 == 2\n1.5"),
-            ["E0009", "E0009", "E0009"]
+            parse_codes("f(1)\n1 == 2\n1.5\nx |> f"),
+            ["E0009", "E0009", "E0009", "E0009"]
         );
+        assert_eq!(
+            parse_codes("let = 1\nlet x 1\nlet y: = 2\n1 + let"),
+            ["E0101"; 4]
+        );
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__parser__tests__let_and_annotations.snap
+    #[test]
+    fn let_and_annotations() {
+        insta::assert_snapshot!(parse_ok(
+            "let a = 1\nlet b: int = a + 2\nlet xs: list[int] = b\nlet r: int | none ! error = a\n\
+             let f: (int, int) -> int = a\nlet g: () -> str = a\nlet h: int -> int -> int = a\n\
+             let t: (int, dict[str, (int,)]) = a\na * b"
+        ));
         assert_eq!(parse_codes("(1 2)"), ["E0101"]);
     }
 }

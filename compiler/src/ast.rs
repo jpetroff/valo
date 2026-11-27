@@ -10,15 +10,19 @@
 //!
 //! **Textbook chapter:** `docs/04-syntax-analysis.md`.
 //!
-//! ## Structure (M1)
+//! ## Structure (M2)
 //!
 //! ```text
 //! Program { items: Vec<Item> }
-//! Item::Expr(Expr)                       one top-level expression per line
+//! Item::Expr(Expr)                       an expression line
+//!     ::Let(Binding)                     `let name (: type)? = init`
+//! Binding { id, name, name_span, ann: Option<TypeExpr>, init: Expr }
 //! Expr { id: NodeId, span: Span, kind: ExprKind }
 //! ExprKind::Int(i64)
+//!         ::Name(String)                 a reference to a binding
 //!         ::Unary  { op: UnaryOp, operand: Box<Expr> }
 //!         ::Binary { op: BinOp, op_span, lhs: Box<Expr>, rhs: Box<Expr> }
+//! TypeExpr { span, kind: TypeKind }      annotations (checked from M10)
 //! ```
 //!
 //! ## Where to change things
@@ -26,7 +30,8 @@
 //! | I want to…                              | Look at                                                       |
 //! |-----------------------------------------|---------------------------------------------------------------|
 //! | add an expression form (names, `if`, calls) | new variant in `ExprKind`; then `impl fmt::Display for Expr` (S-expr), `parser.rs`, `codegen.rs` — the Rust compiler lists every `match` you must extend |
-//! | add a top-level form (`let`, `fn`, `def`)   | new variant in `enum Item`; then `dump`, `parser.rs` (`Parser::item`), `codegen.rs` (`compile`) |
+//! | add a top-level form (`fn`, `def`)       | new variant in `enum Item`; then `dump`, `parser.rs` (`Parser::item`), `resolve.rs`, `codegen.rs` (`compile`) |
+//! | add a type form                          | `TypeKind` + its `Display`, `Parser::type_expr`  |
 //! | add an operator                          | `BinOp` / `UnaryOp` + `BinOp::as_str`                         |
 //!
 //! It is a plain `Box` tree (plan §1.1). Every expression carries a `NodeId`,
@@ -61,6 +66,51 @@ pub enum Item {
     /// An expression evaluated for its effect; its value is discarded
     /// (shown with `valo run --echo`).
     Expr(Expr),
+    /// An immutable binding (syntax.md S5).
+    Let(Binding),
+}
+
+/// `let name (: type)? = init`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Binding {
+    /// Node id; the resolver records which slot the binding defines.
+    pub id: NodeId,
+    /// Bound name; `_` binds nothing (the value is discarded).
+    pub name: String,
+    /// Span of the name.
+    pub name_span: Span,
+    /// Optional annotation (parsed and stored; checked at runtime from M10).
+    pub ann: Option<TypeExpr>,
+    /// Initialiser.
+    pub init: Expr,
+}
+
+/// A type annotation (syntax.md S4, S9, S10, S20).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeExpr {
+    /// Source range.
+    pub span: Span,
+    /// Which form.
+    pub kind: TypeKind,
+}
+
+/// Type annotation forms.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeKind {
+    /// `int`, `str`, `none`, a type variable `T`, …
+    Name(String),
+    /// `list[int]`, `dict[str, int]`.
+    Generic(String, Vec<TypeExpr>),
+    /// `()`.
+    Unit,
+    /// `(A, B)`.
+    Tuple(Vec<TypeExpr>),
+    /// `A | B` (optional: `T | none`).
+    Union(Box<TypeExpr>, Box<TypeExpr>),
+    /// `T ! E` (result).
+    Result(Box<TypeExpr>, Box<TypeExpr>),
+    /// `A -> B`, `(A, B) -> C`, `() -> C`.
+    Fn(Vec<TypeExpr>, Box<TypeExpr>),
 }
 
 /// An expression node.
@@ -79,6 +129,8 @@ pub struct Expr {
 pub enum ExprKind {
     /// Integer literal.
     Int(i64),
+    /// A name reference (resolved by `resolve.rs`).
+    Name(String),
     /// Prefix operator.
     Unary {
         /// Operator.
@@ -145,6 +197,7 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
             ExprKind::Int(n) => write!(f, "{n}"),
+            ExprKind::Name(n) => f.write_str(n),
             ExprKind::Unary {
                 op: UnaryOp::Neg,
                 operand,
@@ -154,15 +207,60 @@ impl fmt::Display for Expr {
     }
 }
 
+impl fmt::Display for TypeExpr {
+    /// S-expression form: `(list int)`, `(| int none)`, `(-> (int int) int)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            TypeKind::Name(n) => f.write_str(n),
+            TypeKind::Generic(n, args) => {
+                write!(f, "({n}")?;
+                for a in args {
+                    write!(f, " {a}")?;
+                }
+                f.write_str(")")
+            }
+            TypeKind::Unit => f.write_str("()"),
+            TypeKind::Tuple(ts) => {
+                f.write_str("(tuple")?;
+                for t in ts {
+                    write!(f, " {t}")?;
+                }
+                f.write_str(")")
+            }
+            TypeKind::Union(a, b) => write!(f, "(| {a} {b})"),
+            TypeKind::Result(a, b) => write!(f, "(! {a} {b})"),
+            TypeKind::Fn(params, ret) => {
+                f.write_str("(-> (")?;
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(f, "{p}")?;
+                }
+                write!(f, ") {ret})")
+            }
+        }
+    }
+}
+
+impl fmt::Display for Item {
+    /// `(expr …)` or `(let name : type init)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Item::Expr(e) => write!(f, "(expr {e})"),
+            Item::Let(b) => match &b.ann {
+                Some(t) => write!(f, "(let {} : {t} {})", b.name, b.init),
+                None => write!(f, "(let {} {})", b.name, b.init),
+            },
+        }
+    }
+}
+
 /// One line per item, for `--dump ast`.
 pub fn dump(p: &Program) -> String {
     let mut out = String::new();
     for item in &p.items {
-        match item {
-            Item::Expr(e) => {
-                let _ = writeln!(out, "(expr {e})");
-            }
-        }
+        let _ = writeln!(out, "{item}");
     }
     out
 }

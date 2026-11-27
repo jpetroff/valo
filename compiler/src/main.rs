@@ -13,8 +13,8 @@
 //! ## Commands
 //!
 //! ```text
-//! valo run   <file> [--echo] [--trace-exec] [--dump tokens|ast|bytecode]
-//! valo check <file> [--dump tokens|ast|bytecode]
+//! valo run   <file> [--echo] [--trace-exec] [--dump tokens|ast|resolved|bytecode]
+//! valo check <file> [--dump tokens|ast|resolved|bytecode]
 //! valo build <file> [-o out]          (not implemented yet)
 //! ```
 //!
@@ -46,7 +46,9 @@ use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 use valo_compiler::diagnostic::{self, Diagnostic};
 use valo_compiler::span::SourceMap;
-use valo_compiler::{CompileOptions, ast, compile_source, lexer, parse_source};
+use valo_compiler::{
+    CompileOptions, ast, compile_source, lexer, parse_source, resolve, resolve_source,
+};
 use valo_vm::host::StdHost;
 use valo_vm::vm::{Options as VmOptions, Vm};
 
@@ -106,6 +108,8 @@ enum Dump {
     Tokens,
     /// Syntax tree as S-expressions.
     Ast,
+    /// Name resolution: global/local slots and what each name refers to.
+    Resolved,
     /// Disassembled bytecode.
     Bytecode,
 }
@@ -173,6 +177,9 @@ fn dump_text(sm: &SourceMap, dump: Dump, echo: bool) -> Result<String, ExitCode>
         }
         Dump::Ast => parse_source(sm)
             .map(|p| ast::dump(&p))
+            .map_err(|d| report(sm, &d)),
+        Dump::Resolved => resolve_source(sm)
+            .map(|(_, r)| resolve::dump(&r, sm))
             .map_err(|d| report(sm, &d)),
         Dump::Bytecode => compile_source(sm, CompileOptions { echo })
             .map(|p| valo_vm::disasm::disassemble(&p))

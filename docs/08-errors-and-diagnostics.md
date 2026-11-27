@@ -19,13 +19,15 @@ where a debugger is rarely available, so the error message *is* the debugger.
 Every error has a stable code, so tests, documentation and users can refer to
 it. Codes never change once a golden test uses them.
 
-| Range | Stage | Codes in use (M1) |
+| Range | Stage | Codes in use (M2) |
 |-------|-------|-------------------|
 | E00xx | lexer | E0001 unexpected character · E0002 int literal out of range · E0003 bad dedent · E0006 tab in indentation · E0009 not supported yet · E0010 malformed number |
 | E01xx | parser | E0101 unexpected token · E0103 unclosed `(` |
+| E02xx | resolve | E0201 undefined name (+ did-you-mean) · E0203 top-level name used before its definition · E0206 `_` used as a value |
 | E03xx | codegen | E0301 too many registers / constants |
 | R01xx | arithmetic | R0101 integer overflow · R0102 division/modulo by zero · R0104 negative exponent |
 | R02xx | types | R0201 operand type mismatch |
+| R03xx | resources | R0302 global read before it was set (unreachable from `<main>`; from M4 a function can run before a binding it reads) |
 | R05xx | host | R0501 output write failed |
 | R09xx | internal | R0901 bad bytecode / unimplemented opcode |
 

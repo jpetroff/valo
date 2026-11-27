@@ -25,7 +25,7 @@
 //! | [`lexer`]         | text → tokens, indentation → INDENT/DEDENT                    | 03-lexical-analysis |
 //! | [`ast`]           | syntax tree (`Program`, `Item`, `Expr`, `BinOp`)              | 04-syntax-analysis |
 //! | [`parser`]        | tokens → AST (recursive descent + Pratt)                     | 04-syntax-analysis |
-//! | [`resolve`]       | names and scopes (empty until M2)                            | 11-roadmap |
+//! | [`resolve`]       | names and scopes: which binding a name refers to             | 11-roadmap |
 //! | [`codegen`]       | AST → register bytecode                                      | 06-code-generation |
 //! | [`diagnostic`]    | error type and pretty printing                               | 08-errors-and-diagnostics |
 //! | `main.rs`         | the `valo` CLI: `run`, `check`, `build`                      | 09-driver-and-cli |
@@ -76,13 +76,26 @@ pub fn parse_source(sm: &SourceMap) -> Result<ast::Program, Vec<Diagnostic>> {
     Ok(program)
 }
 
+/// Lex, parse and resolve names (used by `--dump resolved`).
+pub fn resolve_source(
+    sm: &SourceMap,
+) -> Result<(ast::Program, resolve::Resolved), Vec<Diagnostic>> {
+    let program = parse_source(sm)?;
+    let resolved = resolve::resolve(&program)?;
+    Ok((program, resolved))
+}
+
 /// Full pipeline: source to bytecode.
 ///
 /// EXTEND: a new compiler pass (e.g. type checking, M10) is one more line
 /// between `resolve` and `codegen`.
 pub fn compile_source(sm: &SourceMap, opts: CompileOptions) -> Result<Program, Vec<Diagnostic>> {
     // RUST: `?` returns early with the `Err` if a stage failed.
-    let program = parse_source(sm)?;
-    resolve::resolve(&program)?;
-    codegen::compile(&program, sm, codegen::Options { echo: opts.echo })
+    let (program, resolved) = resolve_source(sm)?;
+    codegen::compile(
+        &program,
+        &resolved,
+        sm,
+        codegen::Options { echo: opts.echo },
+    )
 }

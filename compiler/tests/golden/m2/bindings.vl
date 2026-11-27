@@ -1,0 +1,5 @@
+# three top-level bindings combined
+let width = 4
+let height = 9
+let extra = 6
+width * height + extra

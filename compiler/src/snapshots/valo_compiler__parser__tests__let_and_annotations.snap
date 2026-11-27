@@ -1,0 +1,13 @@
+---
+source: compiler/src/parser.rs
+expression: "parse_ok(\"let a = 1\\nlet b: int = a + 2\\nlet xs: list[int] = b\\nlet r: int | none ! error = a\\n\\\n             let f: (int, int) -> int = a\\nlet g: () -> str = a\\nlet h: int -> int -> int = a\\n\\\n             let t: (int, dict[str, (int,)]) = a\\na * b\")"
+---
+(let a 1)
+(let b : int (+ a 2))
+(let xs : (list int) b)
+(let r : (! (| int none) error) a)
+(let f : (-> (int int) int) a)
+(let g : (-> () str) a)
+(let h : (-> (int) (-> (int) int)) a)
+(let t : (tuple int (dict str (tuple int))) a)
+(expr (* a b))

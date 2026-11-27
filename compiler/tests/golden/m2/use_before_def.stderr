@@ -1,0 +1,12 @@
+[E0203] Error: `price` is used before its definition
+   ╭─[ use_before_def.vl:1:13 ]
+   │
+ 1 │ let total = price * 2
+   │             ──┬──  
+   │               ╰──── used here
+ 2 │ let price = 10
+   │     ──┬──  
+   │       ╰──── defined here
+   │ 
+   │ Help: top-level code runs from top to bottom; move the definition above this use
+───╯

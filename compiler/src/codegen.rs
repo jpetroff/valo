@@ -5,8 +5,8 @@
 //! function prototype (`valo_vm::chunk::Proto`), deciding which register holds
 //! each intermediate value.
 //!
-//! **Pipeline position:** `ast::Program` in → `valo_vm::chunk::Program` out
-//! → `Vm::run`. Entry point: `compile`.
+//! **Pipeline position:** `ast::Program` + `resolve::Resolved` in →
+//! `valo_vm::chunk::Program` out → `Vm::run`. Entry point: `compile`.
 //!
 //! **Textbook chapter:** `docs/06-code-generation.md`.
 //!
@@ -34,7 +34,8 @@
 //! | I want to…                                  | Look at                                          |
 //! |---------------------------------------------|--------------------------------------------------|
 //! | compile a new expression kind               | `FuncState::expr`, add a `match` arm              |
-//! | compile a new top-level item (`let`, `fn`)  | `compile`, the `for item in &program.items` loop  |
+//! | compile a new top-level item (`fn`, `def`)  | `compile`, the `for item in &program.items` loop  |
+//! | change how names are loaded                 | `FuncState::name` (globals: `GETGLOBAL`, locals: `MOVE`) |
 //! | map an operator to an opcode                | `ExprKind::Binary` arm (`let opcode = match op`) |
 //! | add a constant type (float, string)         | a dedup map like `int_consts` + `Const` in `vm/src/chunk.rs` |
 //! | add an optimisation (constant folding…)     | `FuncState::expr` (see the `-<literal>` fold)    |
@@ -53,11 +54,12 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use valo_vm::chunk::{Const, Program, Proto, SrcSpan};
+use valo_vm::chunk::{Const, GlobalDesc, Program, Proto, SrcSpan};
 use valo_vm::opcode::{Instr, OpCode};
 
 use crate::ast::{self, BinOp, Expr, ExprKind, Item, UnaryOp};
 use crate::diagnostic::Diagnostic;
+use crate::resolve::{BindingId, GlobalId, Res, Resolved};
 use crate::span::{SourceMap, Span};
 
 /// Code generation options.
@@ -67,17 +69,19 @@ pub struct Options {
     pub echo: bool,
 }
 
-/// Compile a parsed program into the `<main>` prototype.
+/// Compile a parsed and resolved program into the `<main>` prototype.
 ///
-/// Every top-level expression is evaluated into R0 (and echoed with `--echo`);
-/// the program ends with `LOADUNIT` + `RETURN`.
+/// Every top-level expression is evaluated into a temporary (and echoed with
+/// `--echo`); every top-level `let` stores its value into a global slot
+/// (`SETGLOBAL`, plan D4). The program ends with `LOADUNIT` + `RETURN`.
 pub fn compile(
     program: &ast::Program,
+    resolved: &Resolved,
     sm: &SourceMap,
     opts: Options,
 ) -> Result<Program, Vec<Diagnostic>> {
-    let mut fs = FuncState::new("<main>", Span::new(0, 0));
-    // EXTEND: new `Item` kinds (let, fn, def, ...) get arms here.
+    let mut fs = FuncState::new("<main>", Span::new(0, 0), resolved);
+    // EXTEND: new `Item` kinds (fn, def, ...) get arms here.
     for item in &program.items {
         match item {
             Item::Expr(e) => {
@@ -88,6 +92,17 @@ pub fn compile(
                 }
                 fs.free_to(dst);
             }
+            Item::Let(b) => {
+                let tmp = fs.alloc(b.init.span);
+                fs.expr(&b.init, tmp);
+                // `let _ = …` has no slot: the value is evaluated and
+                // discarded. (Top-level `let`s are never locals.)
+                if let Some(Res::Global(g)) = resolved.lets.get(&b.id).copied().flatten() {
+                    let bx = fs.global_index(g, b.name_span);
+                    fs.emit(Instr::abx(OpCode::SETGLOBAL, tmp, bx), b.name_span);
+                }
+                fs.free_to(tmp);
+            }
         }
     }
     let end = Span::new(sm.text.len(), sm.text.len());
@@ -97,6 +112,13 @@ pub fn compile(
     let main = fs.finish()?;
     Ok(Program {
         main: Rc::new(main),
+        globals: resolved
+            .globals
+            .iter()
+            .map(|g| GlobalDesc {
+                name: g.name.as_str().into(),
+            })
+            .collect(),
         source_name: sm.name.as_str().into(),
         line_starts: sm.line_starts.clone(),
     })
@@ -104,7 +126,12 @@ pub fn compile(
 
 /// Per-function compilation state (Lua `FuncState`). One per function being
 /// compiled; M4 will keep a stack of them for nested functions.
-struct FuncState {
+// RUST: `'r` ties the borrowed resolver output to the FuncState's lifetime.
+struct FuncState<'r> {
+    /// Name resolution results (which slot each name refers to).
+    resolved: &'r Resolved,
+    /// Register holding each local binding currently in scope.
+    locals: HashMap<BindingId, u8>,
     /// The prototype being filled in.
     proto: Proto,
     /// First free register.
@@ -120,9 +147,11 @@ struct FuncState {
 /// Registers are 8-bit operands.
 const MAX_REGS: u16 = 255;
 
-impl FuncState {
-    fn new(name: &str, def_span: Span) -> FuncState {
+impl<'r> FuncState<'r> {
+    fn new(name: &str, def_span: Span, resolved: &'r Resolved) -> FuncState<'r> {
         FuncState {
+            resolved,
+            locals: HashMap::new(),
             proto: Proto {
                 name: name.into(),
                 arity: 0,
@@ -203,6 +232,38 @@ impl FuncState {
         k
     }
 
+    /// A global's index as a 16-bit `Bx` operand (E0301 if too many).
+    fn global_index(&mut self, g: GlobalId, span: Span) -> u16 {
+        u16::try_from(g.0).unwrap_or_else(|_| {
+            if !self.diags.iter().any(|d| d.code == "E0301") {
+                self.diags.push(Diagnostic::new(
+                    "E0301",
+                    "too many top-level bindings (max 65536)",
+                    span,
+                ));
+            }
+            0
+        })
+    }
+
+    /// Load the value a name refers to into `dst`.
+    fn name(&mut self, e: &Expr, dst: u8) {
+        match self.resolved.names.get(&e.id).copied() {
+            Some(Res::Global(g)) => {
+                let bx = self.global_index(g, e.span);
+                self.emit(Instr::abx(OpCode::GETGLOBAL, dst, bx), e.span);
+            }
+            Some(Res::Local(b)) => {
+                let r = self.locals[&b];
+                // A local already in `dst` needs no copy.
+                if r != dst {
+                    self.emit(Instr::abc(OpCode::MOVE, dst, r, 0), e.span);
+                }
+            }
+            None => unreachable!("resolver left a name unresolved"),
+        }
+    }
+
     /// Load an integer: inline (`LOADI`) if it fits in 16 bits, otherwise via
     /// the constant pool (`LOADK`).
     fn load_int(&mut self, n: i64, dst: u8, span: Span) {
@@ -220,6 +281,7 @@ impl FuncState {
     fn expr(&mut self, e: &Expr, dst: u8) {
         match &e.kind {
             ExprKind::Int(n) => self.load_int(*n, dst, e.span),
+            ExprKind::Name(_) => self.name(e, dst),
             ExprKind::Unary {
                 op: UnaryOp::Neg,
                 operand,
@@ -276,6 +338,12 @@ impl FuncState {
 mod tests {
     use crate::span::SourceMap;
     use crate::{CompileOptions, compile_source};
+
+    // Snapshot: src/snapshots/valo_compiler__codegen__tests__toplevel_globals.snap
+    #[test]
+    fn toplevel_globals() {
+        insta::assert_snapshot!(disasm("let a = 1\nlet b = a + 2\nlet _ = b\nb * a"));
+    }
 
     fn disasm(src: &str) -> String {
         let sm = SourceMap::new("t.vl", src);

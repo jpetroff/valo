@@ -12,18 +12,19 @@ drivers around many internal stages.)
 File: [`compiler/src/main.rs`](../compiler/src/main.rs), binary `valo`.
 
 ```text
-valo run   <file> [--echo] [--trace-exec] [--dump tokens|ast|bytecode]
-valo check <file> [--dump tokens|ast|bytecode]
+valo run   <file> [--echo] [--trace-exec] [--dump tokens|ast|resolved|bytecode]
+valo check <file> [--dump tokens|ast|resolved|bytecode]
 valo build <file> [-o out]           not implemented yet (bytecode files, M11)
 valo --help | --version
 ```
 
 | Flag | Effect |
 |------|--------|
-| `--echo` | print the value of every top-level expression (until `print` exists in M4) |
+| `--echo` | print the value of every top-level expression line, not `let` lines (until `print` exists in M4) |
 | `--trace-exec` | trace every executed instruction to stderr (chapter 7) |
 | `--dump tokens` | token list (chapter 3) |
 | `--dump ast` | syntax tree as S-expressions (chapter 4) |
+| `--dump resolved` | name resolution: global and local slots, and the slot each name use refers to (chapter 6) |
 | `--dump bytecode` | disassembly (chapter 5) |
 
 With `check`, dumps go to stdout and nothing runs. With `run`, dumps go to

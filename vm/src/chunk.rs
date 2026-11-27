@@ -19,7 +19,8 @@
 //! |----------------------------------------------|----------------------------------------------|
 //! | add a new kind of constant (float, string)   | `enum Const`, then `vm.rs` (`LOADK`), `disasm.rs` (`const_repr`, `const_entry`), `codegen.rs` |
 //! | store more per-function data (params, upvalues) | `struct Proto` (+ `ProtoBuilder::new`, `FuncState::new` in codegen) |
-//! | store more per-program data (globals, types) | `struct Program` (+ `ProtoBuilder::program`, `codegen::compile`) |
+//! | store more per-program data (types, M10)     | `struct Program` (+ `ProtoBuilder::program`, `codegen::compile`) |
+//! | describe global slots (natives in M4)        | `struct GlobalDesc`                          |
 //! | build bytecode by hand in a VM test          | `ProtoBuilder` (see tests in `vm.rs`)       |
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
@@ -90,11 +91,23 @@ pub struct Proto {
     pub def_span: SrcSpan,
 }
 
+/// Description of one global slot (plan D4). Top-level `let` bindings live
+/// in globals; `GETGLOBAL`/`SETGLOBAL` address them by index (`Bx`).
+/// EXTEND (M4): a `kind: Native(NativeId) | User` field for builtins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalDesc {
+    /// Source name (shadowed top-level names get one slot each, so names may
+    /// repeat). Used in error messages and the disassembly.
+    pub name: Rc<str>,
+}
+
 /// A complete compiled program.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     /// Top-level code.
     pub main: Rc<Proto>,
+    /// Global slots, indexed by `GETGLOBAL`/`SETGLOBAL` operand `Bx`.
+    pub globals: Vec<GlobalDesc>,
     /// Source file name, for messages.
     pub source_name: Rc<str>,
     /// Byte offset at which each source line starts (line 1 at index 0).
@@ -142,6 +155,7 @@ pub fn line_starts(text: &str) -> Vec<u32> {
 #[derive(Debug)]
 pub struct ProtoBuilder {
     proto: Proto,
+    globals: Vec<GlobalDesc>,
 }
 
 impl ProtoBuilder {
@@ -159,6 +173,7 @@ impl ProtoBuilder {
                 spans: Vec::new(),
                 def_span: SrcSpan::default(),
             },
+            globals: Vec::new(),
         }
     }
 
@@ -177,6 +192,12 @@ impl ProtoBuilder {
         self
     }
 
+    /// Declare the next global slot (used by `program`).
+    pub fn global(mut self, name: &str) -> ProtoBuilder {
+        self.globals.push(GlobalDesc { name: name.into() });
+        self
+    }
+
     /// Finish the prototype.
     pub fn build(self) -> Proto {
         self.proto
@@ -186,6 +207,7 @@ impl ProtoBuilder {
     pub fn program(self) -> Program {
         Program {
             main: Rc::new(self.proto),
+            globals: self.globals,
             source_name: "<test>".into(),
             line_starts: vec![0],
         }
@@ -202,6 +224,7 @@ mod tests {
         assert_eq!(ls, vec![0, 3, 6, 7]);
         let p = Program {
             main: Rc::new(ProtoBuilder::new("<main>", 1).build()),
+            globals: Vec::new(),
             source_name: "t".into(),
             line_starts: ls,
         };

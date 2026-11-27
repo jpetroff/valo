@@ -44,6 +44,8 @@ pub enum ErrorKind {
     NegativeExponent,
     /// R0201 operand type mismatch.
     TypeMismatch,
+    /// R0302 global read before its `SETGLOBAL` ran.
+    GlobalUninit,
     /// R0501 writing to stdout/stderr failed.
     HostIo,
     /// R0901 malformed bytecode or an opcode this build does not implement.
@@ -58,6 +60,7 @@ impl ErrorKind {
             ErrorKind::DivisionByZero => "R0102",
             ErrorKind::NegativeExponent => "R0104",
             ErrorKind::TypeMismatch => "R0201",
+            ErrorKind::GlobalUninit => "R0302",
             ErrorKind::HostIo => "R0501",
             ErrorKind::Internal => "R0901",
         }
