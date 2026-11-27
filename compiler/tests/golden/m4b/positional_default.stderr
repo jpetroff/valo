@@ -1,0 +1,9 @@
+[E0421] Error: `timeout` has a default and must be passed by name
+   ╭─[ positional_default.vl:2:14 ]
+   │
+ 2 │ print(run(1, 5))
+   │              ┬  
+   │              ╰── passed by position as parameter 2
+   │ 
+   │ Help: write `timeout=…`: parameters with a default are keyword-only
+───╯

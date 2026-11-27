@@ -1,0 +1,4 @@
+# A default may use the parameters before it.
+fn span(start: int, stop: int = start + 10) -> int = stop - start
+print(span(5))
+print(span(5, stop=7))

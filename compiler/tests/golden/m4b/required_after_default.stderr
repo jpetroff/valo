@@ -1,0 +1,11 @@
+[E0423] Error: required parameter `b` comes after a parameter with a default
+   ╭─[ required_after_default.vl:1:18 ]
+   │
+ 1 │ fn f(a: int = 1, b: int) -> int = a + b
+   │      ┬           ┬  
+   │      ╰────────────── this parameter has a default
+   │                  │  
+   │                  ╰── no default
+   │ 
+   │ Help: put the required parameters first; parameters with defaults are passed by name
+───╯

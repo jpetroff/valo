@@ -437,7 +437,15 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q14: RESOLVED hybrid (S16) — prelude flat (`print len map filter reduce flat_map range get int float str Ok Err context …`), everything else module-qualified once imports exist (post-MVP). See Q25 for non-prelude builtins in MVP.
 > Q15: RESOLVED (a) — unit displays `()` (syntax.md S9); functions `<fn f/n>`.
 
-### M4b — Keyword arguments and defaults
+### M4b — Keyword arguments and defaults — DONE 2026-11-27
+
+- Implementation notes (branch `m4-m5`):
+  - Resolver `plan_call` produces `Resolved::calls: NodeId → CallPlan { slots: Vec<Slot::{Arg(i), Missing}> }` for every call to a known signature (natives and fns share `Sig { params: Vec<(name, has_default)> }`). Trailing omitted slots are dropped: CALL passes fewer args and the VM pads `Missing`; gaps get `LOADMISSING`. Codegen evaluates args in source order straight into their declaration-order slots (window reserved first), so `f(c=show(3), b=show(2))` prints 3 then 2.
+  - User decision: a required param passed by name → E0424 "pass `x` by position" (S19 provisional item deferred); it counts as supplied so E0205 is not reported twice. E0421 per positional arg landing on a defaulted param; E0205 only for missing required / too many positional; E0425 shows both occurrences; E0422 on every keyword arg of a dynamic call.
+  - Defaults are resolved param by param (a default sees only earlier params) and compiled callee-side: `JMPIFSET i +n; <default → Ri>` per defaulted param (sBx offset, E0301 beyond 32767 instrs). `Proto.required`; disasm adds `required=K` only when K ≠ arity; JMPIFSET comment `; to N if passed`.
+  - `Value::Missing` displays `<missing>` (only visible via `--trace-exec`; no debug_assert so tracing a prologue cannot panic). Natives get `args` padded with `Missing` to `params.len()`.
+  - Native keyword default (`print(x, end="\n")`) deferred to M7 (needs Str); the native path is the same `Sig` path (unit test: `print(1, end=2)` → E0424).
+  - Extra goldens: `kw_order` (source-order evaluation), `kw_required` (E0424).
 
 - Goal: S19 call protocol (D28) for user fns and natives; may merge into M4 if small.
 - Blocks: parameter default, keyword argument at call site.

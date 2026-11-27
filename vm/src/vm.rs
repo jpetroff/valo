@@ -242,6 +242,19 @@ impl<'h> Vm<'h> {
                     self.stack[ra] = Value::Closure(Rc::new(Closure::new(Rc::clone(child))));
                 }
                 OpCode::CALL => self.call(ra, instr.b() as usize)?,
+                OpCode::LOADMISSING => self.stack[ra] = Value::Missing,
+                // Callee prologue of a defaulted parameter: skip its default
+                // expression when the caller passed a value (M4b).
+                OpCode::JMPIFSET => {
+                    if !matches!(self.stack[ra], Value::Missing) {
+                        let frame = self.frame_mut();
+                        let target = frame.pc as i64 + i64::from(instr.sbx());
+                        if target < 0 || target as usize > proto.code.len() {
+                            return Err(internal("jump target out of range"));
+                        }
+                        frame.pc = target as usize;
+                    }
+                }
                 OpCode::LOADI => self.stack[ra] = Value::Int(instr.sbx() as i64),
                 OpCode::LOADK => {
                     let k = proto
@@ -427,7 +440,7 @@ impl<'h> Vm<'h> {
             Value::Closure(c) => {
                 let c = Rc::clone(c);
                 let arity = c.proto.arity as usize;
-                check_arg_count(&c.proto.name, arity, arity, nargs)?;
+                check_arg_count(&c.proto.name, c.proto.required as usize, arity, nargs)?;
                 if self.frames.len() >= MAX_FRAMES {
                     return Err(stack_overflow());
                 }
@@ -438,6 +451,11 @@ impl<'h> Vm<'h> {
                 }
                 if self.stack.len() < top {
                     self.stack.resize(top, Value::Unit);
+                }
+                // Omitted trailing (defaulted) parameters: the prologue
+                // computes their defaults (M4b).
+                for slot in &mut self.stack[base + nargs..base + arity] {
+                    *slot = Value::Missing;
                 }
                 self.frames.push(Frame {
                     closure: c,
@@ -453,10 +471,12 @@ impl<'h> Vm<'h> {
                     .ok_or_else(|| internal("native index out of range"))?;
                 check_arg_count(def.name, def.required(), def.params.len(), nargs)?;
                 // Owned arguments: moved out, `Unit` left behind (plan D12).
-                let args: Vec<Value> = self.stack[ra + 1..=ra + nargs]
+                let mut args: Vec<Value> = self.stack[ra + 1..=ra + nargs]
                     .iter_mut()
                     .map(|v| std::mem::replace(v, Value::Unit))
                     .collect();
+                // Omitted keyword parameters arrive as `Missing` (M4b).
+                args.resize(def.params.len(), Value::Missing);
                 let result = (def.f)(self, args)?;
                 self.stack[ra] = result;
                 Ok(())
@@ -491,6 +511,7 @@ impl<'h> Vm<'h> {
                         | OpCode::SETGLOBAL
                         | OpCode::TEST
                         | OpCode::ASSERT
+                        | OpCode::JMPIFSET
                 )
         });
         if writes_a {
@@ -954,6 +975,43 @@ mod tests {
             "<native print/1>"
         );
         assert_eq!(values_equal(&f, &f).unwrap_err().kind.code(), "R0205");
+    }
+
+    #[test]
+    fn omitted_defaults_are_missing_until_the_prologue() {
+        // fn f(a, b = 10) = a + b   — prologue: JMPIFSET 1 +1; LOADI 1 10
+        let f = ProtoBuilder::new("f", 3)
+            .arity(2)
+            .required(1)
+            .op(Instr::asbx(OpCode::JMPIFSET, 1, 1))
+            .op(Instr::asbx(OpCode::LOADI, 1, 10))
+            .op(Instr::abc(OpCode::ADD, 2, 0, 1))
+            .op(Instr::abc(OpCode::RETURN, 2, 0, 0))
+            .build();
+        let call = |nargs: u8| {
+            ProtoBuilder::new("<main>", 4)
+                .proto(f.clone())
+                .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+                .op(Instr::asbx(OpCode::LOADI, 1, 1))
+                .op(Instr::asbx(OpCode::LOADI, 2, 2))
+                .op(Instr::abc(OpCode::CALL, 0, nargs, 0))
+                .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+                .program()
+        };
+        assert_eq!(run(&call(1)).0, Ok(Value::Int(11)));
+        assert_eq!(run(&call(2)).0, Ok(Value::Int(3)));
+        let e = run(&call(0)).0.unwrap_err();
+        assert_eq!(e.message, "`f` takes 1 to 2 arguments but 0 were given");
+        // LOADMISSING in the caller has the same effect as omitting.
+        let p = ProtoBuilder::new("<main>", 4)
+            .proto(f)
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+            .op(Instr::asbx(OpCode::LOADI, 1, 5))
+            .op(Instr::abc(OpCode::LOADMISSING, 2, 0, 0))
+            .op(Instr::abc(OpCode::CALL, 0, 2, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        assert_eq!(run(&p).0, Ok(Value::Int(15)));
     }
 
     fn float(x: f64) -> Value {

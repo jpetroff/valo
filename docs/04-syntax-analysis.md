@@ -138,8 +138,11 @@ item    := ( let_binding | fn_def | expr ) ( NEWLINE | EOF )   Parser::item
 let_binding := 'let' NAME ( ':' type )? '=' expr               Parser::let_binding
 fn_def  := 'fn' NAME ( '[' NAME, … ']' )? '(' params ')' ( '->' type )?
            ( ':' branch | '=' expr | '=' NEWLINE INDENT expr DEDENT )   Parser::fn_def
-param   := NAME ( ':' type )?                                  Parser::params
+param   := NAME ( ':' type )? ( '=' expr )?                    Parser::params
 ```
+
+A parameter with a default (`timeout: int = 30`) is keyword-only (syntax.md
+S19) and must come after the required ones (E0423).
 
 Every parameter and the return type need an annotation (syntax.md S13). A
 missing one is reported as E0410 but parsing goes on, so one run lists all of
@@ -307,6 +310,7 @@ the next line.
 | E0104 | block ends with a `let` or `fn` | an indented branch whose last line is `let t = 1` |
 | E0105 | expression nested too deeply | 150 nested parentheses |
 | E0410 | missing parameter or return annotation | `fn f(x) -> int = x` |
+| E0423 | required parameter after a defaulted one | `fn f(a: int = 1, b: int) -> int = b` |
 | E0009 | valid syntax, not supported yet | `[1, 2]`, `x.y` |
 
 ## 4.5 Where to change things

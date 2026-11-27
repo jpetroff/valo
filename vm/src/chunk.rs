@@ -81,6 +81,10 @@ pub struct Proto {
     pub name: Rc<str>,
     /// Number of parameters.
     pub arity: u8,
+    /// Number of parameters without a default (`required <= arity`; M4b).
+    /// A call may pass `required..=arity` arguments; the VM fills the rest
+    /// with `Value::Missing`, and the prologue computes their defaults.
+    pub required: u8,
     /// Number of registers the frame needs.
     pub num_regs: u8,
     /// Instructions.
@@ -189,6 +193,7 @@ impl ProtoBuilder {
                 // standard `From` trait); the target type is inferred.
                 name: name.into(),
                 arity: 0,
+                required: 0,
                 num_regs,
                 code: Vec::new(),
                 consts: Vec::new(),
@@ -215,9 +220,16 @@ impl ProtoBuilder {
         self
     }
 
-    /// Set the number of parameters.
+    /// Set the number of parameters (all required).
     pub fn arity(mut self, n: u8) -> ProtoBuilder {
         self.proto.arity = n;
+        self.proto.required = n;
+        self
+    }
+
+    /// Set the number of parameters without a default (after `arity`).
+    pub fn required(mut self, n: u8) -> ProtoBuilder {
+        self.proto.required = n;
         self
     }
 

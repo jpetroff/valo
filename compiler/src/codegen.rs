@@ -37,6 +37,7 @@
 //! | compile a new top-level item (`def`)        | `compile`, the `for item in &program.items` loop  |
 //! | change how a function is compiled           | `compile_fn` (parameters, body, `RETURN`)         |
 //! | change how calls are compiled               | `FuncState::call` (the argument window)           |
+//! | change how defaults are computed            | the prologue loop in `compile_fn` (`JMPIFSET`)    |
 //! | change how names are loaded                 | `FuncState::name` (globals: `GETGLOBAL`, locals: `MOVE`) |
 //! | map an operator to an opcode                | `ExprKind::Binary` arm (`let opcode = match op`) |
 //! | add a constant type (string, M7)            | `ConstKey` + `FuncState::constant` + `Const` in `vm/src/chunk.rs` |
@@ -85,7 +86,7 @@ use valo_vm::opcode::{Instr, MAX_SJ, MIN_SJ, OpCode};
 
 use crate::ast::{self, Arg, BinOp, CmpLink, CmpOp, Expr, ExprKind, FnDef, Item, LogicOp, UnaryOp};
 use crate::diagnostic::Diagnostic;
-use crate::resolve::{BindingId, GlobalId, GlobalSlot, Res, Resolved};
+use crate::resolve::{BindingId, GlobalId, GlobalSlot, Res, Resolved, Slot};
 use crate::span::{SourceMap, Span};
 
 /// Code generation options.
@@ -198,6 +199,24 @@ fn compile_fn(d: &FnDef, resolved: &Resolved) -> Result<Proto, Vec<Diagnostic>> 
         }
     }
     fs.proto.arity = d.params.len().min(255) as u8;
+    fs.proto.required = d
+        .params
+        .iter()
+        .filter(|p| p.default.is_none())
+        .count()
+        .min(255) as u8;
+    // Prologue (M4b): a parameter the caller omitted holds `Missing`;
+    // compute its default into its own register. Defaults run in order, so
+    // each may use the parameters before it.
+    //     JMPIFSET p +n     ; passed: skip the default
+    //     <default → Rp>    ; n instructions
+    for (i, p) in d.params.iter().enumerate() {
+        let Some(default) = &p.default else { continue };
+        let at = fs.proto.code.len();
+        fs.emit(Instr::asbx(OpCode::JMPIFSET, i as u8, 0), p.span);
+        fs.expr(default, i as u8);
+        fs.patch_sbx(at);
+    }
     let dst = fs.alloc(d.body.span);
     fs.expr(&d.body, dst);
     fs.emit(Instr::abc(OpCode::RETURN, dst, 0, 0), d.body.span);
@@ -243,6 +262,7 @@ impl<'r> FuncState<'r> {
             proto: Proto {
                 name: name.into(),
                 arity: 0,
+                required: 0,
                 num_regs: 0,
                 code: Vec::new(),
                 consts: Vec::new(),
@@ -419,6 +439,28 @@ impl<'r> FuncState<'r> {
         self.proto.code[at] = Instr::sj(OpCode::JMP, offset as i32);
     }
 
+    /// Point the `JMPIFSET` at index `at` to the next instruction (16-bit
+    /// offset; E0301 if a default expression is too long).
+    fn patch_sbx(&mut self, at: usize) {
+        let offset = self.proto.code.len() - (at + 1);
+        let Ok(off) = i16::try_from(offset) else {
+            if !self.diags.iter().any(|d| d.code == "E0301") {
+                let s = self.proto.spans[at];
+                self.diags.push(Diagnostic::new(
+                    "E0301",
+                    "default value too long: more than 32767 instructions",
+                    Span {
+                        start: s.start,
+                        end: s.end,
+                    },
+                ));
+            }
+            return;
+        };
+        let a = self.proto.code[at].a();
+        self.proto.code[at] = Instr::asbx(OpCode::JMPIFSET, a, off);
+    }
+
     /// Evaluate `e` into register `dst`.
     /// EXTEND: every new `ExprKind` variant needs an arm here.
     fn expr(&mut self, e: &Expr, dst: u8) {
@@ -492,7 +534,9 @@ impl<'r> FuncState<'r> {
     /// A call (see the module docs). The window `[base, base+n]` is reserved
     /// before anything is evaluated, so the arguments can be computed in any
     /// order straight into their slots: a piped argument first (Q17), then
-    /// the callee, then the rest in source order.
+    /// the callee, then the rest in source order. With a `CallPlan` (known
+    /// callee, M4b) slot `k` is parameter `k`: keyword arguments land in
+    /// their parameter's slot and omitted parameters get `LOADMISSING`.
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg], piped: bool, dst: u8) {
         // Reuse dst as the window base when it is the topmost register.
         let base = if u16::from(dst) + 1 == self.free_reg {
@@ -500,21 +544,44 @@ impl<'r> FuncState<'r> {
         } else {
             self.alloc(callee.span)
         };
-        let slots: Vec<u8> = args.iter().map(|a| self.alloc(arg_span(a))).collect();
+        // reg_of[i] = register of args[i]; `missing` = slots with no argument.
+        let mut reg_of: Vec<Option<u8>> = vec![None; args.len()];
+        let mut missing = Vec::new();
+        let nslots = match self.resolved.calls.get(&e.id) {
+            Some(plan) => {
+                for slot in &plan.slots {
+                    let r = self.alloc(e.span);
+                    match *slot {
+                        Slot::Arg(i) => reg_of[i] = Some(r),
+                        Slot::Missing => missing.push(r),
+                    }
+                }
+                plan.slots.len()
+            }
+            None => {
+                for (i, a) in args.iter().enumerate() {
+                    reg_of[i] = Some(self.alloc(arg_span(a)));
+                }
+                args.len()
+            }
+        };
         let skip = usize::from(piped && !args.is_empty());
         if skip == 1 {
-            if let Some(x) = arg_value(&args[0]) {
-                self.expr(x, slots[0]);
-            }
-        }
-        self.expr(callee, base);
-        for (a, &r) in args.iter().zip(&slots).skip(skip) {
-            if let Some(x) = arg_value(a) {
+            if let (Some(x), Some(r)) = (arg_value(&args[0]), reg_of[0]) {
                 self.expr(x, r);
             }
         }
+        self.expr(callee, base);
+        for (a, r) in args.iter().zip(&reg_of).skip(skip) {
+            if let (Some(x), Some(r)) = (arg_value(a), *r) {
+                self.expr(x, r);
+            }
+        }
+        for r in missing {
+            self.emit(Instr::abc(OpCode::LOADMISSING, r, 0, 0), e.span);
+        }
         self.emit(
-            Instr::abc(OpCode::CALL, base, args.len().min(255) as u8, 0),
+            Instr::abc(OpCode::CALL, base, nslots.min(255) as u8, 0),
             e.span,
         );
         if base != dst {
@@ -817,6 +884,17 @@ mod tests {
             "print(sq(3) + add(1, sq(2)))\nfn sq(x: int) -> int = x * x\n\
              fn add(a: int, b: int) -> int:\n    let s = a + b\n    s\n\
              let r = 5 |> add(1)\nr |> print"
+        ));
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__codegen__tests__defaults_prologue.snap
+    #[test]
+    fn defaults_prologue() {
+        // Two defaults (the second uses the first parameter); calls with
+        // keywords out of order, with a gap, and through a pipe.
+        insta::assert_snapshot!(disasm(
+            "fn f(a: int, b: int = 1, c: int = a * 2) -> int = a + b + c\n\
+             f(1, c=3, b=4)\nf(1, c=3)\nf(1)\n5 |> f(b=0)"
         ));
     }
 }

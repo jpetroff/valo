@@ -69,6 +69,12 @@ pub enum Value {
     Closure(Rc<Closure>),
     /// A built-in function: index into `builtins::NATIVES` (M4).
     Native(NativeId),
+    /// Internal sentinel, never a language value: an argument the caller
+    /// omitted (a defaulted parameter, M4b). `CALL` puts it into the
+    /// parameter's register and the callee's prologue (`JMPIFSET`) replaces
+    /// it with the default before any other code runs; natives replace it
+    /// themselves. It never escapes into user code.
+    Missing,
 }
 
 /// A function value: compiled code plus the values it captured (plan D5).
@@ -101,6 +107,7 @@ impl Value {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
             Value::Closure(_) | Value::Native(_) => "function",
+            Value::Missing => "<missing>",
         }
     }
 }
@@ -122,6 +129,8 @@ impl fmt::Display for Value {
                 Some(n) => write!(f, "<native {}/{}>", n.name, n.params.len()),
                 None => f.write_str("<native ?>"),
             },
+            // Only visible in `--trace-exec` output.
+            Value::Missing => f.write_str("<missing>"),
         }
     }
 }

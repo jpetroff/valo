@@ -59,9 +59,15 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
     let (dl, dc) = program.line_col(p.def_span.start);
     // RUST: writing into a String cannot fail, but `writeln!` still returns a
     // `Result`; `let _ =` explicitly ignores it.
+    // `required=` only when some parameters have defaults (M4b).
+    let required = if p.required == p.arity {
+        String::new()
+    } else {
+        format!(" required={}", p.required)
+    };
     let _ = writeln!(
         out,
-        "{pad}function {} arity={} regs={} consts={} protos={}   ; {}:{dl}:{dc}",
+        "{pad}function {} arity={}{required} regs={} consts={} protos={}   ; {}:{dl}:{dc}",
         p.name,
         p.arity,
         p.num_regs,
@@ -97,6 +103,10 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
                 .get(instr.bx() as usize)
                 .map(|g| g.name.to_string()),
             OpCode::JMP => Some(format!("to {}", pc as i64 + 1 + instr.sj_offset() as i64)),
+            OpCode::JMPIFSET => Some(format!(
+                "to {} if passed",
+                pc as i64 + 1 + instr.sbx() as i64
+            )),
             OpCode::CLOSURE => p
                 .protos
                 .get(instr.bx() as usize)

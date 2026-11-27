@@ -232,6 +232,27 @@ with `piped = true`) evaluates `x` *before* `f` (Q17); keyword arguments
 (M4b) will be evaluated in source order straight into the slots of their
 parameters.
 
+**Keyword arguments and defaults** (M4b, plan D28). Parameters with a
+default are passed by name. For a call to a known fn the resolver records a
+`CallPlan`: which argument fills which parameter. `call` then makes window
+slot `k` parameter `k`, evaluates the arguments *in source order* into their
+slots, and puts `LOADMISSING` into a slot nobody filled; trailing omitted
+parameters are not passed at all (the VM pads them). The callee computes a
+missing value itself, in a prologue before its body:
+
+```text
+fn f(a: int, b: int = 1, c: int = a * 2)      f(1, c=3)
+  JMPIFSET  1 +1   ; b passed? skip              GETGLOBAL 0 f
+  LOADI     1 1                                  LOADI     1 1      a
+  JMPIFSET  2 +3   ; c passed? skip              LOADI     3 3      c (slot 3)
+  MOVE 2 0; LOADI 3 2; MUL 2 2 3                 LOADMISSING 2      b omitted
+  … body …                                       CALL      0 3
+```
+
+Defaults are compiled callee-side (not copied to every call site) because
+they may use earlier parameters, must work for calls through a function
+value, and are evaluated anew at each call.
+
 ```text
 print(sq(3))             5 |> add(1)  into R0
   GETGLOBAL 0 print        LOADI     1 5      piped value first

@@ -1,0 +1,6 @@
+fn area(w: int, h: int = 2, scale: int = 1) -> int = w * h * scale
+
+print(area(3))
+print(area(3, h=5))
+print(area(3, h=5, scale=10))
+print(area(3, scale=10, h=5))

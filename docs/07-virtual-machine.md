@@ -223,13 +223,17 @@ RETURN X (in g):  stack[base'-1] = R'[X]   → the caller finds the result in R[
                   pop frame; cut the stack back to the caller's window
 ```
 
-- **valo function** (`Value::Closure`): the argument count must equal the
-  arity, else R0207 (the compiler already rejects most such calls with
+- **valo function** (`Value::Closure`): the argument count must be between
+  `proto.required` and `proto.arity`, else R0207. Omitted trailing
+  parameters are filled with the internal sentinel `Value::Missing`; the
+  callee's prologue (`JMPIFSET p skip` + the default expression) replaces
+  it before the body runs, so `Missing` never reaches user code (the compiler already rejects most such calls with
   E0205; R0207 catches calls through a function *value*). The stack grows to
   `base' + num_regs` and a frame is pushed.
 - **built-in** (`Value::Native`): its `NativeDef` (`builtins.rs`) gives the
   name, parameters and a Rust function `fn(&mut Vm, Vec<Value>) -> Result<…>`.
-  The arguments are *moved* off the stack into the `Vec` (plan D12), the
+  The arguments are *moved* off the stack into the `Vec` (plan D12), padded
+  with `Missing` for omitted keyword parameters, the
   function runs, and its result goes to `R[A]`. No frame is pushed: an error
   inside a built-in is reported at the call.
 - anything else: R0202 "cannot call a value of type int".

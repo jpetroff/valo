@@ -43,8 +43,16 @@
 //!   checked at runtime from M10.
 //! - Errors: E0201 undefined name (+ did-you-mean), E0203 top-level name used
 //!   before its definition, E0205 wrong number of arguments, E0206 `_` used
-//!   as a value, E0207 defined twice, E0402/E0403 bad type, E0009 construct
-//!   of a later milestone (nested `fn`, `_` placeholder, keyword arguments).
+//!   as a value, E0207 defined twice, E0402/E0403 bad type, E0421 defaulted
+//!   parameter passed by position, E0422 keyword arguments to an unknown
+//!   callee, E0424 unknown keyword / required parameter passed by name,
+//!   E0425 keyword given twice, E0009 construct of a later milestone (nested
+//!   `fn`, `_` placeholder).
+//! - **Keyword arguments** (S19, plan D28): for a call to a known signature,
+//!   `plan_call` records which argument fills each parameter
+//!   (`Resolved::calls`, a `CallPlan`); omitted defaulted parameters become
+//!   `Slot::Missing`. Defaults are resolved in a scope holding only the
+//!   earlier parameters.
 //!
 //! ## Where to change things
 //!
@@ -54,12 +62,11 @@
 //! | add a scope-introducing construct         | push/pop `Resolver::locals` around it (see `ExprKind::Block`, `fn_def`) |
 //! | change the lookup order                   | `Resolver::lookup`                           |
 //! | change undefined-name messages            | `Resolver::undefined`, `suggest`             |
-//! | change argument checks of calls           | `Resolver::call`                             |
+//! | change argument checks of calls           | `Resolver::call`, `plan_call`, `wrong_count` |
 //! | add a builtin type name                   | `SCALAR_TYPES`, `GENERIC_TYPES`, `Resolver::check_type` |
 //! | change the `--dump resolved` format       | `dump`                                       |
 //!
-//! EXTEND: M4b normalises keyword arguments in `call`; M6 adds capture
-//! analysis for nested fns and lambdas.
+//! EXTEND: M6 adds capture analysis for nested fns and lambdas.
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -151,6 +158,28 @@ pub struct Resolved {
     pub locals: Vec<DefInfo>,
     /// Every name use, in source order.
     pub uses: Vec<Use>,
+    /// Calls to a statically known callee: which argument fills each
+    /// parameter (M4b). Calls not listed pass their arguments as written.
+    pub calls: HashMap<NodeId, CallPlan>,
+}
+
+/// How a call's arguments map onto the callee's parameters, in declaration
+/// order (keyword arguments normalised, plan D28).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallPlan {
+    /// One entry per parameter, up to the last one that is passed; omitted
+    /// trailing defaulted parameters are left out (the VM fills them with
+    /// `Missing`).
+    pub slots: Vec<Slot>,
+}
+
+/// What fills one parameter slot of a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// `args[i]` of the call (source order).
+    Arg(usize),
+    /// Nothing: the callee computes the default (`LOADMISSING`).
+    Missing,
 }
 
 /// Scalar type names (S4, S9, S10, S13).
@@ -164,8 +193,8 @@ const GENERIC_TYPES: &[(&str, Option<usize>)] =
 struct Sig {
     /// Display name.
     name: String,
-    /// Parameter names in order.
-    params: Vec<String>,
+    /// Parameter names in order, and whether each has a default.
+    params: Vec<(String, bool)>,
     /// Where it is defined (`None` for built-ins).
     def: Option<Span>,
 }
@@ -237,7 +266,11 @@ impl Resolver {
                 Res::Global(g),
                 Sig {
                     name: n.name.to_string(),
-                    params: n.params.iter().map(|p| p.name.to_string()).collect(),
+                    params: n
+                        .params
+                        .iter()
+                        .map(|p| (p.name.to_string(), p.has_default))
+                        .collect(),
                     def: None,
                 },
             );
@@ -276,7 +309,11 @@ impl Resolver {
             Res::Global(g),
             Sig {
                 name: d.name.clone(),
-                params: d.params.iter().map(|p| p.name.clone()).collect(),
+                params: d
+                    .params
+                    .iter()
+                    .map(|p| (p.name.clone(), p.default.is_some()))
+                    .collect(),
                 def: Some(d.name_span),
             },
         );
@@ -383,11 +420,17 @@ impl Resolver {
                 );
             }
         }
-        let mut scope: Vec<(String, BindingId)> = Vec::new();
+        // Parameters are added one by one, so a default sees only the
+        // parameters before it (S19).
+        self.locals.push(Vec::new());
         for p in &d.params {
             if let Some(t) = &p.ann {
                 self.check_type(t);
             }
+            if let Some(default) = &p.default {
+                self.expr(default);
+            }
+            let scope = self.locals.last().expect("pushed above");
             if let Some((_, first)) = scope.iter().find(|(n, _)| *n == p.name) {
                 let first_span = self.out.locals[first.0 as usize].span;
                 self.diags.push(
@@ -402,12 +445,14 @@ impl Resolver {
             }
             let id = self.new_local(&p.name, p.span);
             self.out.lets.insert(p.id, Some(Res::Local(id)));
-            scope.push((p.name.clone(), id));
+            self.locals
+                .last_mut()
+                .expect("pushed above")
+                .push((p.name.clone(), id));
         }
         if let Some(t) = &d.ret {
             self.check_type(t);
         }
-        self.locals.push(scope);
         self.expr(&d.body);
         self.locals = saved_locals;
         self.fn_ctx = saved_ctx;
@@ -452,31 +497,15 @@ impl Resolver {
         }
     }
 
-    /// A call: resolve callee and arguments, then check the argument count
-    /// against a known signature (E0205).
+    /// A call: resolve callee and arguments. When the callee has a known
+    /// signature, check the arguments against it and record how they map
+    /// onto the parameters (`Resolved::calls`); otherwise only positional
+    /// arguments are allowed (E0422).
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg]) {
         self.expr(callee);
-        let mut positional = 0;
         for a in args {
             match a {
-                Arg::Positional(x) => {
-                    positional += 1;
-                    self.expr(x);
-                }
-                Arg::Keyword {
-                    value, name_span, ..
-                } => {
-                    self.expr(value);
-                    self.diags.push(
-                        Diagnostic::new(
-                            "E0009",
-                            "keyword arguments are not supported yet",
-                            *name_span,
-                        )
-                        .label("not implemented in this version of valo"),
-                    );
-                    return;
-                }
+                Arg::Positional(x) | Arg::Keyword { value: x, .. } => self.expr(x),
                 Arg::Placeholder(span) => {
                     self.diags.push(
                         Diagnostic::new(
@@ -490,46 +519,184 @@ impl Resolver {
                 }
             }
         }
-        let ExprKind::Name(_) = callee.kind else {
-            return;
+        let sig = match callee.kind {
+            ExprKind::Name(_) => self
+                .out
+                .names
+                .get(&callee.id)
+                .and_then(|r| self.known.get(r))
+                .copied(),
+            _ => None,
         };
-        let Some(&i) = self
-            .out
-            .names
-            .get(&callee.id)
-            .and_then(|r| self.known.get(r))
-        else {
-            return;
-        };
-        let sig = &self.sigs[i];
-        let want = sig.params.len();
-        if positional == want {
-            return;
+        match sig {
+            Some(i) => {
+                if let Some(plan) = self.plan_call(e, i, args) {
+                    self.out.calls.insert(e.id, plan);
+                }
+            }
+            None => {
+                for a in args {
+                    if let Arg::Keyword { name_span, .. } = a {
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0422",
+                                "keyword arguments need a function known at compile time",
+                                *name_span,
+                            )
+                            .label("the callee here is a computed value")
+                            .help("call a top-level fn or a built-in by its name, or pass the arguments by position"),
+                        );
+                    }
+                }
+            }
         }
+    }
+
+    /// Match `args` against signature `sigs[i]` (S19): positional arguments
+    /// fill the required parameters in order, keyword arguments name the
+    /// defaulted ones. Reports E0205, E0421, E0424, E0425; `None` on error.
+    fn plan_call(&mut self, e: &Expr, i: usize, args: &[Arg]) -> Option<CallPlan> {
+        let sig = self.sigs[i].clone();
+        let required = sig.params.iter().filter(|(_, d)| !d).count();
+        let mut slots: Vec<Option<usize>> = vec![None; sig.params.len()];
+        let mut positional = 0;
+        // Required parameters wrongly passed by name (E0424) still count as
+        // supplied, so the same mistake is not also reported as E0205.
+        let mut named_required = 0;
+        let mut ok = true;
+        for (j, a) in args.iter().enumerate() {
+            match a {
+                Arg::Positional(x) => {
+                    positional += 1;
+                    let k = positional - 1;
+                    if k >= required && k < sig.params.len() {
+                        let name = &sig.params[k].0;
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0421",
+                                format!("`{name}` has a default and must be passed by name"),
+                                x.span,
+                            )
+                            .label(format!("passed by position as parameter {}", k + 1))
+                            .help(format!(
+                                "write `{name}=…`: parameters with a default are keyword-only"
+                            )),
+                        );
+                        ok = false;
+                    } else if k < sig.params.len() {
+                        slots[k] = Some(j);
+                    }
+                }
+                Arg::Keyword {
+                    name, name_span, ..
+                } => match sig.params.iter().position(|(p, _)| p == name) {
+                    None => {
+                        let names: Vec<&str> = sig
+                            .params
+                            .iter()
+                            .filter(|(_, d)| *d)
+                            .map(|(p, _)| p.as_str())
+                            .collect();
+                        let mut d = Diagnostic::new(
+                            "E0424",
+                            format!("`{}` has no parameter named `{name}`", sig.name),
+                            *name_span,
+                        )
+                        .label("unknown keyword");
+                        if let Some(def) = sig.def {
+                            d = d.with(def, "defined here");
+                        }
+                        d = match suggest(name, &names) {
+                            Some(s) => d.help(format!("did you mean `{s}`?")),
+                            None if names.is_empty() => {
+                                d.help(format!("`{}` takes no keyword arguments", sig.name))
+                            }
+                            None => {
+                                d.help(format!("the keyword parameters are: {}", names.join(", ")))
+                            }
+                        };
+                        self.diags.push(d);
+                        ok = false;
+                    }
+                    Some(k) if !sig.params[k].1 => {
+                        named_required += 1;
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0424",
+                                format!("`{name}` is a required parameter of `{}`", sig.name),
+                                *name_span,
+                            )
+                            .label("passed by name")
+                            .help(format!(
+                                "pass `{name}` by position; only parameters with a default are passed by name"
+                            )),
+                        );
+                        ok = false;
+                    }
+                    Some(k) if slots[k].is_some() => {
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0425",
+                                format!("keyword argument `{name}` is given twice"),
+                                *name_span,
+                            )
+                            .label("second time")
+                            .with(arg_span(&args[slots[k].unwrap_or(0)]), "first time"),
+                        );
+                        ok = false;
+                    }
+                    Some(k) => slots[k] = Some(j),
+                },
+                Arg::Placeholder(_) => return None,
+            }
+        }
+        let supplied = positional + named_required;
+        if supplied < required || positional > sig.params.len() {
+            self.wrong_count(e, &sig, required, positional);
+            return None;
+        }
+        if !ok {
+            return None;
+        }
+        // Trailing omitted parameters are padded by the VM.
+        while slots.last() == Some(&None) {
+            slots.pop();
+        }
+        Some(CallPlan {
+            slots: slots
+                .into_iter()
+                .map(|s| s.map_or(Slot::Missing, Slot::Arg))
+                .collect(),
+        })
+    }
+
+    /// E0205: wrong number of positional arguments to a known callee.
+    fn wrong_count(&mut self, e: &Expr, sig: &Sig, want: usize, given: usize) {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let what = if want == sig.params.len() {
+            "argument"
+        } else {
+            "positional argument"
+        };
         let mut d = Diagnostic::new(
             "E0205",
             format!(
-                "`{}` takes {want} argument{} but {positional} {} given",
+                "`{}` takes {want} {what}{} but {given} {} given",
                 sig.name,
                 plural(want),
-                if positional == 1 { "was" } else { "were" }
+                if given == 1 { "was" } else { "were" }
             ),
             e.span,
         )
-        .label(format!(
-            "called with {positional} argument{}",
-            plural(positional)
-        ));
+        .label(format!("called with {given} {what}{}", plural(given)));
         if let Some(def) = sig.def {
             d = d.with(def, "defined here");
         }
-        if positional < want {
-            let shown: Vec<&str> = sig
-                .params
+        if given < want {
+            let shown: Vec<&str> = sig.params[..want]
                 .iter()
                 .enumerate()
-                .map(|(j, p)| if j < positional { p.as_str() } else { "_" })
+                .map(|(j, (p, _))| if j < given { p.as_str() } else { "_" })
                 .collect();
             d = d.help(format!(
                 "to fix only some arguments, use a partial: `{}({})`",
@@ -751,6 +918,14 @@ impl Resolver {
     }
 }
 
+/// Source span of a call argument.
+fn arg_span(a: &Arg) -> Span {
+    match a {
+        Arg::Positional(x) | Arg::Keyword { value: x, .. } => x.span,
+        Arg::Placeholder(s) => *s,
+    }
+}
+
 /// The candidate closest to `name` by edit distance, if close enough
 /// (at most `max(1, len / 3)` edits). Used for "did you mean" hints.
 pub fn suggest<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
@@ -944,6 +1119,28 @@ mod tests {
     }
 
     #[test]
+    fn keyword_arguments() {
+        let codes = |s: &str| -> Vec<&'static str> { resolve_src(s).unwrap_err() };
+        let f = "fn f(a: int, b: int = 1, c: int = 2) -> int = a + b + c\n";
+        assert!(resolve_src(&format!("{f}f(1)\nf(1, c=3)\nf(1, c=3, b=4)\n5 |> f(b=1)")).is_ok());
+        assert_eq!(codes(&format!("{f}f(1, 2)")), ["E0421"]);
+        assert_eq!(codes(&format!("{f}f(1, 2, 3)")), ["E0421", "E0421"]);
+        assert_eq!(codes(&format!("{f}f(1, d=2)")), ["E0424"]);
+        assert_eq!(codes(&format!("{f}f(1, a=2)")), ["E0424"]);
+        assert_eq!(codes(&format!("{f}f(1, b=2, b=3)")), ["E0425"]);
+        assert_eq!(codes(&format!("{f}f(b=2)")), ["E0205"]);
+        assert_eq!(
+            codes(&format!("{f}let h = if true then f else f\nh(1, b=2)")),
+            ["E0422"]
+        );
+        // Defaults see earlier parameters only.
+        assert_eq!(codes("fn g(a: int = b, b: int = 1) -> int = a"), ["E0201"]);
+        assert!(resolve_src("fn g(a: int, b: int = a * 2) -> int = b").is_ok());
+        // Built-ins go through the same signature check.
+        assert_eq!(codes("print(1, end=2)"), ["E0424"]);
+    }
+
+    #[test]
     fn function_errors() {
         let codes = |s| resolve_src(s).unwrap_err();
         assert_eq!(codes("fn f() -> int = 1\nfn f() -> int = 2"), ["E0207"]);
@@ -969,7 +1166,7 @@ mod tests {
             ["E0009", "E0201"]
         );
         assert_eq!(codes("fn f(x: int) -> int = x\nf(_)"), ["E0009"]);
-        assert_eq!(codes("fn f(x: int) -> int = x\nf(x=1)"), ["E0009"]);
+        assert_eq!(codes("fn f(x: int) -> int = x\nf(x=1)"), ["E0424"]);
         // In main, a later `let` is still E0203; from a fn body it is fine.
         assert_eq!(codes("print(y)\nlet y = 1"), ["E0203"]);
         assert!(resolve_src("fn f() -> int = y\nlet y = 1").is_ok());

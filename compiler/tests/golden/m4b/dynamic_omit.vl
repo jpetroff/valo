@@ -1,0 +1,5 @@
+# Called through a function value with only the required argument:
+# the defaults still apply.
+fn greet(n: int, times: int = 3) -> int = n * times
+fn apply(f: (int) -> int, x: int) -> int = f(x)
+print(apply(greet, 7))

@@ -1,0 +1,7 @@
+# Keyword arguments are evaluated in the order they are written.
+fn show(x: int) -> int:
+    print(x)
+    x
+
+fn f(a: int = 0, b: int = 0, c: int = 0) -> int = a * 100 + b * 10 + c
+print(f(c=show(3), b=show(2), a=show(1)))

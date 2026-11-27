@@ -72,8 +72,8 @@
 //!
 //! Syntax error codes: E0101 unexpected token, E0102 `if` without `else`,
 //! E0103 unclosed `(`, E0104 block ends with a `let`/`fn`, E0105 nesting too
-//! deep, E0410 missing parameter or return annotation (S13), E0009 construct
-//! not supported yet.
+//! deep, E0410 missing parameter or return annotation (S13), E0423 required
+//! parameter after a defaulted one (S19), E0009 construct not supported yet.
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -378,8 +378,10 @@ impl Parser<'_> {
         })
     }
 
-    /// `params := (param (',' param)* ','?)? ')'`, `param := NAME (':' type)?`.
-    /// Returns the parameters and the span of `)`.
+    /// `params := (param (',' param)* ','?)? ')'`,
+    /// `param := NAME (':' type)? ('=' expr)?`.
+    /// Returns the parameters and the span of `)`. Parameters with a default
+    /// are keyword-only and come after the required ones (S19, E0423).
     fn params(&mut self, fn_name: &str) -> PResult<(Vec<Param>, Span)> {
         let mut params = Vec::new();
         loop {
@@ -416,12 +418,34 @@ impl Parser<'_> {
                 );
                 None
             };
+            let default = if self.peek().kind == TokenKind::Eq {
+                self.bump();
+                Some(self.expr(0)?)
+            } else {
+                None
+            };
+            if default.is_none() {
+                if let Some(d) = params.iter().find(|p: &&Param| p.default.is_some()) {
+                    self.diags.push(
+                        Diagnostic::new(
+                            "E0423",
+                            format!(
+                                "required parameter `{name}` comes after a parameter with a default"
+                            ),
+                            t.span,
+                        )
+                        .label("no default")
+                        .with(d.span, "this parameter has a default")
+                        .help("put the required parameters first; parameters with defaults are passed by name"),
+                    );
+                }
+            }
             params.push(Param {
                 id: self.id(),
                 name,
                 span: t.span,
                 ann,
-                default: None,
+                default,
             });
             if self.peek().kind == TokenKind::Comma {
                 self.bump();
@@ -1370,6 +1394,12 @@ mod tests {
         assert_eq!(parse_codes("f(1 2)"), ["E0101"]);
         assert_eq!(parse_codes("f(a=1, 2)"), ["E0101"]);
         assert_eq!(parse_codes("f(1"), ["E0103"]);
+        // Defaulted parameters come last (S19).
+        assert_eq!(
+            parse_codes("fn f(a: int = 1, b: int) -> int = a\n1 +"),
+            ["E0423", "E0101"]
+        );
+        assert!(parse_codes("fn f(a: int, b: int = a + 1, c: int = 2,) -> int = a").is_empty());
         assert_eq!(
             parse_codes("let v = if a:\n    fn f() -> int = 1\nelse: 2"),
             ["E0104"]
