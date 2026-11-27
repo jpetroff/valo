@@ -45,6 +45,10 @@ constants: (none)
     0026  [6:9]   TAILCALL  4 2
     0027  [2:5]   RETURN    2
   constants: (none)
+  locals:
+    R0   n          pc 0000..0028
+    R1   acc        pc 0000..0028
+    R3   m          pc 0021..0027
   function g arity=1 regs=5 consts=0 protos=0   ; t.vl:7:4
     0000  [7:23]  LOADI     1 1
     0001  [7:27]  GETGLOBAL 2 3      ; loop
@@ -54,3 +58,5 @@ constants: (none)
     0005  [7:23]  ADD       1 1 2
     0006  [7:23]  RETURN    1
   constants: (none)
+  locals:
+    R0   n          pc 0000..0007

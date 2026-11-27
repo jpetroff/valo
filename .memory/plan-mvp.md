@@ -290,6 +290,7 @@ constants: (none)
 | R04xx | data | R0401 index out of range / missing dict key (message: access path + index/key + len), R0402 unwrap on `none`, R0403 unwrap on Err |
 | R06xx | results | R0601 unhandled Err at top level (payload + context chain + origin/propagation sites) |
 | R07xx | assertions | R0701 assertion failed (expr source text, left/right values for a top-level comparison) |
+| R08xx | interruption | R0801 run stopped from outside (debugger Stop/terminate; later Ctrl+C) — never printed by valo-dap |
 | R05xx | host | R0501 stdout/stderr write failure (file errors are `Err` values, not faults) |
 
 Runtime error output (stderr), exact shape from M4, polished in M9:

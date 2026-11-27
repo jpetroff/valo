@@ -23,3 +23,7 @@ function <main> arity=0 regs=4 consts=0 protos=0   ; t.vl:1:1
   0017  [9:8]   LOADUNIT  0
   0018  [9:8]   RETURN    0
 constants: (none)
+locals:
+  R1   a          pc 0004..0008
+  R2   b          pc 0005..0008
+  R1   c          pc 0014..0015

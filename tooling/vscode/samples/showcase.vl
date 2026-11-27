@@ -1,0 +1,187 @@
+#!/usr/bin/env valo
+## showcase.vl — one file that exercises every rule of the Valo TextMate grammar.
+##
+## How the highlighting is built (the JSON files cannot carry comments):
+## - syntaxes/valo.tmLanguage.json is a TextMate grammar (scopeName `source.valo`).
+##   Each rule is a regex (`match`) or a `begin`/`end` region; at every position
+##   the earliest match wins, ties go to the rule listed first, so headers
+##   (`fn`, `def`), prefixed strings and lambdas are listed before keywords,
+##   calls and operators. A rule's `comment` field explains what it covers.
+## - `{expr}` in strings and commands includes the whole grammar again, so any
+##   expression is highlighted inside interpolation.
+## - Indented `def` bodies are found by indentation: the region ends at the
+##   first non-blank line that is not indented deeper than the `def`.
+## - language-configuration.json drives the editor, not colours: `#` toggles
+##   comments, brackets/quotes/backticks auto-close, folding follows
+##   indentation (`offSide`), and Enter indents after a line ending in
+##   `:`, `=>`, `~>`, `=` or `as` (a trailing `# comment` is ignored).
+##
+## This file follows .memory/syntax.md, which runs ahead of the compiler, and
+## is not meant to run: `test`/`mock` belong in *_test.vl files, imports are
+## post-MVP. Open it in VS Code with the extension to eyeball every scope.
+
+# --- imports (S16) -----------------------------------------------------------
+import json
+import std.proc as p
+import ./lib/disks
+from text import lines, trim
+
+# --- type definitions (S8, S18, S20) -----------------------------------------
+def Disk as
+    host: str
+    mount: str = "/"          # field default
+    used_pct: int
+
+def MaybeInt as int | none
+def Shape as Circle(r: float) | Rect(w: float, h: float)
+
+def Event as
+    | Up(host: str)
+    | Down(host: str, reason: str = "unknown")
+    | Full(disk: Disk)
+    | Maintenance
+
+def Page[T] as
+    items: list[T]
+    total: int
+    lookup: dict[str, tuple[int, str]]
+
+def Tree[T] as
+    | Leaf
+    | Node(left: Tree[T], value: T, right: Tree[T])
+
+# --- functions (S2, S13, S19, S20, S21) --------------------------------------
+fn grade(p: int) -> str:
+    if p > 90: "crit"
+    elif p > 80: "warn"
+    else: "ok"
+
+fn add(x: int, y: int) -> int = x + y
+
+## Doc comment: attaches to `first`.
+fn first[T](xs: list[T]) -> T | none:
+    if len(xs) > 0 then xs[0] else none
+
+fn swap[A, B](pair: (A, B)) -> (B, A):
+    let (a, b) = pair
+    (b, a)
+
+fn apply(f: (int, int) -> int, g: str -> int, h: () -> str) -> any:
+    f(g(h()), 1)
+
+fn read_pct(path: str) -> int ! error:
+    let text = read_file(path) |> context("reading {path}")?
+    match parse_int(trim(text)):
+        none ~> Err(error("not a number: {text}"))
+        p ~> Ok(p)
+
+fn sum_sq_even(xs: list[int]) -> int =
+    xs |> filter(x => x % 2 == 0) |> map(x => x ** 2) |> reduce(0, (acc, x) => acc + x)
+
+fn parse_line(host: str, line: str) -> Disk | none:
+    match line:
+        re"(?<pct>\d+)% (?<mnt>\S+)$" ~> Disk(host=host, mount=mnt, used_pct=int(pct))
+        _ ~> none
+
+fn df(
+    host: str,
+    mount: str = "/",
+    env: dict[str, str] = {},
+    tags: list[str] = ["a", "b"],
+) -> list[Disk] ! error:   # io inferred (S22)
+    fn quote(s: str) -> str = "'{s}'"           # nested fn (S21)
+    let out = p.run(`ssh {host} df -P {mount}`, timeout=10, allow_fail=false)?
+    let rows = out.stdout
+        |> lines
+        |> drop(1)
+    rows |> filter_map(parse_line(host, _)) |> Ok
+
+fn area(s: Shape) -> float:
+    match s:
+        Circle(r) if r > 0.0 ~> 3.14159 * r ** 2
+        Rect(w=w, h=h) ~> w * h
+        _ ~>
+            assert false
+            0.0
+
+# --- bindings, numbers, operators (S5, S9, S11, M1 notes) --------------------
+let port: int = 8080
+let mask: int = 0xFF_FF
+let mode = 0o755
+let bits = 0b1010_0101
+let big = 1_000_000
+let ratio = 1.5
+let tiny = 1e-3
+let huge = 6.022_140e23
+let flag: bool = true and not false or none == none
+let maybe: int | none = none
+let q = 7 // 2 + 7 % 2 - 2 ** 3 * 4 / 2
+let ok = 0 < port <= 65_535 and port != 22 and mode >= 0
+let _ = print("side effect only")
+
+# --- lambdas, calls, partial application, pipes (S1, S3, S19) ----------------
+let inc = x => x + 1
+let typed = (x: int, y: int) => x * y
+let thunk = () => read_line()
+let add_one = add(1, _)
+let handler = req =>
+    let body = req.body
+    json.parse(body)
+let n = "42" |> int |> float |> str |> len
+let total = range(10) |> flat_map(i => [i, i]) |> get(0)
+
+# --- collections, comprehensions, records (S14, S15, S17) --------------------
+let disks = [Disk(host="nas", used_pct=91), Disk(host="pi", used_pct=40)]
+let bumped = Disk(**disks[0], used_pct=95)             # copy-update via spread
+let pair = (1, "one")
+let single = (1,)
+let unit = ()
+let full = disks |> filter(d => d.used_pct > 85)
+let status = if len(full) > 0 then "alert" else "ok"
+let usage = {d.host: d.used_pct for d in disks}        # dict comprehension
+let grid = [(h, port) for h in ["a", "b"] for port in [22, 80] if h != "b"]
+let checked = Disk.validate({"host": "nas", "used_pct": 3})
+let up = Event.Up(host="nas")
+let ev = Maintenance
+match disks:
+    [first_disk, *rest] ~> first_disk.host
+    [] ~> "none"
+
+# --- strings (S12, S24) ------------------------------------------------------
+let name = "nas"
+let greeting = "Disk {disks[0].mount} on {name}: {grade(bumped.used_pct)}"
+let nested = "outer {"inner {name}"} and {{"k": 1}.k}"
+let escapes = "tab\t newline\n quote\" backslash\\ braces \{ \} smile \u{1F600}"
+let bad_escape = "\q is flagged"
+let raw = r"C:\temp\{not interpolated}"
+let block = """
+    Report for {name}
+    usage: {usage}
+    """
+let raw_block = r"""
+    {"json": "template", "port": 8080}
+    """
+let pattern = re"(?i)^error:\s+(?<code>[A-Z]{2,}\d*)\.?$"
+let multi_re = re"""
+    (?x) \d{4} - \d{2}
+    """
+let is_err = "Error: E42" =~ pattern
+let not_err = "fine" !~ pattern
+
+# --- command literals (S23) --------------------------------------------------
+let mounts = ["/", "/home"]
+let c = `df -P --output=pcent {*mounts}`
+let piped = `ps aux` | `grep "valo {name}" --color=never` | `wc -l`
+let escaped = `echo \`literal\` \{braces\} --name={name}`
+
+# --- tests (S25) ---------------------------------------------------------------
+test "grade thresholds":
+    mock read_file = path => Ok("91")
+    assert grade(95) == "crit"
+    assert read_pct("/etc/valo/limit")? == 91
+
+# --- composite tail (from .memory/syntax.md) ---------------------------------
+full |> each(d => print("Disk {d.mount} on {d.host}: {grade(d.used_pct)}"))
+let cfg = json.parse(read_file("cfg.json")?)?          # needs `import json` (post-MVP)
+let limit_port = cfg.server.port                       # .key sugar on dicts
+let limit = read_pct("/etc/valo/limit")?    # unhandled Err → exit 1 with chain

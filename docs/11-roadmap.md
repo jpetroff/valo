@@ -29,6 +29,13 @@ records and unions (M13), commands and the OS layer (M14), regex (M15), test
 files (M16), and the effect handler (`--dry-run`, `--record`, `--replay`) built
 on `host.rs`.
 
+Editor tooling grows alongside: each milestone also updates the TextMate
+grammar and, where it adds names or scopes, the language server. The plan per
+milestone is in `tooling/lsp/README.md`; how it works is chapter 12. The
+debugger (`tooling/dap`, chapter 13) follows too: new values need a way to be
+shown in the Variables view, new scopes (closures, M6) a scope of their own;
+its checklist is in `tooling/dap/README.md`.
+
 ## Patterns you will reuse
 
 - **Add a token** → `token.rs` + `Lexer::token` (chapter 3).
@@ -41,6 +48,8 @@ on `host.rs`.
 - **Add an error** → a code, a message, a golden test (chapters 8, 10).
 - **Every feature** → a golden test written *before* the implementation,
   with hand-written expected output.
+- **New syntax** → a rule in `tooling/vscode/syntaxes/valo.tmLanguage.json`
+  and a line in `tooling/vscode/samples/showcase.vl` (chapter 12).
 
 ## The open questions that block upcoming work
 

@@ -46,6 +46,7 @@
 //! | change how blocks use registers             | `FuncState::block`                               |
 //! | add an optimisation (constant folding…)     | `FuncState::expr` (see the `-<literal>` fold)    |
 //! | change register limits                      | `MAX_REGS`, `FuncState::alloc`                   |
+//! | change debug info for locals (debugger, D3)  | `FuncState::declare_local`, `close_locals`        |
 //!
 //! ## Functions and calls (M4)
 //!
@@ -82,7 +83,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use valo_vm::chunk::{Const, GlobalDesc, GlobalKind, NativeId, Program, Proto, SrcSpan};
+use valo_vm::chunk::{Const, GlobalDesc, GlobalKind, LocalInfo, NativeId, Program, Proto, SrcSpan};
 use valo_vm::opcode::{Instr, MAX_SJ, MIN_SJ, OpCode};
 
 use crate::ast::{self, Arg, BinOp, CmpLink, CmpOp, Expr, ExprKind, FnDef, Item, LogicOp, UnaryOp};
@@ -196,7 +197,7 @@ fn compile_fn(d: &FnDef, resolved: &Resolved) -> Result<Proto, Vec<Diagnostic>> 
     for p in &d.params {
         let r = fs.alloc(p.span);
         if let Some(Some(Res::Local(b))) = resolved.lets.get(&p.id).copied() {
-            fs.locals.insert(b, r);
+            fs.declare_local(b, r);
         }
     }
     fs.proto.arity = d.params.len().min(255) as u8;
@@ -256,6 +257,9 @@ enum ConstKey {
 /// Registers are 8-bit operands.
 const MAX_REGS: u16 = 255;
 
+/// `LocalInfo::end_pc` of a local whose scope has not ended yet.
+const OPEN: u32 = u32::MAX;
+
 impl<'r> FuncState<'r> {
     fn new(name: &str, def_span: Span, resolved: &'r Resolved) -> FuncState<'r> {
         FuncState {
@@ -271,11 +275,36 @@ impl<'r> FuncState<'r> {
                 spans: Vec::new(),
                 def_span: def_span.into(),
                 protos: Vec::new(),
+                locals: Vec::new(),
             },
             free_reg: 0,
             max_reg: 0,
             consts: HashMap::new(),
             diags: Vec::new(),
+        }
+    }
+
+    /// Bind a local to register `r` from the next instruction on, and record
+    /// it in the debug info (`Proto::locals`). Its range stays open until
+    /// `close_locals` (end of block) or `finish` (parameters).
+    fn declare_local(&mut self, b: BindingId, r: u8) {
+        self.locals.insert(b, r);
+        let name = self.resolved.locals[b.0 as usize].name.as_str().into();
+        self.proto.locals.push(LocalInfo {
+            name,
+            reg: r,
+            start_pc: self.proto.code.len() as u32,
+            end_pc: OPEN,
+        });
+    }
+
+    /// End the scope of every local declared since `first` that is still open.
+    fn close_locals(&mut self, first: usize) {
+        let pc = self.proto.code.len() as u32;
+        for l in &mut self.proto.locals[first..] {
+            if l.end_pc == OPEN {
+                l.end_pc = pc;
+            }
         }
     }
 
@@ -286,6 +315,7 @@ impl<'r> FuncState<'r> {
         if !self.diags.is_empty() {
             return Err(self.diags);
         }
+        self.close_locals(0); // parameters live to the end
         self.proto.num_regs = self.max_reg.max(1) as u8;
         Ok(self.proto)
     }
@@ -629,6 +659,7 @@ impl<'r> FuncState<'r> {
     /// them.
     fn block(&mut self, items: &[Item], dst: u8, tail: bool) {
         let mark = self.free_reg;
+        let first_local = self.proto.locals.len();
         for (i, item) in items.iter().enumerate() {
             let last = i + 1 == items.len();
             match item {
@@ -644,15 +675,15 @@ impl<'r> FuncState<'r> {
                     let r = self.alloc(b.init.span);
                     self.expr(&b.init, r);
                     match self.resolved.lets.get(&b.id).copied().flatten() {
-                        Some(Res::Local(id)) => {
-                            self.locals.insert(id, r);
-                        }
+                        Some(Res::Local(id)) => self.declare_local(id, r),
                         // `let _ = …`: evaluated, then dropped.
                         _ => self.free_to(r),
                     }
                 }
             }
         }
+        // The block's `let`s go out of scope here (debug info, D3).
+        self.close_locals(first_local);
         self.free_to(mark as u8);
     }
 

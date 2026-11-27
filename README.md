@@ -17,8 +17,12 @@ valo/                      Cargo workspace
 │        │
 │        │ depends on (bytecode types)
 │        ▼
-└── vm/        valo-vm         bytecode format, values, interpreter
-    └── bin: valo-vm           runs precompiled .vlc files
+├── vm/        valo-vm         bytecode format, values, interpreter
+│   └── bin: valo-vm           runs precompiled .vlc files
+└── tooling/                   developer tools (see tooling/README.md)
+    ├── lsp/   valo-lsp        language server: errors as you type in any LSP editor
+    ├── dap/   valo-dap        debug adapter: run/debug .vl files from VS Code (DAP)
+    └── vscode/                VS Code extension: highlighting, LSP client, debugger
 ```
 
 The dependency only goes one way: `valo-vm` never depends on the compiler, so
@@ -62,6 +66,19 @@ cargo fmt --check
 
 - `valo-compiler` (`compiler/`): turns `.vl` source into bytecode, and provides the `valo` CLI.
 - `valo-vm` (`vm/`): owns the bytecode format and runtime, and provides the `valo-vm` runner.
+- `valo-lsp` (`tooling/lsp/`): language server built on `valo-compiler`
+  (uses `lsp-server`, `lsp-types`, `serde_json`).
+- `valo-dap` (`tooling/dap/`): debug adapter built on `valo-compiler` and
+  `valo-vm` (uses `serde_json`; the protocol framing is hand-written).
+
+## Editor support
+
+`tooling/` holds a VS Code extension (syntax highlighting, indentation), the
+`valo-lsp` language server (compile errors as you type) and the `valo-dap`
+debug adapter (F5 runs a `.vl` file under the debugger, with breakpoints
+the call stack, stepping, variables, and stopping at runtime errors). Install steps: [tooling/README.md](tooling/README.md); how
+they work: [docs/12-editor-tooling.md](docs/12-editor-tooling.md) and
+[docs/13-debugger.md](docs/13-debugger.md).
 
 ## Planned crates
 
@@ -73,7 +90,7 @@ needs it starts:
 - **imbl**: persistent (immutable, structurally shared) collections for runtime
   lists and maps.
 - **regex**: a regular-expression standard library module.
-- **serde_json**: a JSON standard library module.
+- **serde_json**: a JSON standard library module (already used by `valo-lsp`).
 - **comrak**: Markdown rendering for a standard library module or doc tooling.
 - **ureq**: a blocking HTTP client standard library module.
 - **rustyline / reedline**: line editing for an interactive REPL.

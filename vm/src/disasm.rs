@@ -14,6 +14,9 @@
 //!   0  int 70000
 //! ```
 //!
+//! A function with parameters or `let`s also lists its debug table:
+//! `locals:` with one `R<reg> <name> pc <start>..<end>` line each.
+//!
 //! Columns: instruction index (`pc`), `[line:col]` of the source that produced
 //! it, mnemonic, operands (`A B C`, `A Bx`, …), and an optional `; comment`
 //! (the constant value for `LOADK`, the global's name for `GETGLOBAL` /
@@ -29,6 +32,7 @@
 //! | show a helpful comment for an opcode | `let comment = match op { ... }`|
 //! | print a new kind of constant         | `const_repr`, `const_entry`     |
 //! | change how nested functions print    | end of `proto` (children follow the parent's constants, indented one level) |
+//! | change the `locals:` debug table     | after `constants:` in `proto`   |
 //!
 //! Changing the format changes snapshot files
 //! (`compiler/src/snapshots/*.snap`); re-run tests with `INSTA_UPDATE=always`
@@ -129,6 +133,18 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
         let _ = writeln!(out, "{pad}constants:");
         for (i, k) in p.consts.iter().enumerate() {
             let _ = writeln!(out, "{pad}  {i}  {}", const_entry(k));
+        }
+    }
+    // Debug info for the debugger's Variables view (D3); only functions
+    // with parameters or `let`s have any.
+    if !p.locals.is_empty() {
+        let _ = writeln!(out, "{pad}locals:");
+        for l in &p.locals {
+            let _ = writeln!(
+                out,
+                "{pad}  R{:<3} {:<10} pc {:04}..{:04}",
+                l.reg, l.name, l.start_pc, l.end_pc
+            );
         }
     }
     for child in &p.protos {

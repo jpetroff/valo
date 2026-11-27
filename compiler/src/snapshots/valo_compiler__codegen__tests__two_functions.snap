@@ -36,6 +36,8 @@ constants: (none)
     0002  [2:24]  MUL       1 1 2
     0003  [2:24]  RETURN    1
   constants: (none)
+  locals:
+    R0   x          pc 0000..0004
   function add arity=2 regs=5 consts=0 protos=0   ; t.vl:3:4
     0000  [4:13]  MOVE      3 0
     0001  [4:17]  MOVE      4 1
@@ -43,3 +45,7 @@ constants: (none)
     0003  [5:5]   MOVE      2 3
     0004  [4:9]   RETURN    2
   constants: (none)
+  locals:
+    R0   a          pc 0000..0005
+    R1   b          pc 0000..0005
+    R3   s          pc 0003..0004

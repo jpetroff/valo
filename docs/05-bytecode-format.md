@@ -122,6 +122,8 @@ pub struct Proto {
     pub consts: Vec<Const>,     // the constant pool
     pub spans: Vec<SrcSpan>,    // spans[pc] = source of code[pc]   (chapter 2)
     pub def_span: SrcSpan,      // where the function is defined
+    pub protos: Vec<Rc<Proto>>, // nested functions (CLOSURE operand)
+    pub locals: Vec<LocalInfo>, // debug info: register ↔ variable name, per pc range (chapter 13)
 }
 
 pub enum Const { Int(i64), Float(f64) }     // M7 adds Str

@@ -27,6 +27,7 @@
 //! | change `--trace-exec` output                 | `Vm::trace_instr`                                  |
 //! | change how calls work                        | `Vm::call` (CALL), `Vm::tail_call` (TAILCALL), `Vm::do_return` (RETURN), `Frame` |
 //! | change stack/recursion limits                | `MAX_FRAMES`, `MAX_STACK`                           |
+//! | change when the debugger is called           | `Vm::debug_line`, `Vm::debug_error` (hook API in `debug.rs`) |
 //! | let natives do I/O                           | `Vm::write_stdout` (natives get `&mut Vm`)          |
 //! | change how globals are stored                | `Vm::globals`, `GETGLOBAL`/`SETGLOBAL` arms         |
 //!
@@ -65,6 +66,7 @@ use std::rc::Rc;
 
 use crate::builtins::NATIVES;
 use crate::chunk::{Const, GlobalKind, Program, Proto};
+use crate::debug::{DebugHook, LineTable, Resume, VmView};
 use crate::error::{ErrorKind, RuntimeError, TraceEntry};
 use crate::host::Host;
 use crate::opcode::{Format, Instr, OpCode};
@@ -84,16 +86,17 @@ pub struct Options {
 }
 
 /// One activation record: the state of one running function.
+/// `pub(crate)`: the debugger's `VmView` (`debug.rs`) reads frames.
 #[derive(Debug)]
-struct Frame {
+pub(crate) struct Frame {
     /// The function being executed (`<main>` is a closure too).
-    closure: Rc<Closure>,
+    pub(crate) closure: Rc<Closure>,
     /// Index of `R0` in the value stack; the function slot is `base - 1`.
-    base: usize,
+    pub(crate) base: usize,
     /// Index of the next instruction ("program counter").
-    pc: usize,
+    pub(crate) pc: usize,
     /// Frames this one replaced by tail calls (M5); shown in traces.
-    tail_calls: u32,
+    pub(crate) tail_calls: u32,
 }
 
 /// The virtual machine.
@@ -112,9 +115,15 @@ pub struct Vm<'h> {
     globals: Vec<Option<Value>>,
     /// Name of each global slot, for error messages.
     global_names: Vec<Rc<str>>,
+    /// Whether each global slot is a built-in (the debugger hides those).
+    global_builtin: Vec<bool>,
     /// Where effects (printing) go.
     host: &'h mut dyn Host,
     options: Options,
+    /// An attached debugger (`valo-dap`), called at every line start.
+    hook: Option<&'h mut dyn DebugHook>,
+    /// Which instructions start a line; built by `run` when a hook is set.
+    lines: Option<LineTable>,
 }
 
 impl<'h> Vm<'h> {
@@ -125,9 +134,19 @@ impl<'h> Vm<'h> {
             frames: Vec::new(),
             globals: Vec::new(),
             global_names: Vec::new(),
+            global_builtin: Vec::new(),
             host,
             options,
+            hook: None,
+            lines: None,
         }
+    }
+
+    /// Attach a debugger: `hook.on_line` runs before the first instruction
+    /// of every source line (`debug.rs`). Without a hook the loop pays one
+    /// `Option` check per instruction.
+    pub fn set_hook(&mut self, hook: &'h mut dyn DebugHook) {
+        self.hook = Some(hook);
     }
 
     /// Run a program to completion and return `main`'s result.
@@ -145,6 +164,14 @@ impl<'h> Vm<'h> {
             })
             .collect();
         self.global_names = program.globals.iter().map(|g| Rc::clone(&g.name)).collect();
+        self.global_builtin = program
+            .globals
+            .iter()
+            .map(|g| matches!(g.kind, GlobalKind::Native(_)))
+            .collect();
+        if self.hook.is_some() {
+            self.lines = Some(LineTable::new(program));
+        }
         // Slot 0 is main's function slot (Lua convention); registers follow.
         self.stack
             .resize(1 + main.proto.num_regs as usize, Value::Unit);
@@ -157,7 +184,10 @@ impl<'h> Vm<'h> {
         });
         // RUST: `map_err` transforms only the error case; here it attaches
         // the stack trace before the error leaves the VM.
-        self.execute().map_err(|e| self.unwind(e))
+        self.execute().map_err(|e| {
+            self.debug_error(&e);
+            self.unwind(e)
+        })
     }
 
     /// Attach a stack trace (innermost first) to an error.
@@ -188,6 +218,12 @@ impl<'h> Vm<'h> {
     /// The fetch–decode–execute loop.
     fn execute(&mut self) -> Result<Value, RuntimeError> {
         loop {
+            // ---- debugger ----------------------------------------------
+            // A hook may stop here (it blocks) or abort the run.
+            if self.hook.is_some() {
+                self.debug_line()?;
+            }
+
             // ---- fetch -------------------------------------------------
             // RUST: `last_mut()` returns `Option<&mut Frame>`; `expect` unwraps
             // it or panics with the message (a bug, never a user error).
@@ -421,6 +457,56 @@ impl<'h> Vm<'h> {
                 self.trace_instr(&proto, at, instr, ra)?;
             }
         }
+    }
+
+    /// Call the debug hook if the next instruction starts a source line.
+    fn debug_line(&mut self) -> Result<(), RuntimeError> {
+        // RUST: the borrows below are of *different fields* of `self`
+        // (`hook` mutably, `frames`/`stack`/`globals`/`lines` read-only),
+        // which Rust allows inside one function body.
+        let (Some(hook), Some(lines)) = (self.hook.as_mut(), self.lines.as_ref()) else {
+            return Ok(());
+        };
+        let frame = self.frames.last().expect("execute without a frame");
+        let Some(line) = lines.line_start(&frame.closure.proto, frame.pc) else {
+            return Ok(());
+        };
+        let view = VmView {
+            frames: &self.frames,
+            stack: &self.stack,
+            globals: &self.globals,
+            global_names: &self.global_names,
+            global_builtin: &self.global_builtin,
+            at_error: false,
+        };
+        match hook.on_line(&view, line) {
+            Resume::Continue => Ok(()),
+            Resume::Abort => Err(RuntimeError::new(
+                ErrorKind::Interrupted,
+                "program stopped by the debugger",
+            )),
+        }
+    }
+
+    /// Show a runtime error to an attached debugger while every frame and
+    /// register is still intact: `unwind` runs only after the hook returns.
+    /// An `Interrupted` error came from the debugger itself and is not shown.
+    fn debug_error(&mut self, err: &RuntimeError) {
+        if err.kind == ErrorKind::Interrupted {
+            return;
+        }
+        let Some(hook) = self.hook.as_mut() else {
+            return;
+        };
+        let view = VmView {
+            frames: &self.frames,
+            stack: &self.stack,
+            globals: &self.globals,
+            global_names: &self.global_names,
+            global_builtin: &self.global_builtin,
+            at_error: true,
+        };
+        hook.on_error(&view, err);
     }
 
     /// The running frame.

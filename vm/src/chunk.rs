@@ -23,6 +23,7 @@
 //! | describe global slots (natives, M4)           | `struct GlobalDesc`, `enum GlobalKind`       |
 //! | add nested functions                          | `Proto::protos` (indexed by `CLOSURE` Bx)    |
 //! | build bytecode by hand in a VM test          | `ProtoBuilder` (see tests in `vm.rs`)       |
+//! | record more debug info per local (types, M10) | `struct LocalInfo` (+ `FuncState::declare_local` in codegen) |
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -100,6 +101,37 @@ pub struct Proto {
     /// creates a closure of `protos[Bx]`. For `<main>` these are the
     /// top-level `fn`s (M4).
     pub protos: Vec<Rc<Proto>>,
+    /// Debug info: which register holds which named local, and when
+    /// (parameters first, then `let`s in the order they are compiled).
+    /// Only the debugger reads it (Variables view, D3).
+    pub locals: Vec<LocalInfo>,
+}
+
+/// One named local variable of a function: lives in register `reg` while
+/// `start_pc <= pc < end_pc` (Lua's `LocVar` in `lfunc.h`; DWARF location
+/// lists play the same role in native code).
+///
+/// Registers have no names at run time; without this table a debugger
+/// could only show `R0`, `R1`, … A shadowing `let x` gets its own entry;
+/// both may be live at once, and the later one is the visible one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalInfo {
+    /// Source name.
+    pub name: Rc<str>,
+    /// Register (`R[reg]` of the function's frame).
+    pub reg: u8,
+    /// First instruction at which the variable holds its value: `0` for a
+    /// parameter, the instruction after the initialiser for a `let`.
+    pub start_pc: u32,
+    /// First instruction after its scope (the end of its block).
+    pub end_pc: u32,
+}
+
+impl LocalInfo {
+    /// Whether the variable holds its value when instruction `pc` runs.
+    pub fn live_at(&self, pc: usize) -> bool {
+        (self.start_pc as usize..self.end_pc as usize).contains(&pc)
+    }
 }
 
 /// Index of a native function in `builtins::NATIVES`.
@@ -200,6 +232,7 @@ impl ProtoBuilder {
                 spans: Vec::new(),
                 def_span: SrcSpan::default(),
                 protos: Vec::new(),
+                locals: Vec::new(),
             },
             globals: Vec::new(),
         }
@@ -230,6 +263,17 @@ impl ProtoBuilder {
     /// Set the number of parameters without a default (after `arity`).
     pub fn required(mut self, n: u8) -> ProtoBuilder {
         self.proto.required = n;
+        self
+    }
+
+    /// Record a named local in register `reg`, live for `start..end`.
+    pub fn local(mut self, name: &str, reg: u8, start: u32, end: u32) -> ProtoBuilder {
+        self.proto.locals.push(LocalInfo {
+            name: name.into(),
+            reg,
+            start_pc: start,
+            end_pc: end,
+        });
         self
     }
 

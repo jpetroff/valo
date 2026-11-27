@@ -1,0 +1,181 @@
+{
+  "name": "valo",
+  "displayName": "Valo",
+  "description": "Valo language support: syntax highlighting, indentation, errors as you type (valo-lsp), and a debugger (valo-dap).",
+  "version": "0.1.0",
+  "publisher": "valo-lang",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jpetroff/valo.git",
+    "directory": "tooling/vscode"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Debuggers"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:valo",
+    "onDebugResolve:valo",
+    "onDebugDynamicConfigurations:valo"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "valo",
+        "aliases": [
+          "Valo",
+          "valo"
+        ],
+        "extensions": [
+          ".vl"
+        ],
+        "firstLine": "^#!.*\\bvalo\\b",
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "valo",
+        "scopeName": "source.valo",
+        "path": "./syntaxes/valo.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Valo",
+      "properties": {
+        "valo.server.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `valo-lsp` executable. Empty: use `target/debug/valo-lsp` of an open valo checkout if it exists, otherwise `valo-lsp` from `PATH` (`cargo install --path tooling/lsp`)."
+        },
+        "valo.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "markdownDescription": "Log every LSP message between VS Code and `valo-lsp` to the **Valo Language Server** output channel (for learning and debugging)."
+        },
+        "valo.debugger.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `valo-dap` debug adapter. Empty: use `target/debug/valo-dap` of an open valo checkout if it exists, otherwise `valo-dap` from `PATH` (`cargo install --path tooling/dap`)."
+        },
+        "valo.trace.debugger": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Log every Debug Adapter Protocol message between VS Code and `valo-dap` to the **Valo Debug Adapter** output channel (for learning and debugging)."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "valo.restartServer",
+        "title": "Valo: Restart Language Server"
+      },
+      {
+        "command": "valo.runFile",
+        "title": "Valo: Run File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "valo.debugFile",
+        "title": "Valo: Debug File",
+        "icon": "$(debug-alt)"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "valo.runFile",
+          "when": "resourceLangId == valo",
+          "group": "navigation@1"
+        },
+        {
+          "command": "valo.debugFile",
+          "when": "resourceLangId == valo",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "valo.runFile",
+          "when": "resourceLangId == valo"
+        },
+        {
+          "command": "valo.debugFile",
+          "when": "resourceLangId == valo"
+        }
+      ]
+    },
+    "breakpoints": [
+      {
+        "language": "valo"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "valo",
+        "label": "Valo",
+        "languages": [
+          "valo"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "The .vl file to run.",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Pause before the first line runs.",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "valo",
+            "request": "launch",
+            "name": "Debug current Valo file",
+            "program": "${file}"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Valo: Launch",
+            "description": "Debug a valo program",
+            "body": {
+              "type": "valo",
+              "request": "launch",
+              "name": "Debug ${1:main.vl}",
+              "program": "^\"\\${workspaceFolder}/${1:main.vl}\""
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "package": "vsce package --skip-license"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^11.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^4.1.1"
+  }
+}

@@ -156,6 +156,13 @@ next block reuses the same registers — the test `block_registers_are_reused`
 checks `regs=4` for two sequential blocks against a hand count. Because
 bindings are immutable, a local's register is written exactly once.
 
+For the debugger, codegen also writes down *which name lives in which
+register when* (`FuncState::declare_local` and `close_locals` →
+`Proto::locals`): a `let` is live from the instruction after its
+initialiser to the end of its block, a parameter for the whole function.
+`--dump bytecode` prints this as the `locals:` table; chapter 13 explains
+how the Variables view uses it.
+
 ## 6.6 Jumps: `if`, `and`/`or`, comparison chains
 
 A conditional jump is Lua's pair `TEST A B; JMP sJ`: `TEST` skips the `JMP`

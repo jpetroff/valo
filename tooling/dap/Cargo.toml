@@ -1,0 +1,29 @@
+# Manifest of the debug adapter crate: library `valo_dap` (protocol framing,
+# session logic, the output host) and the `valo-dap` binary that VS Code starts
+# when you press F5 on a `.vl` file.
+# Install on PATH: `cargo install --path tooling/dap`.
+# Explained in docs/13-debugger.md; roadmap in tooling/dap/README.md.
+
+[package]
+name = "valo-dap"
+description = "Debug adapter (Debug Adapter Protocol) for the valo language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "valo_dap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "valo-dap"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+valo-compiler.workspace = true
+valo-vm.workspace = true
+
+[lints]
+workspace = true

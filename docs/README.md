@@ -26,6 +26,8 @@ appear, and collected in [chapter 1](01-rust-primer.md).
 | 9  | [The driver and the CLI](09-driver-and-cli.md) | the `valo` command, flags, exit codes | `compiler/src/main.rs` |
 | 10 | [Testing](10-testing.md) | unit, snapshot, property and golden tests | `compiler/tests/`, `#[cfg(test)]` modules |
 | 11 | [Roadmap: what comes next](11-roadmap.md) | how M2–M10 extend each part | `.memory/plan-mvp.md` |
+| 12 | [Editor tooling](12-editor-tooling.md) | TextMate highlighting, the Language Server Protocol, VS Code extension | `tooling/lsp/`, `tooling/vscode/` |
+| 13 | [The debugger](13-debugger.md) | how VS Code debuggers work, the Debug Adapter Protocol, what a VM needs to be debuggable | `tooling/dap/`, `vm/src/debug.rs`, `tooling/vscode/extension.js` |
 
 Chapters 2–9 follow the path of a program through the system. If you only
 want to change something quickly, use the table below.
@@ -45,6 +47,9 @@ want to change something quickly, use the table below.
 | change how errors look | `compiler/src/diagnostic.rs` → `render`, `render_runtime` |
 | add a CLI flag | `compiler/src/main.rs` → `enum Command` |
 | add a test program | `compiler/tests/golden/mN/<name>.vl` + `<name>.stdout` |
+| highlight new syntax in VS Code | `tooling/vscode/syntaxes/valo.tmLanguage.json` |
+| add an editor feature (hover, …) | `tooling/lsp/src/server.rs` → `capabilities`, `handle_request` |
+| add a debugger feature (stepping, …) | `tooling/dap/src/session.rs` → `capabilities`, `Session::handle_request`; plan in `tooling/dap/README.md` |
 
 ## Conventions in the source code
 

@@ -1,0 +1,889 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Valo",
+  "scopeName": "source.valo",
+  "fileTypes": ["vl"],
+  "firstLineMatch": "^#!.*\\bvalo\\b",
+  "comment": "TextMate grammar for Valo, following the DECIDED syntax in .memory/syntax.md (it may run ahead of the compiler). Rules are tried in the order of `patterns`; at each position the earliest match wins and ties go to the rule listed first, so specific rules (fn/def headers, prefixed strings, lambdas) come before general ones (keywords, calls, operators). See samples/showcase.vl for a file that exercises every rule.",
+  "patterns": [
+    { "include": "#shebang" },
+    { "include": "#comments" },
+    { "include": "#def-declaration" },
+    { "include": "#fn-declaration" },
+    { "include": "#import" },
+    { "include": "#let-binding" },
+    { "include": "#strings" },
+    { "include": "#command" },
+    { "include": "#lambda-parameters" },
+    { "include": "#keywords" },
+    { "include": "#numbers" },
+    { "include": "#keyword-argument" },
+    { "include": "#member-access" },
+    { "include": "#builtin-functions" },
+    { "include": "#constructor" },
+    { "include": "#function-call" },
+    { "include": "#placeholder" },
+    { "include": "#operators" },
+    { "include": "#groups" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "shebang": {
+      "comment": "`#!/usr/bin/env valo` on the first line only (`\\A` = start of the document).",
+      "match": "\\A(#!).*$",
+      "name": "comment.line.shebang.valo",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.shebang.valo" }
+      }
+    },
+
+    "comments": {
+      "comment": "`##` doc comments (attach to the next fn/def) and plain `#` comments, both to end of line.",
+      "patterns": [
+        {
+          "match": "(##).*$",
+          "name": "comment.line.documentation.valo",
+          "captures": {
+            "1": { "name": "punctuation.definition.comment.valo" }
+          }
+        },
+        {
+          "match": "(#).*$",
+          "name": "comment.line.number-sign.valo",
+          "captures": {
+            "1": { "name": "punctuation.definition.comment.valo" }
+          }
+        }
+      ]
+    },
+
+    "def-declaration": {
+      "comment": "`def Name[T] as ...` defines a type: record fields, `|` variants or a one-line alias/union. The region lasts while following lines are indented deeper than the `def` (\\1 = its indentation), so the indented body is covered without tracking INDENT/DEDENT.",
+      "name": "meta.definition.type.valo",
+      "begin": "^([ \\t]*)(def)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "beginCaptures": {
+        "2": { "name": "storage.type.def.valo" },
+        "3": { "name": "entity.name.type.valo" }
+      },
+      "end": "^(?!\\1[ \\t]+\\S)(?=[ \\t]*\\S)",
+      "patterns": [
+        { "include": "#type-parameters" },
+        { "include": "#comments" },
+        {
+          "match": "\\b(as)\\b",
+          "name": "keyword.other.as.valo"
+        },
+        { "include": "#record-field" },
+        { "include": "#variant-with-fields" },
+        { "include": "#variant-bare" },
+        { "include": "#type-expression" }
+      ]
+    },
+
+    "record-field": {
+      "comment": "A record body line `name: type` or `name: type = default`.",
+      "begin": "^[ \\t]*([A-Za-z_][A-Za-z0-9_]*)\\s*(:)",
+      "beginCaptures": {
+        "1": { "name": "variable.other.property.valo" },
+        "2": { "name": "punctuation.separator.annotation.valo" }
+      },
+      "end": "(?=#)|$",
+      "patterns": [
+        {
+          "begin": "=(?![=>~])",
+          "beginCaptures": {
+            "0": { "name": "keyword.operator.assignment.valo" }
+          },
+          "end": "(?=#)|$",
+          "patterns": [{ "include": "$self" }]
+        },
+        { "include": "#type-expression" }
+      ]
+    },
+
+    "variant-with-fields": {
+      "comment": "A union variant with fields, `Down(host: str, reason: str)`, in block or one-line form.",
+      "begin": "\\b([A-Z][A-Za-z0-9_]*)\\s*(\\()",
+      "beginCaptures": {
+        "1": { "name": "entity.name.type.variant.valo" },
+        "2": { "name": "punctuation.definition.parameters.begin.valo" }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.parameters.end.valo" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#field-in-parens" },
+        { "include": "#punctuation" }
+      ]
+    },
+
+    "variant-bare": {
+      "comment": "A fieldless variant on its own body line: `| Maintenance`.",
+      "match": "^[ \\t]*(\\|)\\s*([A-Z][A-Za-z0-9_]*)\\b(?!\\s*\\()",
+      "captures": {
+        "1": { "name": "keyword.operator.type.union.valo" },
+        "2": { "name": "entity.name.type.variant.valo" }
+      }
+    },
+
+    "field-in-parens": {
+      "comment": "`name: type = default` inside a variant's parentheses; ends before `,` or `)`.",
+      "begin": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(:)",
+      "beginCaptures": {
+        "1": { "name": "variable.other.property.valo" },
+        "2": { "name": "punctuation.separator.annotation.valo" }
+      },
+      "end": "(?=[,)])",
+      "patterns": [
+        { "include": "#default-value" },
+        { "include": "#type-expression" }
+      ]
+    },
+
+    "fn-declaration": {
+      "comment": "`fn name[T](params) -> type` up to the `:` of a block body or the `=` of a one-liner.",
+      "name": "meta.function.valo",
+      "begin": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "beginCaptures": {
+        "1": { "name": "storage.type.function.valo" },
+        "2": { "name": "entity.name.function.valo" }
+      },
+      "end": "(:)|(=)(?![=>~])|(?=#)|$",
+      "endCaptures": {
+        "1": { "name": "punctuation.section.function.begin.valo" },
+        "2": { "name": "keyword.operator.assignment.valo" }
+      },
+      "patterns": [
+        { "include": "#type-parameters" },
+        { "include": "#parameter-list" },
+        { "include": "#return-type" },
+        { "include": "#comments" }
+      ]
+    },
+
+    "type-parameters": {
+      "comment": "PEP 695 type variables right after a fn/def name: `[T]`, `[A, B]` (\\G = just after the name).",
+      "begin": "\\G\\s*(\\[)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.type-parameters.begin.valo" }
+      },
+      "end": "\\]",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.type-parameters.end.valo" }
+      },
+      "patterns": [
+        {
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b",
+          "name": "entity.name.type.parameter.valo"
+        },
+        { "include": "#punctuation" }
+      ]
+    },
+
+    "parameter-list": {
+      "comment": "The parentheses of a fn header; may span lines (trailing commas allowed).",
+      "name": "meta.function.parameters.valo",
+      "begin": "\\(",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.parameters.begin.valo" }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.parameters.end.valo" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#parameter" },
+        { "include": "#bare-parameter" },
+        { "include": "#punctuation" }
+      ]
+    },
+
+    "parameter": {
+      "comment": "`name: type` with an optional keyword-only default `= expr`; ends before `,` or `)`.",
+      "begin": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(:)",
+      "beginCaptures": {
+        "1": { "name": "variable.parameter.function.valo" },
+        "2": { "name": "punctuation.separator.annotation.valo" }
+      },
+      "end": "(?=[,)])",
+      "patterns": [
+        { "include": "#default-value" },
+        { "include": "#type-expression" }
+      ]
+    },
+
+    "bare-parameter": {
+      "comment": "An unannotated parameter (lambdas; also a fn param while it is being typed).",
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b",
+      "name": "variable.parameter.function.valo"
+    },
+
+    "default-value": {
+      "comment": "`= expr` after a parameter/field type. Any expression; bracket groups keep inner commas from ending it.",
+      "begin": "=(?![=>~])",
+      "beginCaptures": {
+        "0": { "name": "keyword.operator.assignment.valo" }
+      },
+      "end": "(?=[,)])",
+      "patterns": [{ "include": "$self" }]
+    },
+
+    "return-type": {
+      "comment": "`-> type` in a fn header, up to the body's `:` / `=`.",
+      "name": "meta.function.return-type.valo",
+      "begin": "->",
+      "beginCaptures": {
+        "0": { "name": "keyword.operator.arrow.valo" }
+      },
+      "end": "(?=:|=(?![=>~])|#|$)",
+      "patterns": [{ "include": "#type-expression" }]
+    },
+
+    "type-expression": {
+      "comment": "Types in annotation positions: builtins, user/generic names, `list[T]`, `(A, B)`, `A -> B`, `T | none`, `T ! error`.",
+      "patterns": [
+        { "include": "#comments" },
+        {
+          "begin": "\\(",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.type.group.begin.valo" }
+          },
+          "end": "\\)",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.type.group.end.valo" }
+          },
+          "patterns": [{ "include": "#type-expression" }]
+        },
+        {
+          "begin": "\\[",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.type.arguments.begin.valo" }
+          },
+          "end": "\\]",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.type.arguments.end.valo" }
+          },
+          "patterns": [{ "include": "#type-expression" }]
+        },
+        {
+          "match": "->",
+          "name": "keyword.operator.arrow.valo"
+        },
+        {
+          "match": "\\|",
+          "name": "keyword.operator.type.union.valo"
+        },
+        {
+          "match": "!",
+          "name": "keyword.operator.type.result.valo"
+        },
+        {
+          "match": "\\b(int|float|bool|str|none|any|error|list|dict|tuple|bytes|json|cmd|regex)\\b",
+          "name": "support.type.builtin.valo"
+        },
+        {
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\b",
+          "name": "entity.name.type.valo"
+        },
+        { "include": "#punctuation" }
+      ]
+    },
+
+    "import": {
+      "comment": "`import json`, `import std.proc as p`, `import ./lib/disks`, `from text import lines, trim`.",
+      "patterns": [
+        {
+          "match": "\\b(from)\\s+(\\.{1,2}/[A-Za-z0-9_./-]+|[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s+(import)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.import.valo" },
+            "2": { "name": "entity.name.namespace.valo" },
+            "3": { "name": "keyword.control.import.valo" }
+          }
+        },
+        {
+          "match": "\\b(import)\\s+(\\.{1,2}/[A-Za-z0-9_./-]+|[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)",
+          "captures": {
+            "1": { "name": "keyword.control.import.valo" },
+            "2": { "name": "entity.name.namespace.valo" }
+          }
+        }
+      ]
+    },
+
+    "let-binding": {
+      "comment": "`let name` and `let name: type` (the annotation runs up to `=`).",
+      "patterns": [
+        {
+          "begin": "\\b(let)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(:)",
+          "beginCaptures": {
+            "1": { "name": "storage.type.let.valo" },
+            "2": { "name": "entity.name.variable.valo" },
+            "3": { "name": "punctuation.separator.annotation.valo" }
+          },
+          "end": "(?==(?!=)|#|$)",
+          "patterns": [{ "include": "#type-expression" }]
+        },
+        {
+          "match": "\\b(let)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "storage.type.let.valo" },
+            "2": { "name": "entity.name.variable.valo" }
+          }
+        }
+      ]
+    },
+
+    "strings": {
+      "comment": "Longer openers first: re\"\"\" before re\", r\"\"\" before r\", \"\"\" before \".",
+      "patterns": [
+        { "include": "#regex-triple" },
+        { "include": "#regex" },
+        { "include": "#string-raw-triple" },
+        { "include": "#string-raw" },
+        { "include": "#string-triple" },
+        { "include": "#string-double" }
+      ]
+    },
+
+    "string-double": {
+      "comment": "Normal strings always interpolate `{expr}`.",
+      "name": "string.quoted.double.valo",
+      "begin": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.valo" }
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.valo" }
+      },
+      "patterns": [
+        { "include": "#string-escapes" },
+        { "include": "#interpolation" }
+      ]
+    },
+
+    "string-triple": {
+      "comment": "Multi-line `\"\"\"...\"\"\"`, interpolating like a normal string.",
+      "name": "string.quoted.triple.valo",
+      "begin": "\"\"\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.valo" }
+      },
+      "end": "\"\"\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.valo" }
+      },
+      "patterns": [
+        { "include": "#string-escapes" },
+        { "include": "#interpolation" }
+      ]
+    },
+
+    "string-raw": {
+      "comment": "`r\"...\"`: no escapes, no interpolation.",
+      "name": "string.quoted.raw.valo",
+      "begin": "\\b(r)(\")",
+      "beginCaptures": {
+        "1": { "name": "storage.type.string.valo" },
+        "2": { "name": "punctuation.definition.string.begin.valo" }
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.valo" }
+      }
+    },
+
+    "string-raw-triple": {
+      "name": "string.quoted.raw.triple.valo",
+      "begin": "\\b(r)(\"\"\")",
+      "beginCaptures": {
+        "1": { "name": "storage.type.string.valo" },
+        "2": { "name": "punctuation.definition.string.begin.valo" }
+      },
+      "end": "\"\"\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.valo" }
+      }
+    },
+
+    "regex": {
+      "comment": "`re\"...\"`: raw (no escape processing, so `\"` always ends it), compiled at compile time; regex syntax is highlighted inside.",
+      "name": "string.regexp.quoted.valo",
+      "begin": "\\b(re)(\")",
+      "beginCaptures": {
+        "1": { "name": "storage.type.string.regexp.valo" },
+        "2": { "name": "punctuation.definition.string.begin.valo" }
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.valo" }
+      },
+      "patterns": [{ "include": "#regex-internals" }]
+    },
+
+    "regex-triple": {
+      "name": "string.regexp.quoted.triple.valo",
+      "begin": "\\b(re)(\"\"\")",
+      "beginCaptures": {
+        "1": { "name": "storage.type.string.regexp.valo" },
+        "2": { "name": "punctuation.definition.string.begin.valo" }
+      },
+      "end": "\"\"\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.valo" }
+      },
+      "patterns": [{ "include": "#regex-internals" }]
+    },
+
+    "regex-internals": {
+      "comment": "A light pass over `regex` crate syntax: named groups (they bind variables in `match`), flags, anchors, escapes, quantifiers, classes.",
+      "patterns": [
+        {
+          "match": "(\\(\\?P?<)([A-Za-z_][A-Za-z0-9_]*)(>)",
+          "captures": {
+            "1": { "name": "punctuation.definition.group.regexp.valo" },
+            "2": { "name": "variable.other.group-name.regexp.valo" },
+            "3": { "name": "punctuation.definition.group.regexp.valo" }
+          }
+        },
+        {
+          "match": "\\(\\?[imsxuU-]+\\)",
+          "name": "storage.modifier.mode.regexp.valo"
+        },
+        {
+          "match": "\\(\\?[imsxuU-]*:|[()]",
+          "name": "punctuation.definition.group.regexp.valo"
+        },
+        {
+          "match": "\\\\[bBAz]|[\\^$]",
+          "name": "keyword.control.anchor.regexp.valo"
+        },
+        {
+          "match": "\\\\[^\"]",
+          "name": "constant.character.escape.regexp.valo"
+        },
+        {
+          "match": "[*+?]\\??|\\{\\d+(?:,\\d*)?\\}\\??",
+          "name": "keyword.operator.quantifier.regexp.valo"
+        },
+        {
+          "match": "\\|",
+          "name": "keyword.operator.or.regexp.valo"
+        },
+        {
+          "match": "\\.",
+          "name": "constant.character.wildcard.regexp.valo"
+        },
+        {
+          "name": "constant.other.character-class.set.regexp.valo",
+          "begin": "(\\[)(\\^)?",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.character-class.begin.regexp.valo" },
+            "2": { "name": "keyword.operator.negation.regexp.valo" }
+          },
+          "end": "\\]|(?=\")",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.character-class.end.regexp.valo" }
+          },
+          "patterns": [
+            {
+              "match": "\\\\[^\"]",
+              "name": "constant.character.escape.regexp.valo"
+            }
+          ]
+        }
+      ]
+    },
+
+    "string-escapes": {
+      "comment": "`\\{ \\} \\n \\t \\\" \\\\ \\u{1F600}`; anything else after a backslash is flagged.",
+      "patterns": [
+        {
+          "match": "\\\\u\\{[0-9A-Fa-f]{1,6}\\}",
+          "name": "constant.character.escape.unicode.valo"
+        },
+        {
+          "match": "\\\\[{}nt\"\\\\]",
+          "name": "constant.character.escape.valo"
+        },
+        {
+          "match": "\\\\.",
+          "name": "invalid.illegal.unknown-escape.valo"
+        }
+      ]
+    },
+
+    "interpolation": {
+      "comment": "`{expr}` inside a string or command: any Valo expression (nested strings and dict braces included).",
+      "name": "meta.template.expression.valo",
+      "contentName": "meta.embedded.line.valo",
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.template-expression.begin.valo" }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.template-expression.end.valo" }
+      },
+      "patterns": [{ "include": "source.valo" }]
+    },
+
+    "command": {
+      "comment": "Backtick command literal: builds a `cmd` value, split into argv at compile time. `{expr}` = one argv element, `{*xs}` spreads a list, `\"...\"` groups words; shell metacharacters are plain text.",
+      "name": "string.interpolated.command.valo",
+      "begin": "`",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.valo" }
+      },
+      "end": "`",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.valo" }
+      },
+      "patterns": [
+        {
+          "comment": "The program name (first word).",
+          "match": "\\G\\s*([^\\s`{}\"\\\\]+)",
+          "captures": {
+            "1": { "name": "entity.name.function.command.valo" }
+          }
+        },
+        {
+          "match": "\\\\[`{}]",
+          "name": "constant.character.escape.valo"
+        },
+        {
+          "name": "meta.template.expression.valo",
+          "contentName": "meta.embedded.line.valo",
+          "begin": "(\\{)(\\*)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.template-expression.begin.valo" },
+            "2": { "name": "keyword.operator.unpacking.valo" }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.template-expression.end.valo" }
+          },
+          "patterns": [{ "include": "source.valo" }]
+        },
+        { "include": "#interpolation" },
+        {
+          "name": "string.quoted.double.command-argument.valo",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "match": "\\\\[`{}]",
+              "name": "constant.character.escape.valo"
+            },
+            { "include": "#interpolation" }
+          ]
+        },
+        {
+          "match": "(?<=[\\s`])--?[A-Za-z0-9][A-Za-z0-9_-]*",
+          "name": "constant.other.option.valo"
+        }
+      ]
+    },
+
+    "lambda-parameters": {
+      "comment": "`(a, b: int) =>` (parens followed by `=>` on the same line) and `x =>`.",
+      "patterns": [
+        {
+          "name": "meta.function.lambda.parameters.valo",
+          "begin": "(\\()(?=[^()]*\\)\\s*=>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.parameters.begin.valo" }
+          },
+          "end": "\\)",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.parameters.end.valo" }
+          },
+          "patterns": [
+            { "include": "#parameter" },
+            { "include": "#bare-parameter" },
+            { "include": "#punctuation" }
+          ]
+        },
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?==>)",
+          "captures": {
+            "1": { "name": "variable.parameter.function.valo" }
+          }
+        }
+      ]
+    },
+
+    "keywords": {
+      "comment": "Every `enum Keyword` word in compiler/src/token.rs, grouped by role.",
+      "patterns": [
+        {
+          "match": "\\b(if|elif|else|then)\\b",
+          "name": "keyword.control.conditional.valo"
+        },
+        {
+          "match": "\\b(match)\\b",
+          "name": "keyword.control.match.valo"
+        },
+        {
+          "match": "\\b(for|in)\\b",
+          "name": "keyword.control.comprehension.valo"
+        },
+        {
+          "match": "\\b(let)\\b",
+          "name": "storage.type.let.valo"
+        },
+        {
+          "match": "\\b(fn)\\b",
+          "name": "storage.type.function.valo"
+        },
+        {
+          "match": "\\b(def)\\b",
+          "name": "storage.type.def.valo"
+        },
+        {
+          "match": "\\b(as)\\b",
+          "name": "keyword.other.as.valo"
+        },
+        {
+          "match": "\\b(import|from)\\b",
+          "name": "keyword.control.import.valo"
+        },
+        {
+          "match": "\\b(and|or|not)\\b",
+          "name": "keyword.operator.logical.valo"
+        },
+        {
+          "match": "\\b(true|false)\\b",
+          "name": "constant.language.boolean.valo"
+        },
+        {
+          "match": "\\b(none)\\b",
+          "name": "constant.language.none.valo"
+        },
+        {
+          "match": "\\b(assert)\\b",
+          "name": "keyword.other.assert.valo"
+        },
+        {
+          "match": "\\b(test|mock)\\b",
+          "name": "keyword.other.test.valo"
+        }
+      ]
+    },
+
+    "numbers": {
+      "comment": "Python-style literals; `_` only between digits; a float needs a digit after `.` (`1.` then non-digit is int `1` and `.`).",
+      "patterns": [
+        {
+          "match": "\\b0[xX][0-9A-Fa-f](?:_?[0-9A-Fa-f])*\\b",
+          "name": "constant.numeric.integer.hexadecimal.valo"
+        },
+        {
+          "match": "\\b0[oO][0-7](?:_?[0-7])*\\b",
+          "name": "constant.numeric.integer.octal.valo"
+        },
+        {
+          "match": "\\b0[bB][01](?:_?[01])*\\b",
+          "name": "constant.numeric.integer.binary.valo"
+        },
+        {
+          "match": "\\b[0-9](?:_?[0-9])*(?:\\.[0-9](?:_?[0-9])*(?:[eE][+-]?[0-9](?:_?[0-9])*)?|[eE][+-]?[0-9](?:_?[0-9])*)\\b",
+          "name": "constant.numeric.float.valo"
+        },
+        {
+          "match": "\\b[0-9](?:_?[0-9])*\\b",
+          "name": "constant.numeric.integer.decimal.valo"
+        }
+      ]
+    },
+
+    "keyword-argument": {
+      "comment": "`name=` right after `(` or `,` (or at the start of a continuation line): a keyword argument.",
+      "match": "(?:(?<=[(,])|^)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(=)(?![=>~])",
+      "captures": {
+        "1": { "name": "variable.parameter.keyword-argument.valo" },
+        "2": { "name": "keyword.operator.assignment.valo" }
+      }
+    },
+
+    "member-access": {
+      "comment": "`.field` / `.key` sugar, `module.fn(`, `Type.Variant`.",
+      "patterns": [
+        {
+          "match": "(\\.)\\s*([A-Z][A-Za-z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "punctuation.accessor.valo" },
+            "2": { "name": "entity.name.type.constructor.valo" }
+          }
+        },
+        {
+          "match": "(\\.)\\s*([a-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "punctuation.accessor.valo" },
+            "2": { "name": "entity.name.function.call.valo" }
+          }
+        },
+        {
+          "match": "(\\.)\\s*([A-Z][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "punctuation.accessor.valo" },
+            "2": { "name": "entity.name.type.valo" }
+          }
+        },
+        {
+          "match": "(\\.)\\s*([a-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "punctuation.accessor.valo" },
+            "2": { "name": "variable.other.property.valo" }
+          }
+        }
+      ]
+    },
+
+    "builtin-functions": {
+      "comment": "Prelude natives (no import needed), called or passed as values.",
+      "match": "(?<!\\.)\\b(print|int|float|str|len|map|filter|reduce|flat_map|range|get|context)\\b",
+      "name": "support.function.builtin.valo"
+    },
+
+    "constructor": {
+      "comment": "Capitalised names are types/constructors by convention: `Disk(...)`, `Ok(x)`, `Maintenance`.",
+      "patterns": [
+        {
+          "match": "\\b[A-Z][A-Za-z0-9_]*(?=\\s*\\()",
+          "name": "entity.name.type.constructor.valo"
+        },
+        {
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+          "name": "entity.name.type.valo"
+        }
+      ]
+    },
+
+    "function-call": {
+      "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\()",
+      "name": "entity.name.function.call.valo"
+    },
+
+    "placeholder": {
+      "comment": "`_`: partial-application placeholder in calls, wildcard pattern, discard in `let _ =`.",
+      "match": "\\b_\\b",
+      "name": "variable.language.placeholder.valo"
+    },
+
+    "operators": {
+      "comment": "Multi-character operators before their prefixes (`|>` before `|`, `**` before `*`, `==` before `=`).",
+      "patterns": [
+        {
+          "match": "\\|>",
+          "name": "keyword.operator.pipe.valo"
+        },
+        {
+          "match": "->",
+          "name": "keyword.operator.arrow.valo"
+        },
+        {
+          "match": "=>",
+          "name": "storage.type.function.arrow.valo"
+        },
+        {
+          "match": "~>",
+          "name": "keyword.operator.arrow.match.valo"
+        },
+        {
+          "match": "=~|!~",
+          "name": "keyword.operator.regexp-match.valo"
+        },
+        {
+          "comment": "Spread: `**d` in calls, `*rest` in list patterns, right after `(`, `[`, `{` or `,`.",
+          "match": "(?:(?<=[(\\[{,])|(?<=[(\\[{,]\\s))\\*\\*?(?=[A-Za-z_])",
+          "name": "keyword.operator.unpacking.valo"
+        },
+        {
+          "match": "\\*\\*|//|[+\\-*/%]",
+          "name": "keyword.operator.arithmetic.valo"
+        },
+        {
+          "match": "==|!=|<=|>=|<|>",
+          "name": "keyword.operator.comparison.valo"
+        },
+        {
+          "match": "=",
+          "name": "keyword.operator.assignment.valo"
+        },
+        {
+          "comment": "In expressions `|` joins cmd values into a process pipeline.",
+          "match": "\\|",
+          "name": "keyword.operator.pipe.command.valo"
+        },
+        {
+          "match": "\\?",
+          "name": "keyword.operator.error-propagation.valo"
+        },
+        {
+          "match": "!",
+          "name": "keyword.operator.result.valo"
+        }
+      ]
+    },
+
+    "groups": {
+      "comment": "Balanced brackets, so a `,` or `}` inside them cannot end an enclosing default value or interpolation.",
+      "patterns": [
+        {
+          "begin": "\\(",
+          "beginCaptures": {
+            "0": { "name": "punctuation.parenthesis.begin.valo" }
+          },
+          "end": "\\)",
+          "endCaptures": {
+            "0": { "name": "punctuation.parenthesis.end.valo" }
+          },
+          "patterns": [{ "include": "$self" }]
+        },
+        {
+          "begin": "\\[",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.brackets.begin.valo" }
+          },
+          "end": "\\]",
+          "endCaptures": {
+            "0": { "name": "punctuation.section.brackets.end.valo" }
+          },
+          "patterns": [{ "include": "$self" }]
+        },
+        {
+          "begin": "\\{",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.braces.begin.valo" }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.section.braces.end.valo" }
+          },
+          "patterns": [{ "include": "$self" }]
+        }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        {
+          "match": ",",
+          "name": "punctuation.separator.comma.valo"
+        },
+        {
+          "match": ":",
+          "name": "punctuation.separator.colon.valo"
+        },
+        {
+          "match": "\\.",
+          "name": "punctuation.accessor.valo"
+        }
+      ]
+    }
+  }
+}

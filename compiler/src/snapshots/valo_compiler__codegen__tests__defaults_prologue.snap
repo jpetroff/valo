@@ -39,3 +39,7 @@ constants: (none)
     0010  [1:51]  ADD       3 3 4
     0011  [1:51]  RETURN    3
   constants: (none)
+  locals:
+    R0   a          pc 0000..0012
+    R1   b          pc 0000..0012
+    R2   c          pc 0000..0012

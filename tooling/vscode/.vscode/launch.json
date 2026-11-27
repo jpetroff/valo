@@ -1,0 +1,13 @@
+{
+  // F5 in a VS Code window opened on tooling/vscode starts a second window
+  // (the "Extension Development Host") with this extension loaded from source.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Valo extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}", "${workspaceFolder}/../.."]
+    }
+  ]
+}

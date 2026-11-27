@@ -63,6 +63,8 @@ pub enum ErrorKind {
     GlobalUninit,
     /// R0701 `assert` failed.
     AssertionFailed,
+    /// R0801 the run was stopped from outside (the debugger's Stop button).
+    Interrupted,
     /// R0501 writing to stdout/stderr failed.
     HostIo,
     /// R0901 malformed bytecode or an opcode this build does not implement.
@@ -86,6 +88,7 @@ impl ErrorKind {
             ErrorKind::StackOverflow => "R0301",
             ErrorKind::GlobalUninit => "R0302",
             ErrorKind::AssertionFailed => "R0701",
+            ErrorKind::Interrupted => "R0801",
             ErrorKind::HostIo => "R0501",
             ErrorKind::Internal => "R0901",
         }

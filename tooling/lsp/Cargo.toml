@@ -1,0 +1,32 @@
+# Manifest of the language server crate: library `valo_lsp` (the server logic,
+# so tests can drive it in memory) and the `valo-lsp` binary that editors start.
+# Install on PATH: `cargo install --path tooling/lsp`.
+# Explained in docs/12-editor-tooling.md.
+
+[package]
+name = "valo-lsp"
+description = "Language server (LSP) for the valo language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "valo_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "valo-lsp"
+path = "src/main.rs"
+
+[dependencies]
+lsp-server.workspace = true
+lsp-types.workspace = true
+serde_json.workspace = true
+valo-compiler.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

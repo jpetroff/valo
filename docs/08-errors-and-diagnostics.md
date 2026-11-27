@@ -31,6 +31,7 @@ it. Codes never change once a golden test uses them.
 | R02xx | types | R0201 operand type mismatch (incl. int/float mixing) · R0202 not callable · R0203 condition not a bool · R0205 values cannot be ordered / functions compared · R0206 wrong argument type to a built-in · R0207 wrong number of arguments (callee unknown at compile time) |
 | R03xx | resources | R0301 stack overflow (more than 200 000 nested calls) · R0302 global read before it was set (a fn body may refer to a later top-level `let`) |
 | R07xx | assertions | R0701 assertion failed |
+| R08xx | interruption | R0801 run stopped from outside (the debugger's Stop; see chapter 13) |
 | R05xx | host | R0501 output write failed |
 | R09xx | internal | R0901 bad bytecode / unimplemented opcode |
 
