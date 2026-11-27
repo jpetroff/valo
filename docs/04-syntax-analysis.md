@@ -66,10 +66,11 @@ right-associative. Adding an operator means adding one table row.
 File: [`compiler/src/ast.rs`](../compiler/src/ast.rs)
 
 ```rust
-pub struct Program { pub items: Vec<Item> }        // the whole file
+pub struct Program { pub items: Vec<Item>, pub next_id: u32 }  // the whole file
 pub enum Item {
     Expr(Expr),                                     // an expression line
     Let(Binding),                                   // let name (: type)? = init
+    Fn(FnDef),                                      // fn name(params) -> type: body
 }
 pub struct Binding { pub id: NodeId, pub name: String, pub name_span: Span,
                      pub ann: Option<TypeExpr>, pub init: Expr }
@@ -90,6 +91,9 @@ pub enum ExprKind {
     If { cond: Box<Expr>, then_br: Box<Expr>, else_br: Box<Expr> },
     Block(Vec<Item>),                                                 // indented block
     Assert(Box<Expr>),
+    Call { callee: Box<Expr>, args: Vec<Arg>, piped: Option<usize> }, // f(a, k=b)
+    Pipe { op_span: Span, lhs: Box<Expr>, rhs: Box<Expr> },           // x |> f
+    Lambda(Box<Lambda>),                                              // x => e (M6)
 }
 pub struct CmpLink { pub op: CmpOp, pub op_span: Span, pub rhs: Expr }
 ```
@@ -184,13 +188,31 @@ span lines.
 **Pipes** build an `ExprKind::Pipe`; a line starting with `|>` continues the
 previous one (the lexer drops the `NEWLINE`). The pipe is then rewritten by
 `desugar.rs`, a small pass between parsing and name resolution:
-`x |> f(a)` becomes the call `f(x, a)` and `x |> f` becomes `f(x)`. `--dump
-ast` shows the tree *before* this rewrite.
+`x |> f(a)` becomes the call `f(x, a)` and `x |> f` becomes `f(x)`; when
+the call has a `_`, the piped value goes there instead (`x |> f(a, _)` is
+`f(a, x)`). `--dump ast` shows the tree *before* this rewrite.
+
+**`_` partials** (M6) are rewritten by the same pass: `f(a, _, k=b)` becomes
+a block that binds `a` and `b` to temporaries once, ending with a lambda
+`$p0 => f($a0, $p0, k=$a1)` marked as a partial of `f` (its display name
+is `<partial f@line:col>`). Names starting with `$` cannot be written in
+source, so they never clash with yours.
 
 `Parser::prefix` handles what can *start* an expression: a literal (`Int`,
 `Float`, `true`, `false`, `()`), a name, prefix `-` (parses its operand with
 `expr(30)`), `not` (with `expr(7)`), `(` (parses an expression with `expr(0)`
-and expects `)`), `if` and `assert`.
+and expects `)`), `if`, `assert` and lambdas.
+
+**Lambdas** (S3, M6) need a little lookahead. `x =>` is a name followed by
+`=>`. For `(`, `paren_lambda_ahead` scans the tokens to the matching `)`
+and checks whether `=>` follows: `(a, b: int) => a * b` is a lambda, `(a +
+b)` a group — decided before anything is parsed, so no backtracking. The
+body is parsed with `expr(0)`, so it reaches as far as possible (`x => x +
+1 |> f` is one lambda), and `=>` at the end of a line opens an indented
+block, like `:` does. Because the lexer ignores line breaks inside
+brackets, a block-bodied lambda cannot be written directly inside a call:
+bind it with `let` first. Lambda parameters may have annotations but no
+defaults.
 
 **Comparison chains.** When the loop meets a comparison operator it calls
 `compare_chain`, which keeps consuming `op operand` pairs (operands parsed

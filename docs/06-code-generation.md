@@ -213,7 +213,7 @@ job of a separate pass, not planned for the MVP.
 
 ## 6.8 Functions and calls
 
-**One `FuncState` per function.** `compile_fn` compiles a `fn` into its own
+**One `FuncState` per function.** `compile_function` compiles a `fn` into its own
 `Proto`: each parameter gets the next register (`R0…R(arity-1)`, recorded in
 `FuncState::locals` like a `let`), the body goes into the next register, and
 `RETURN` returns it. The finished prototype becomes a child of `<main>`
@@ -285,7 +285,71 @@ fn loop(n: int, acc: int) -> int =                 GETGLOBAL 2 loop
 So a loop written as recursion runs in one frame; `1 + loop(…)` is not a
 tail call (the addition still needs the result) and stays `CALL`.
 
-## 6.9 What codegen does *not* do
+## 6.9 Closures: lambdas, local fns and captures (M6)
+
+A lambda (`x => x + n`) and a `fn` inside a block are compiled exactly like
+a top-level fn — `compile_function` builds a child `Proto`, `CLOSURE dst k`
+turns it into a value — with one addition: they may use locals of the
+functions around them. Those values are **captured**.
+
+**Who captures what is decided by the resolver.** Lookup walks a stack of
+functions (`FnScope`s, innermost last). A name found in an enclosing
+function's scopes becomes a capture of *every* function in between (Lua's
+`singlevar`), and the use becomes `Res::Upvalue { index }`:
+
+```text
+fn outer(a: int) -> int:                 captures (valo check --dump resolved)
+    fn mid(b: int) -> int:                 mid     #0 a <- local#0      (a register of outer)
+        let f = c => a + b + mid(0)         lambda  #0 a <- upval#0      (mid's own capture)
+        f(1)                                        #1 b <- local#2      (a register of mid)
+    mid(10)                                         #2 mid <- self       (mid's closure)
+```
+
+**The enclosing function fills in the descriptors.** Only the function that
+executes `CLOSURE` knows where each value lives, so `FuncState::closure`
+turns the resolver's list into `Proto::upvals`: `UpvalSrc::Reg(r)` for its
+own local in `R[r]`, `Upval(i)` for something it captured itself,
+`Current` for its own closure. In the callee a captured name compiles to
+`GETUPVAL dst i`; a local fn naming *itself* compiles to `GETSELF dst`
+(the running closure), so it never needs to capture itself:
+
+```text
+function mid arity=1 regs=5 upvals=1        function f arity=1 regs=4 upvals=3
+  CLOSURE   2 0    ; <fn f/1>                 GETUPVAL  1 0    ; a
+  …                                           GETUPVAL  2 1    ; b
+upvals:                                       …
+  0   a   <- R0                               GETUPVAL  2 2    ; mid
+                                            upvals:
+                                              0 a <- upval 0, 1 b <- R0, 2 mid <- self
+```
+
+Captures are **copies** (plan D5): bindings are immutable, so a copy taken
+when the closure is created is as good as a reference. That removes Lua's
+open upvalues and `CLOSE` instruction, and a closure that captured `x`
+keeps the old value after `let x = …` shadows it.
+
+**Names** (plan D23): a local fn keeps its name; a lambda bound directly by
+`let` takes the binding's name (`let sq = x => …` shows as `<fn sq/1>`);
+any other lambda is `<lambda@line:col>`; a `_` partial is
+`<partial f@line:col>`.
+
+**`_` partials are lambdas made by `desugar.rs`.** `add(1, _)` becomes a
+block that evaluates the fixed argument once and ends with a lambda that
+captures it; `x |> f(a, _)` puts `x` into the `_` slot and makes no lambda:
+
+```text
+let inc = add(1, _)                         print(5 |> add(2, _))
+  LOADI     1 1        ; $a0 = 1              LOADI     3 5      piped value first
+  CLOSURE   0 1        ; <partial add@2:11>   GETGLOBAL 1 add
+  SETGLOBAL 0 4        ; inc                  LOADI     2 2
+function <partial add@2:11> upvals=1          CALL      1 2
+  GETGLOBAL 1 3 ; add / GETUPVAL 2 0 ; $a0 / MOVE 3 0 / TAILCALL 1 2
+```
+
+The call inside the partial is a tail call, so a loop driven through a
+partial still runs in constant stack space.
+
+## 6.10 What codegen does *not* do
 
 - It does not check types: `1 + 2.0` compiles, and the VM reports R0201
   (`arith`, chapter 7). Type errors are found at runtime until static checks
@@ -293,20 +357,22 @@ tail call (the addition still needs the result) and stays `CALL`.
 - It does not decide *meaning* of operators: `IDIV` is emitted for `//`; what
   `//` does with negative numbers is defined once, in the VM.
 
-## 6.10 Where to change things
+## 6.11 Where to change things
 
 | Task | Where |
 |------|-------|
 | compile a new expression kind | `FuncState::expr`: new `match` arm |
 | map a new operator to an opcode | the `let opcode = match op { … }` in the `Binary` arm |
-| how names are loaded | `FuncState::name` (`GETGLOBAL` / `MOVE`); what they mean: `resolve.rs` |
+| how names are loaded | `FuncState::name` (`GETGLOBAL` / `MOVE` / `GETUPVAL` / `GETSELF`); what they mean: `resolve.rs` |
 | a new branching construct | `emit_jmp` + `patch_here`; see `if_expr`, `logic`, `compare` |
 | register lifetime of locals | `FuncState::block` |
-| how a fn is compiled | `compile_fn` (parameters, body, `RETURN`) |
+| how a fn or lambda is compiled | `compile_function` (parameters, body, `RETURN`) |
+| what a closure captures | `resolve.rs` (`lookup_in`), then `FuncState::closure` (descriptors) |
+| how `_` partials are rewritten | `desugar.rs` (`Desugar::partial`) |
 | how calls are compiled | `FuncState::call` (the argument window) |
 | point runtime errors at the operator | pass `*op_span` instead of `e.span` to the arithmetic `emit` |
 
-## 6.11 Exercises
+## 6.12 Exercises
 
 1. Compile `1 + (2 + (3 + 4))` and `((1 + 2) + 3) + 4` with
    `valo check f.vl --dump bytecode`. Compare `regs=`. Why do they differ?
@@ -318,7 +384,7 @@ tail call (the addition still needs the result) and stays `CALL`.
    `Binary` arm so that an operand which is a local is used from its own
    register (`ADD 0 1 2`). Which snapshot changes?
 
-## 6.12 Further reading
+## 6.13 Further reading
 
 - *The Implementation of Lua 5.0*, §6 (register allocation in the compiler).
 - Lua 5.4 source: `lcode.c` — `luaK_exp2nextreg`, `freereg`, `luaK_code`.

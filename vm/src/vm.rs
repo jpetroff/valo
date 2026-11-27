@@ -65,7 +65,7 @@
 use std::rc::Rc;
 
 use crate::builtins::NATIVES;
-use crate::chunk::{Const, GlobalKind, Program, Proto};
+use crate::chunk::{Const, GlobalKind, Program, Proto, UpvalSrc};
 use crate::debug::{DebugHook, LineTable, Resume, VmView};
 use crate::error::{ErrorKind, RuntimeError, TraceEntry};
 use crate::host::Host;
@@ -274,7 +274,43 @@ impl<'h> Vm<'h> {
                         .protos
                         .get(instr.bx() as usize)
                         .ok_or_else(|| internal("function index out of range"))?;
-                    self.stack[ra] = Value::Closure(Rc::new(Closure::new(Rc::clone(child))));
+                    // Copy every captured value now (plan D5: bindings are
+                    // immutable, so a copy is as good as a reference).
+                    let current = &self.frames.last().expect("running").closure;
+                    let mut captures = Vec::with_capacity(child.upvals.len());
+                    for u in &child.upvals {
+                        captures.push(match u.src {
+                            UpvalSrc::Reg(r) if (r as usize) < proto.num_regs as usize => {
+                                self.stack[base + r as usize].clone()
+                            }
+                            UpvalSrc::Upval(i) => current
+                                .captures
+                                .get(i as usize)
+                                .cloned()
+                                .ok_or_else(|| internal("capture index out of range"))?,
+                            UpvalSrc::Current => Value::Closure(Rc::clone(current)),
+                            UpvalSrc::Reg(_) => return Err(internal("register out of range")),
+                        });
+                    }
+                    self.stack[ra] = Value::Closure(Rc::new(Closure {
+                        proto: Rc::clone(child),
+                        captures: captures.into_boxed_slice(),
+                    }));
+                }
+                // Read a captured value (M6).
+                OpCode::GETUPVAL => {
+                    let current = &self.frames.last().expect("running").closure;
+                    let v = current
+                        .captures
+                        .get(instr.b() as usize)
+                        .cloned()
+                        .ok_or_else(|| internal("capture index out of range"))?;
+                    self.stack[ra] = v;
+                }
+                // The running closure itself: a local fn calling itself (M6).
+                OpCode::GETSELF => {
+                    let current = &self.frames.last().expect("running").closure;
+                    self.stack[ra] = Value::Closure(Rc::clone(current));
                 }
                 OpCode::CALL => self.call(ra, instr.b() as usize)?,
                 OpCode::LOADMISSING => self.stack[ra] = Value::Missing,
@@ -941,7 +977,7 @@ pub fn int_arith(op: OpCode, x: i64, y: i64) -> Result<i64, RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{Const, ProtoBuilder};
+    use crate::chunk::{Const, ProtoBuilder, UpvalSrc};
     use crate::host::TestHost;
     use crate::opcode::Instr;
     use proptest::prelude::*;
@@ -1019,6 +1055,74 @@ mod tests {
         let err = run(&p).0.unwrap_err();
         assert_eq!(err.kind.code(), "R0302");
         assert!(err.message.contains("`late`"), "{}", err.message);
+    }
+
+    /// M6: `CLOSURE` copies captures from a register, from the creator's own
+    /// captures and the creator itself; `GETUPVAL`/`GETSELF` read them.
+    #[test]
+    fn closures_capture_by_value() {
+        // inner: R0 = captures[0] + captures[1]; returns it.
+        let inner = ProtoBuilder::new("inner", 2)
+            .upval("x", UpvalSrc::Reg(0))
+            .upval("y", UpvalSrc::Upval(0))
+            .op(Instr::abc(OpCode::GETUPVAL, 0, 0, 0))
+            .op(Instr::abc(OpCode::GETUPVAL, 1, 1, 0))
+            .op(Instr::abc(OpCode::ADD, 0, 0, 1))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        // mid (captures y = 30 from main's R0): R0 = 12; R1 = closure(inner);
+        // R0 = 99 (the copy keeps 12); return R1().
+        let mid = ProtoBuilder::new("mid", 3)
+            .upval("y", UpvalSrc::Reg(0))
+            .proto(inner)
+            .op(Instr::asbx(OpCode::LOADI, 0, 12))
+            .op(Instr::abx(OpCode::CLOSURE, 1, 0))
+            .op(Instr::asbx(OpCode::LOADI, 0, 99))
+            .op(Instr::abc(OpCode::CALL, 1, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 1, 0, 0))
+            .build();
+        let p = ProtoBuilder::new("<main>", 2)
+            .proto(mid)
+            .op(Instr::asbx(OpCode::LOADI, 0, 30))
+            .op(Instr::abx(OpCode::CLOSURE, 1, 0))
+            .op(Instr::abc(OpCode::CALL, 1, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 1, 0, 0))
+            .program();
+        assert_eq!(run(&p).0, Ok(Value::Int(42)));
+    }
+
+    #[test]
+    fn getself_and_current_capture_are_the_running_closure() {
+        // g returns its capture, which is f's closure (UpvalSrc::Current).
+        let g = ProtoBuilder::new("g", 1)
+            .upval("f", UpvalSrc::Current)
+            .op(Instr::abc(OpCode::GETUPVAL, 0, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        // f: R0 = closure(g); return R0(), i.e. f itself.
+        let f = ProtoBuilder::new("f", 1)
+            .proto(g)
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+            .op(Instr::abc(OpCode::CALL, 0, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        // h: return GETSELF.
+        let h = ProtoBuilder::new("h", 1)
+            .op(Instr::abc(OpCode::GETSELF, 0, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        for (child, name) in [(f, "f"), (h, "h")] {
+            let p = ProtoBuilder::new("<main>", 1)
+                .proto(child)
+                .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+                .op(Instr::abc(OpCode::CALL, 0, 0, 0))
+                .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+                .program();
+            match run(&p).0 {
+                Ok(Value::Closure(c)) => assert_eq!(&*c.proto.name, name),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     /// `fn add(a, b) = a + b` as a prototype.

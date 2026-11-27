@@ -47,7 +47,7 @@
 
 use std::fmt::Write;
 
-use crate::chunk::{Const, Program, Proto};
+use crate::chunk::{Const, Program, Proto, UpvalSrc};
 use crate::opcode::{Format, OpCode};
 
 /// Disassemble a whole program.
@@ -69,9 +69,15 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
     } else {
         format!(" required={}", p.required)
     };
+    // `upvals=` only for closures that capture something (M6).
+    let upvals = if p.upvals.is_empty() {
+        String::new()
+    } else {
+        format!(" upvals={}", p.upvals.len())
+    };
     let _ = writeln!(
         out,
-        "{pad}function {} arity={}{required} regs={} consts={} protos={}   ; {}:{dl}:{dc}",
+        "{pad}function {} arity={}{required} regs={} consts={}{upvals} protos={}   ; {}:{dl}:{dc}",
         p.name,
         p.arity,
         p.num_regs,
@@ -115,6 +121,8 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
                 .protos
                 .get(instr.bx() as usize)
                 .map(|c| format!("<fn {}/{}>", c.name, c.arity)),
+            OpCode::GETUPVAL => p.upvals.get(instr.b() as usize).map(|u| u.name.to_string()),
+            OpCode::GETSELF => Some(p.name.to_string()),
             _ => None,
         };
         let line = format!("{pad}  {pc:04}  {pos:<7} {:<9} {operands:<8}", op.name());
@@ -133,6 +141,18 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
         let _ = writeln!(out, "{pad}constants:");
         for (i, k) in p.consts.iter().enumerate() {
             let _ = writeln!(out, "{pad}  {i}  {}", const_entry(k));
+        }
+    }
+    // Captures (M6): where the enclosing function's CLOSURE takes each one.
+    if !p.upvals.is_empty() {
+        let _ = writeln!(out, "{pad}upvals:");
+        for (i, u) in p.upvals.iter().enumerate() {
+            let src = match u.src {
+                UpvalSrc::Reg(r) => format!("R{r}"),
+                UpvalSrc::Upval(j) => format!("upval {j}"),
+                UpvalSrc::Current => "self".to_string(),
+            };
+            let _ = writeln!(out, "{pad}  {i:<3} {:<10} <- {src}", u.name);
         }
     }
     // Debug info for the debugger's Variables view (D3); only functions

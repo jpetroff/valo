@@ -277,10 +277,17 @@ A variable is shown when its range contains the frame's pc. A `let` starts
 *after* its initialiser, because before that its register holds a
 half-computed value. When two variables with one name are live (shadowing),
 only the later one is shown. The Variables view asks for it in three steps:
-`scopes` for a frame (*Locals*, *Globals*), then `variables` for a scope's
-`variablesReference`, answered by the program thread from `VmView::locals`
-and `VmView::globals`. Hovering a name sends `evaluate`, which looks it up
-the same way.
+`scopes` for a frame (*Locals*, *Closure*, *Globals*), then `variables` for
+a scope's `variablesReference`, answered by the program thread from
+`VmView::locals`, `VmView::captures` and `VmView::globals`. Hovering a name
+sends `evaluate`, which looks it up the same way (locals, then captures,
+then globals).
+
+*Closure* (M6) lists what a lambda or local fn captured: the values in
+`Closure::captures`, named by `Proto::upvals` (the compiler stores each
+captured binding's name next to where `CLOSURE` takes it from). The scope
+is offered only for frames whose closure captured something. Temporaries of
+`_` partials (`$a0`) are hidden.
 
 **Stepping** needs no new VM support: it is the same hook with a different
 stop condition. When the user steps, the hook remembers the step's kind and

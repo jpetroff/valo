@@ -10,7 +10,7 @@
 //!
 //! **Textbook chapter:** `docs/04-syntax-analysis.md`.
 //!
-//! ## Structure (M4)
+//! ## Structure (M6)
 //!
 //! ```text
 //! Program { items: Vec<Item> }
@@ -34,6 +34,7 @@
 //!         ::Call { callee, args: Vec<Arg>, piped }   `f(a, k=b)`
 //!         ::Pipe { lhs, rhs }                        `x |> f(a)`; rewritten to a
 //!                                                    `Call` by `desugar.rs`
+//!         ::Lambda(Lambda{params, body, partial_of}) `x => e`, `(a, b) => e` (M6)
 //! Arg::Positional(Expr) | Keyword { name, value } | Placeholder (`_`, M6)
 //! TypeExpr { span, kind: TypeKind }      annotations (checked from M10)
 //! ```
@@ -71,6 +72,9 @@ pub struct NodeId(pub u32);
 pub struct Program {
     /// Top-level items in source order.
     pub items: Vec<Item>,
+    /// The next unused `NodeId` (every id in the tree is smaller), so
+    /// `desugar.rs` can create new nodes.
+    pub next_id: u32,
 }
 
 /// A top-level item.
@@ -137,6 +141,20 @@ pub enum Arg {
     },
     /// `f(_)`: placeholder for partial application (S1; M6).
     Placeholder(Span),
+}
+
+/// An anonymous function (S3). The enclosing `Expr`'s id keys the
+/// resolver's capture list for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lambda {
+    /// Parameters (annotations optional, never a default).
+    pub params: Vec<Param>,
+    /// Body; its value is the result.
+    pub body: Expr,
+    /// Set by `desugar.rs` when the lambda is a `_` partial of the named
+    /// function (or `<expr>`); code generation names it `<partial f@l:c>`
+    /// (plan D23). `None` for lambdas written in the source.
+    pub partial_of: Option<String>,
 }
 
 /// `let name (: type)? = init`.
@@ -243,16 +261,18 @@ pub enum ExprKind {
     /// `assert e`: runtime error R0701 if `e` is false; value `()` (D29).
     Assert(Box<Expr>),
     /// A call `callee(args)` (syntax.md S1). `piped` marks calls made from a
-    /// pipe by `desugar.rs`: their first argument is evaluated before the
-    /// callee (Q17).
+    /// pipe by `desugar.rs`: the argument at that index (the piped value) is
+    /// evaluated before the callee and the other arguments (Q17).
     Call {
         /// The function.
         callee: Box<Expr>,
         /// Arguments in source order.
         args: Vec<Arg>,
-        /// Built from `lhs |> …`.
-        piped: bool,
+        /// Built from `lhs |> …`: index of the piped argument.
+        piped: Option<usize>,
     },
+    /// A lambda `x => e`, `(a, b: int) => e`, `() => e` (syntax.md S3; M6).
+    Lambda(Box<Lambda>),
     /// `lhs |> rhs` (S1). Only the parser produces it; `desugar.rs`
     /// rewrites it into a `Call` before name resolution.
     Pipe {
@@ -389,13 +409,31 @@ impl fmt::Display for Expr {
                 args,
                 piped,
             } => {
-                write!(f, "({} {callee}", if *piped { "pcall" } else { "call" })?;
+                write!(
+                    f,
+                    "({} {callee}",
+                    if piped.is_some() { "pcall" } else { "call" }
+                )?;
                 for a in args {
                     write!(f, " {a}")?;
                 }
                 f.write_str(")")
             }
             ExprKind::Pipe { lhs, rhs, .. } => write!(f, "(|> {lhs} {rhs})"),
+            ExprKind::Lambda(l) => {
+                f.write_str("(lambda ")?;
+                if let Some(n) = &l.partial_of {
+                    write!(f, "partial:{n} ")?;
+                }
+                f.write_str("(")?;
+                for (i, p) in l.params.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(f, "{p}")?;
+                }
+                write!(f, ") {})", l.body)
+            }
             ExprKind::Not(e) => write!(f, "(not {e})"),
             ExprKind::Logic { op, lhs, rhs, .. } => {
                 let op = match op {

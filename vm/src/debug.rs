@@ -183,6 +183,26 @@ impl VmView<'_> {
             .collect()
     }
 
+    /// The values captured by the closure running in frame `i` (M6), named
+    /// after the captured bindings (`Proto::upvals`). Temporaries of `_`
+    /// partials (`$a0`) are left out.
+    pub fn captures(&self, i: usize) -> Vec<Variable> {
+        let Some((f, _)) = self.frame_at(i) else {
+            return Vec::new();
+        };
+        f.closure
+            .proto
+            .upvals
+            .iter()
+            .zip(f.closure.captures.iter())
+            .filter(|(u, _)| !u.name.starts_with('$'))
+            .map(|(u, v)| Variable {
+                name: Rc::clone(&u.name),
+                value: v.clone(),
+            })
+            .collect()
+    }
+
     /// Top-level bindings (`let`, `fn`) that have a value, in slot order;
     /// built-ins are left out. A top-level name defined twice has two slots;
     /// only the later one with a value is returned.

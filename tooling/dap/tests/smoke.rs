@@ -340,8 +340,13 @@ fn stop_on_entry_then_pause_a_long_run() {
     c.resume();
     c.request("pause", json!({ "threadId": 1 }));
     c.response("pause");
+    // The pause lands at the next line start: inside `spin`, or (if it
+    // arrives very quickly) on line 5 of `<main>` just before the call.
     let stack = c.stopped("pause");
-    assert_eq!(stack[0].0, "spin");
+    assert!(
+        stack[0].0 == "spin" || names(&stack) == [("<main>", 5)],
+        "{stack:?}"
+    );
     c.request("terminate", json!({}));
     c.response("terminate");
     assert_eq!(c.event("exited")["body"]["exitCode"], 130);
@@ -542,6 +547,50 @@ fn variables_show_locals_and_globals() {
     // Not stopped: nothing to show.
     c.request("variables", json!({ "variablesReference": 1 }));
     assert_eq!(c.response("variables")["success"], false);
+    c.disconnect();
+}
+
+/// A lambda capturing `a` from `outer` (M6).
+const CLOSURE: &str =
+    "fn outer(a: int) -> int:\n    let f = c =>\n        a + c\n    f(1) + 0\n\nprint(outer(10))\n";
+
+#[test]
+fn closures_show_their_captures() {
+    let file = program("dap_closure.vl", CLOSURE);
+    let mut c = Client::start();
+    assert_eq!(c.launch(&file)["success"], true);
+    c.breakpoints(&file, &[3]);
+    c.request("configurationDone", json!({}));
+    assert_eq!(
+        names(&c.stopped("breakpoint")),
+        [("f", 3), ("outer", 4), ("<main>", 6)]
+    );
+    c.request("scopes", json!({ "frameId": 0 }));
+    let scopes = c.response("scopes")["body"]["scopes"].clone();
+    let refs: Vec<(&str, i64)> = scopes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap(),
+                s["variablesReference"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    let names: Vec<&str> = refs.iter().map(|(n, _)| *n).collect();
+    assert_eq!(names, ["Locals", "Closure", "Globals"]);
+    assert_eq!(vars(&c.variables(refs[0].1)), [("c", "1", "int")]);
+    assert_eq!(vars(&c.variables(refs[1].1)), [("a", "10", "int")]);
+    // Hover finds captured names too.
+    assert_eq!(c.evaluate("a", 0), Ok("10".to_string()));
+    // `outer` captures nothing: no Closure scope.
+    c.request("scopes", json!({ "frameId": 2 }));
+    let outer = c.response("scopes")["body"]["scopes"].clone();
+    assert_eq!(outer.as_array().unwrap().len(), 2);
+    c.resume();
+    assert_eq!(c.event("exited")["body"]["exitCode"], 0);
+    assert_eq!(c.output("stdout"), "11\n");
     c.disconnect();
 }
 

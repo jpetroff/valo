@@ -5,7 +5,8 @@ arithmetic. M2–M3 added `let` bindings and blocks (the resolver, globals,
 locals in registers), bools, floats, comparisons, `and`/`or`/`not`, `if` and
 `assert` (jumps with backpatching). M4 added functions: `fn` definitions,
 calls with frames, built-ins and the pipe (a desugaring pass); M4b keyword
-arguments and defaults; M5 proper tail calls. Every later
+arguments and defaults; M5 proper tail calls; M6 lambdas, local fns,
+closures that capture by value and `_` partials. Every later
 milestone widens the same pipeline; no stage is replaced. This chapter maps each planned milestone onto the files you have
 now read. The authoritative plan is `.memory/plan-mvp.md`; syntax is in
 `.memory/syntax.md`.
@@ -17,7 +18,7 @@ now read. The authoritative plan is `.memory/plan-mvp.md`; syntax is in
 | ~~M4~~ (done) | `fn` definitions, calls, `print`, pipes `\|>` | — | `Item::Fn`, call postfix, type annotations parsed | function scopes, arity checks, pipe rewriting (`desugar.rs`) | a stack of `FuncState`s, `CLOSURE`, `CALL` | frames, `RETURN` to caller, native functions in `builtins.rs` |
 | ~~M4b~~ (done) | keyword and default arguments | — | `name=value` arguments | normalise to positional | `LOADMISSING`, `JMPIFSET` | missing-argument sentinel |
 | ~~M5~~ (done) | recursion without stack growth | — | — | tail position | `TAILCALL` | frame reuse, stack limits |
-| **M6** | lambdas `x => …`, closures, `f(a, _)` | — | lambda syntax | captures (upvalues), `_` rewriting | `GETUPVAL`, `GETSELF` | closures capture by value |
+| ~~M6~~ (done) | lambdas `x => …`, closures, local `fn`s, `f(a, _)` | — | `ExprKind::Lambda`, `paren_lambda_ahead` | function stack, captures (`Res::Upvalue`), `_` rewriting in `desugar.rs` | `compile_function`, `FuncState::closure`, `GETUPVAL`, `GETSELF` | `CLOSURE` copies captures (`Proto::upvals`) |
 | **M7** | strings `"…{x}…"`, file/stdin I/O, `none`, `Ok/Err`, `?` | string scanner with interpolation | string parts | — | `CONCAT`, `LOADNONE`, `TRY` | `Value::Str`, `Host` gains I/O |
 | **M8** | lists, indexing, `map/filter/reduce`, comprehensions | — | list literals, `[i]`, comprehensions | comprehension rewriting | `NEWLIST`, `INDEX` | `Value::List`, natives calling back into the VM |
 | **M8b** | tuples, dicts, `.key` | — | dict/tuple literals | — | `NEWTUPLE`, `NEWDICT`, `GETFIELD` | `Value::Dict` |

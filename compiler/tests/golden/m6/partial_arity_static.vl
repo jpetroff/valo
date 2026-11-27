@@ -1,0 +1,3 @@
+fn add(a: int, b: int) -> int = a + b
+let inc = add(1, _)
+print(inc(1, 2))

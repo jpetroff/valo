@@ -43,6 +43,13 @@
 //! Comparisons *chain* (Python): `a < b <= c` becomes one `Compare` node
 //! with two links, not `(a < b) <= c` (`Parser::compare_chain`).
 //!
+//! Lambdas (S3, M6) are a prefix form: `x =>` (an identifier followed by
+//! `=>`) or `( … ) =>` (found by scanning to the matching `)`). The body
+//! after `=>` is parsed at the lowest binding power, so it extends as far
+//! as possible; `=>` at the end of a line opens an indented block. Inside
+//! brackets the lexer suppresses line breaks, so a block-bodied lambda
+//! cannot be written directly as a call argument (bind it with `let`).
+//!
 //! ## Layout: lines, blocks and `if` (syntax.md S6)
 //!
 //! - A block is `NEWLINE INDENT item+ DEDENT` after a `:` (`Parser::branch`);
@@ -61,6 +68,7 @@
 //! |---------------------------------------------|-------------------------------------------------------|
 //! | add a binary operator / change precedence   | `Parser::expr`, the `match t.kind` table (`Infix`, `l_bp`, `r_bp`) |
 //! | add a prefix form (literals, lambdas)       | `Parser::prefix`                                      |
+//! | change lambda syntax (S3)                   | `paren_lambda_ahead`, `lambda_params`, `lambda_rest`  |
 //! | change `if` syntax                          | `if_expr`, `if_block_rest`, `branch`                  |
 //! | add postfix forms (`.field`, `[i]`, `?`)    | `Parser::expr` loop (calls: `call_args`; the others still report E0009) |
 //! | change call arguments (keywords, `_`)       | `call_args`                                           |
@@ -85,8 +93,8 @@
 //! - `.clone()` of a token to keep it while advancing (*Ownership and borrowing*).
 
 use crate::ast::{
-    Arg, BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, FnDef, Item, LogicOp, NodeId, Param,
-    Program, TypeExpr, TypeKind, UnaryOp,
+    Arg, BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, FnDef, Item, Lambda, LogicOp, NodeId,
+    Param, Program, TypeExpr, TypeKind, UnaryOp,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -221,7 +229,10 @@ impl Parser<'_> {
                 },
             }
         }
-        Program { items }
+        Program {
+            items,
+            next_id: self.next_id,
+        }
     }
 
     /// item := (let_binding | fn_def | expr) (NEWLINE | EOF)
@@ -813,7 +824,7 @@ impl Parser<'_> {
                     kind: ExprKind::Call {
                         callee: Box::new(lhs),
                         args,
-                        piped: false,
+                        piped: None,
                     },
                 };
                 continue;
@@ -1124,9 +1135,113 @@ impl Parser<'_> {
         })
     }
 
+    /// After a `(` (consumed): is this the parameter list of a lambda, i.e.
+    /// is the matching `)` followed by `=>`? A token scan, no backtracking
+    /// of the AST (S3). Brackets do not span lines here: the lexer suppresses
+    /// NEWLINE inside them, so the scan stops at the first NEWLINE/EOF.
+    fn paren_lambda_ahead(&self) -> bool {
+        let mut depth = 1u32;
+        for (i, t) in self.tokens[self.pos..].iter().enumerate() {
+            match t.kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.tokens.get(self.pos + i + 1).map(|t| &t.kind)
+                            == Some(&TokenKind::FatArrow);
+                    }
+                }
+                TokenKind::Newline | TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// ```text
+    /// lambda_params := (lparam (',' lparam)* ','?)? ')'
+    /// lparam := NAME (':' type)?          no defaults in lambdas (S19)
+    /// ```
+    /// (after the `(`; consumes the `)`).
+    fn lambda_params(&mut self) -> PResult<Vec<Param>> {
+        let mut params = Vec::new();
+        loop {
+            if self.peek().kind == TokenKind::RParen {
+                self.bump();
+                return Ok(params);
+            }
+            let t = self.bump();
+            let TokenKind::Ident(name) = t.kind else {
+                return Err(self.error(
+                    Diagnostic::new(
+                        "E0101",
+                        format!("expected a parameter name, found {}", t.kind.describe()),
+                        t.span,
+                    )
+                    .label("expected a parameter name or `)` here"),
+                ));
+            };
+            let ann = if self.peek().kind == TokenKind::Colon {
+                self.bump();
+                Some(self.type_expr()?)
+            } else {
+                None
+            };
+            if self.peek().kind == TokenKind::Eq {
+                let at = self.peek().span;
+                return Err(self.error(
+                    Diagnostic::new("E0101", "lambda parameters cannot have defaults", at)
+                        .label("default value here")
+                        .help("use a named `fn` for a function with keyword parameters"),
+                ));
+            }
+            params.push(Param {
+                id: self.id(),
+                name,
+                span: t.span,
+                ann,
+                default: None,
+            });
+            match self.peek().kind {
+                TokenKind::Comma => {
+                    self.bump();
+                }
+                TokenKind::RParen => {}
+                _ => {
+                    let at = self.peek().clone();
+                    return Err(self.error(
+                        Diagnostic::new(
+                            "E0101",
+                            format!("expected `,` or `)`, found {}", at.kind.describe()),
+                            at.span,
+                        )
+                        .label("expected `,` or `)` here"),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// `'=>' (expr | NEWLINE INDENT block)` after the parameters of a lambda
+    /// that starts at `start`. An inline body extends as far as possible
+    /// (`x => x + 1 |> f` is `x => ((x + 1) |> f)`), like JavaScript arrows.
+    fn lambda_rest(&mut self, start: Span, params: Vec<Param>) -> PResult<Expr> {
+        self.expect(&TokenKind::FatArrow, "`=>`")?;
+        let body = self.branch()?;
+        Ok(Expr {
+            id: self.id(),
+            span: start.to(body.span),
+            kind: ExprKind::Lambda(Box::new(Lambda {
+                params,
+                body,
+                partial_of: None,
+            })),
+        })
+    }
+
     /// Prefix position: literals, `()`, names, `-x`, `not x`, `if`,
-    /// `assert`, parenthesised groups.
-    /// EXTEND: lambdas (M6), strings (M7) and list literals (M8) start here.
+    /// `assert`, parenthesised groups, lambdas.
+    /// EXTEND: strings (M7) and list literals (M8) start here.
     fn prefix(&mut self) -> PResult<Expr> {
         let t = self.bump();
         match t.kind {
@@ -1145,6 +1260,17 @@ impl Parser<'_> {
                 span: t.span,
                 kind: ExprKind::Bool(kw == Keyword::True),
             }),
+            // `x => body`: a one-parameter lambda (S3, 2-token lookahead).
+            TokenKind::Ident(name) if self.peek().kind == TokenKind::FatArrow => {
+                let param = Param {
+                    id: self.id(),
+                    name,
+                    span: t.span,
+                    ann: None,
+                    default: None,
+                };
+                self.lambda_rest(t.span, vec![param])
+            }
             TokenKind::Ident(name) => Ok(Expr {
                 id: self.id(),
                 span: t.span,
@@ -1179,6 +1305,12 @@ impl Parser<'_> {
                         operand: Box::new(operand),
                     },
                 })
+            }
+            // `(a, b) => body`, `() => body`: a lambda (S3). Decided by scanning
+            // to the matching `)` and looking at the token after it.
+            TokenKind::LParen if self.paren_lambda_ahead() => {
+                let params = self.lambda_params()?;
+                self.lambda_rest(t.span, params)
             }
             // `()`: the unit value.
             TokenKind::LParen if self.peek().kind == TokenKind::RParen => {
@@ -1363,6 +1495,23 @@ mod tests {
              let t: (int, dict[str, (int,)]) = a\na * b"
         ));
         assert_eq!(parse_codes("(1 2)"), ["E0101"]);
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__parser__tests__lambdas_and_local_fns.snap
+    #[test]
+    fn lambdas_and_local_fns() {
+        insta::assert_snapshot!(parse_ok(
+            "x => x + 1\n(a, b: int) => a * b |> f\n() => read_line()\n(x) => (y) => x\n\
+             map(xs, x => x * 2)\n(1 + 2)\n(a)\n\
+             let sq = x =>\n    let y = x * x\n    y\n\
+             fn outer(a: int) -> int:\n    fn inner(b: int) -> int = a + b\n    inner(1)"
+        ));
+    }
+
+    #[test]
+    fn lambda_errors() {
+        assert_eq!(parse_codes("(x = 1) => x"), ["E0101"]);
+        assert_eq!(parse_codes("(x, 1) => x"), ["E0101"]);
     }
 
     // Snapshot: src/snapshots/valo_compiler__parser__tests__functions_and_calls.snap

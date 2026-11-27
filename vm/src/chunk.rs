@@ -18,7 +18,8 @@
 //! | I want to…                                   | Look at                                      |
 //! |----------------------------------------------|----------------------------------------------|
 //! | add a new kind of constant (string, M7)      | `enum Const`, then `vm.rs` (`LOADK`), `disasm.rs` (`const_repr`, `const_entry`), `codegen.rs` |
-//! | store more per-function data (params, upvalues) | `struct Proto` (+ `ProtoBuilder::new`, `FuncState::new` in codegen) |
+//! | store more per-function data (params, types)  | `struct Proto` (+ `ProtoBuilder::new`, `FuncState::new` in codegen) |
+//! | change what closures capture (M6)             | `struct UpvalDesc`, `enum UpvalSrc` (+ `CLOSURE` in `vm.rs`) |
 //! | store more per-program data (types, M10)     | `struct Program` (+ `ProtoBuilder::program`, `codegen::compile`) |
 //! | describe global slots (natives, M4)           | `struct GlobalDesc`, `enum GlobalKind`       |
 //! | add nested functions                          | `Proto::protos` (indexed by `CLOSURE` Bx)    |
@@ -105,6 +106,36 @@ pub struct Proto {
     /// (parameters first, then `let`s in the order they are compiled).
     /// Only the debugger reads it (Variables view, D3).
     pub locals: Vec<LocalInfo>,
+    /// What a closure of this function captures (M6): `CLOSURE` in the
+    /// *enclosing* function copies one value per entry into
+    /// `Closure::captures`; `GETUPVAL A B` reads `captures[B]`.
+    pub upvals: Vec<UpvalDesc>,
+}
+
+/// One captured value of a closure (Lua's `Upvaldesc` in `lobject.h`).
+///
+/// Captures are copied when the closure is created (plan D5): valo
+/// bindings are immutable, so there are no open upvalues and no `CLOSE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpvalDesc {
+    /// Where the enclosing function finds the value.
+    pub src: UpvalSrc,
+    /// Source name of the captured binding (traces, debugger, disasm).
+    pub name: Rc<str>,
+}
+
+/// Where `CLOSURE` takes a captured value from, relative to the function
+/// that executes the `CLOSURE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpvalSrc {
+    /// Its register `R[i]`.
+    Reg(u8),
+    /// Its own capture `captures[i]`.
+    Upval(u8),
+    /// Its own closure: a lambda inside a local fn that calls that fn.
+    /// (Deviation from Lua's `instack`/`idx` pair; it keeps a closure from
+    /// ever capturing itself, so closures form no `Rc` cycles.)
+    Current,
 }
 
 /// One named local variable of a function: lives in register `reg` while
@@ -233,6 +264,7 @@ impl ProtoBuilder {
                 def_span: SrcSpan::default(),
                 protos: Vec::new(),
                 locals: Vec::new(),
+                upvals: Vec::new(),
             },
             globals: Vec::new(),
         }
@@ -273,6 +305,16 @@ impl ProtoBuilder {
             reg,
             start_pc: start,
             end_pc: end,
+        });
+        self
+    }
+
+    /// Declare the next captured value (`captures[i]` of closures of this
+    /// prototype).
+    pub fn upval(mut self, name: &str, src: UpvalSrc) -> ProtoBuilder {
+        self.proto.upvals.push(UpvalDesc {
+            src,
+            name: name.into(),
         });
         self
     }

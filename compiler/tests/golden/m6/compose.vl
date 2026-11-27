@@ -1,0 +1,5 @@
+fn add(a: int, b: int) -> int = a + b
+fn mul(a: int, b: int) -> int = a * b
+let compose = (f, g) => x => g(f(x))
+let inc_then_double = compose(add(1, _), mul(2, _))
+print(inc_then_double(4))

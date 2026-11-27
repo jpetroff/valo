@@ -10,8 +10,8 @@
 //! **Pipeline position:** `ast::Program` in → `Resolved` out → `codegen.rs`.
 //! Entry point: `resolve`. Printed by `valo check --dump resolved` (`dump`).
 //!
-//! **Textbook chapter:** `docs/11-roadmap.md` (M2) — a chapter of its own
-//! follows once functions and closures (M4, M6) make it interesting.
+//! **Textbook chapter:** `docs/06-code-generation.md` (*Closures*, M6) and
+//! `docs/11-roadmap.md`.
 //!
 //! ## Rules (plan D4, D14, syntax.md S5, S13, S19)
 //!
@@ -22,20 +22,32 @@
 //!   file. A top-level `let` with the same name shadows the fn from its line
 //!   on. Two top-level fns with the same name: E0207.
 //! - `let` inside a block or fn body is a **local**, visible until the end
-//!   of its block. Parameters are locals of their fn.
+//!   of its block. Parameters are locals of their fn. A `fn` inside a block
+//!   (S21) is a local too, visible from its line on; inside its own body its
+//!   name is `Res::SelfRef` (the running closure, `GETSELF`).
+//! - **Captures** (M6, plan D5): a lambda or nested fn that uses a local of
+//!   an enclosing function captures it. Lookup walks the function stack
+//!   outwards (Lua's `singlevar`); every function between the use and the
+//!   definition gets a capture entry (`Resolved::captures`), and the use
+//!   becomes `Res::Upvalue { index }`. Globals are never captured.
+//! - A local fn may not use a *later* local fn of its block: local mutual
+//!   recursion is E0204 (Q16); define such fns at the top level.
 //! - Shadowing is allowed in the same scope (Q7=b): every `let` makes a new
 //!   binding. The initialiser is resolved *before* the new name is added, so
 //!   `let x = x + 1` reads the previous `x`.
 //! - Lookup order: locals (innermost block first, newest first), then
 //!   top-level `let`s seen so far (newest first), then top-level fns, then
-//!   the prelude.
+//!   the prelude. Each function on the stack is searched before the
+//!   globals.
 //! - **Inside a fn body** "top-level `let`s seen so far" means: those before
 //!   the `fn`. If the name is still not found, the first *later* top-level
 //!   `let` of that name is used (a forward reference; reading it before it
 //!   is set is the runtime error R0302).
-//! - **Signatures**: top-level fns and natives have a known signature, and so
-//!   do bindings initialised with one of them (`let g = f`). Calls to a known
-//!   signature are checked here (E0205) instead of at runtime (R0207).
+//! - **Signatures**: top-level and local fns and natives have a known
+//!   signature, and so do bindings initialised with one of them (`let g =
+//!   f`), with a lambda or with a `_` partial (`let inc = add(1, _)`). Calls
+//!   to a known signature are checked here (E0205) instead of at runtime
+//!   (R0207).
 //! - **Types** in annotations live in their own namespace: `int float bool
 //!   str none any error`, `list[T]`, `dict[K, V]`, `tuple[…]` and the fn's
 //!   type variables (E0402 unknown name, E0403 wrong number of type
@@ -46,8 +58,8 @@
 //!   as a value, E0207 defined twice, E0402/E0403 bad type, E0421 defaulted
 //!   parameter passed by position, E0422 keyword arguments to an unknown
 //!   callee, E0424 unknown keyword / required parameter passed by name,
-//!   E0425 keyword given twice, E0009 construct of a later milestone (nested
-//!   `fn`, `_` placeholder).
+//!   E0425 keyword given twice, E0204 local fn uses a later local fn, E0301
+//!   more than 255 captures.
 //! - **Keyword arguments** (S19, plan D28): for a call to a known signature,
 //!   `plan_call` records which argument fills each parameter
 //!   (`Resolved::calls`, a `CallPlan`); omitted defaulted parameters become
@@ -59,14 +71,13 @@
 //! | I want to…                                | Look at                                     |
 //! |-------------------------------------------|---------------------------------------------|
 //! | resolve a new expression kind             | `Resolver::expr` (recurse into children)     |
-//! | add a scope-introducing construct         | push/pop `Resolver::locals` around it (see `ExprKind::Block`, `fn_def`) |
-//! | change the lookup order                   | `Resolver::lookup`                           |
+//! | add a scope-introducing construct         | push/pop a `Scope` on the current `FnScope` (see `ExprKind::Block`) |
+//! | add a function-like construct             | push/pop a `FnScope` (see `fn_def`, `lambda`) |
+//! | change the lookup order                   | `Resolver::lookup`, `lookup_in` (captures)    |
 //! | change undefined-name messages            | `Resolver::undefined`, `suggest`             |
 //! | change argument checks of calls           | `Resolver::call`, `plan_call`, `wrong_count` |
 //! | add a builtin type name                   | `SCALAR_TYPES`, `GENERIC_TYPES`, `Resolver::check_type` |
 //! | change the `--dump resolved` format       | `dump`                                       |
-//!
-//! EXTEND: M6 adds capture analysis for nested fns and lambdas.
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -74,14 +85,17 @@
 //! - `.iter().rev().find_map(..)` — search from the end (*Closures and iterators*).
 //! - newtypes `BindingId(u32)`, `GlobalId(u32)` so the two kinds of index
 //!   cannot be mixed up (*Structs*).
-//! - `std::mem::take` to save and restore a field around a nested walk (*Ownership and borrowing*).
+//! - recursion over a stack of scopes with `&mut self` (`lookup_in`), adding
+//!   capture entries on the way back out (*Ownership and borrowing*).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use valo_vm::builtins::NATIVES;
 
-use crate::ast::{Arg, Binding, Expr, ExprKind, FnDef, Item, NodeId, Program, TypeExpr, TypeKind};
+use crate::ast::{
+    Arg, Binding, Expr, ExprKind, FnDef, Item, Lambda, NodeId, Param, Program, TypeExpr, TypeKind,
+};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceMap, Span};
 
@@ -96,10 +110,65 @@ pub struct GlobalId(pub u32);
 /// What a name refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Res {
-    /// A local binding (lives in a register).
+    /// A local binding of the current function (lives in a register).
     Local(BindingId),
     /// A global slot.
     Global(GlobalId),
+    /// A local of an enclosing function, captured by the current one:
+    /// `captures[index]` of the running closure (`GETUPVAL`, M6).
+    Upvalue {
+        /// The captured binding.
+        binding: BindingId,
+        /// Its position in the current function's capture list.
+        index: u8,
+    },
+    /// The name of the local fn whose body this is: the running closure
+    /// itself (`GETSELF`, M6). Never captured, so a closure never holds
+    /// itself (no `Rc` cycle).
+    SelfRef(BindingId),
+}
+
+impl Res {
+    /// The local binding this refers to, if any.
+    pub fn binding(self) -> Option<BindingId> {
+        match self {
+            Res::Local(b) | Res::Upvalue { binding: b, .. } | Res::SelfRef(b) => Some(b),
+            Res::Global(_) => None,
+        }
+    }
+}
+
+/// Where a captured value comes from, seen from the enclosing function
+/// that creates the closure (becomes `chunk::UpvalSrc`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureFrom {
+    /// A local (register) of the enclosing function.
+    Local(BindingId),
+    /// A capture of the enclosing function itself.
+    Upvalue(u8),
+    /// The enclosing function's own closure (it is a local fn using its
+    /// own name inside a lambda it creates).
+    SelfFn,
+}
+
+/// One captured binding of a lambda or nested fn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capture {
+    /// The binding (its name is `Resolved::locals[binding].name`).
+    pub binding: BindingId,
+    /// Where the enclosing function finds it.
+    pub from: CaptureFrom,
+}
+
+/// The capture list of one lambda or nested fn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FnCaptures {
+    /// Fn name, or `lambda`.
+    pub name: String,
+    /// Where it is defined.
+    pub span: Span,
+    /// Index = upvalue index.
+    pub list: Vec<Capture>,
 }
 
 /// A declared local, for diagnostics and dumps.
@@ -161,6 +230,9 @@ pub struct Resolved {
     /// Calls to a statically known callee: which argument fills each
     /// parameter (M4b). Calls not listed pass their arguments as written.
     pub calls: HashMap<NodeId, CallPlan>,
+    /// Captures of every lambda (keyed by its `Expr` id) and nested fn
+    /// (keyed by its `FnDef` id), M6.
+    pub captures: HashMap<NodeId, FnCaptures>,
 }
 
 /// How a call's arguments map onto the callee's parameters, in declaration
@@ -206,7 +278,7 @@ pub fn resolve(program: &Program) -> Result<Resolved, Vec<Diagnostic>> {
         items: Vec::new(),
         all_lets: Vec::new(),
         lets_done: 0,
-        locals: Vec::new(),
+        funcs: vec![FnScope::default()],
         fn_ctx: None,
         sigs: Vec::new(),
         known: HashMap::new(),
@@ -224,7 +296,41 @@ pub fn resolve(program: &Program) -> Result<Resolved, Vec<Diagnostic>> {
     }
 }
 
-/// While resolving a fn body: what the fn may see.
+/// One block scope.
+#[derive(Debug, Default)]
+struct Scope {
+    /// Bindings in definition order.
+    names: Vec<(String, BindingId)>,
+    /// Local fns of this block not reached yet (for E0204).
+    later_fns: Vec<(String, Span)>,
+}
+
+/// The scopes of one function being resolved (`<main>`, a fn, a lambda).
+#[derive(Debug, Default)]
+struct FnScope {
+    /// Block scopes, innermost last.
+    scopes: Vec<Scope>,
+    /// What this function captures (index = upvalue index).
+    captures: Vec<Capture>,
+    /// For a local fn: its own name and binding (`Res::SelfRef`).
+    self_name: Option<(String, BindingId)>,
+}
+
+/// Key of a known signature: a global slot or a local binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SigKey {
+    Global(GlobalId),
+    Binding(BindingId),
+}
+
+fn sig_key(r: Res) -> SigKey {
+    match r {
+        Res::Global(g) => SigKey::Global(g),
+        Res::Local(b) | Res::Upvalue { binding: b, .. } | Res::SelfRef(b) => SigKey::Binding(b),
+    }
+}
+
+/// While resolving a fn or lambda body: what it may see.
 #[derive(Debug, Clone)]
 struct FnCtx {
     /// Number of top-level `let`s before the fn (`all_lets[..top_len]`).
@@ -242,15 +348,15 @@ struct Resolver {
     all_lets: Vec<(String, Span, GlobalId)>,
     /// How many of `all_lets` the top-level walk has passed.
     lets_done: usize,
-    /// Local scopes of the code being resolved (block scopes at top level,
-    /// the fn's own scopes inside a fn body); innermost last.
-    locals: Vec<Vec<(String, BindingId)>>,
-    /// Set while resolving a fn body.
+    /// The functions being resolved, outermost (`<main>`) first: each
+    /// nested fn or lambda pushes one.
+    funcs: Vec<FnScope>,
+    /// Set while resolving a fn or lambda body.
     fn_ctx: Option<FnCtx>,
     /// Known signatures.
     sigs: Vec<Sig>,
     /// Name target → index into `sigs`.
-    known: HashMap<Res, usize>,
+    known: HashMap<SigKey, usize>,
     out: Resolved,
     diags: Vec<Diagnostic>,
 }
@@ -263,7 +369,7 @@ impl Resolver {
             let g = self.new_global(n.name, Span::default(), GlobalSlot::Native(i as u16));
             self.prelude.push((n.name.to_string(), g));
             self.add_sig(
-                Res::Global(g),
+                SigKey::Global(g),
                 Sig {
                     name: n.name.to_string(),
                     params: n
@@ -305,18 +411,7 @@ impl Resolver {
         let g = self.new_global(&d.name, d.name_span, GlobalSlot::Fn);
         self.out.lets.insert(d.id, Some(Res::Global(g)));
         self.items.push((d.name.clone(), g));
-        self.add_sig(
-            Res::Global(g),
-            Sig {
-                name: d.name.clone(),
-                params: d
-                    .params
-                    .iter()
-                    .map(|p| (p.name.clone(), p.default.is_some()))
-                    .collect(),
-                def: Some(d.name_span),
-            },
-        );
+        self.add_sig(SigKey::Global(g), fn_sig(d));
     }
 
     fn new_global(&mut self, name: &str, span: Span, slot: GlobalSlot) -> GlobalId {
@@ -328,9 +423,20 @@ impl Resolver {
         GlobalId(self.out.globals.len() as u32 - 1)
     }
 
-    fn add_sig(&mut self, res: Res, sig: Sig) {
+    fn add_sig(&mut self, key: SigKey, sig: Sig) {
         self.sigs.push(sig);
-        self.known.insert(res, self.sigs.len() - 1);
+        self.known.insert(key, self.sigs.len() - 1);
+    }
+
+    /// The function being resolved.
+    fn func(&mut self) -> &mut FnScope {
+        self.funcs.last_mut().expect("<main> is always there")
+    }
+
+    /// The innermost block scope (there is one inside every fn body and
+    /// block).
+    fn scope(&mut self) -> &mut Scope {
+        self.func().scopes.last_mut().expect("a block has a scope")
     }
 
     fn new_local(&mut self, name: &str, span: Span) -> BindingId {
@@ -346,16 +452,20 @@ impl Resolver {
         match item {
             Item::Expr(e) => self.expr(e),
             Item::Let(b) => self.binding(b, top_level),
-            Item::Fn(d) if top_level => self.fn_def(d),
-            Item::Fn(d) => self.diags.push(
-                Diagnostic::new(
-                    "E0009",
-                    "nested functions are not supported yet",
-                    d.name_span,
-                )
-                .label("not implemented in this version of valo")
-                .help("define the fn at the top level of the file"),
-            ),
+            Item::Fn(d) if top_level => self.fn_def(d, None),
+            Item::Fn(d) => {
+                // A local fn (S21): bound in the block from here on, before
+                // its body is resolved, so the body can call itself.
+                let id = self.new_local(&d.name, d.name_span);
+                let scope = self.scope();
+                if let Some(i) = scope.later_fns.iter().position(|(n, _)| *n == d.name) {
+                    scope.later_fns.remove(i);
+                }
+                scope.names.push((d.name.clone(), id));
+                self.out.lets.insert(d.id, Some(Res::Local(id)));
+                self.add_sig(SigKey::Binding(id), fn_sig(d));
+                self.fn_def(d, Some(id));
+            }
         }
     }
 
@@ -366,16 +476,9 @@ impl Resolver {
             self.check_type(t);
         }
         self.expr(&b.init);
-        // `let g = f` gives `g` the signature of `f`.
-        let sig = match &b.init.kind {
-            ExprKind::Name(_) => self
-                .out
-                .names
-                .get(&b.init.id)
-                .and_then(|r| self.known.get(r))
-                .copied(),
-            _ => None,
-        };
+        // `let g = f` gives `g` the signature of `f`; `let g = x => …` and
+        // `let g = f(1, _)` the lambda's.
+        let sig = self.sig_of(&b.init, b);
         if b.name == "_" {
             self.out.lets.insert(b.id, None);
             return;
@@ -386,26 +489,59 @@ impl Resolver {
             Res::Global(g)
         } else {
             let id = self.new_local(&b.name, b.name_span);
-            self.locals
-                .last_mut()
-                .expect("a block has a scope")
-                .push((b.name.clone(), id));
+            self.scope().names.push((b.name.clone(), id));
             Res::Local(id)
         };
         self.out.lets.insert(b.id, Some(res));
         if let Some(i) = sig {
-            self.known.insert(res, i);
+            self.known.insert(sig_key(res), i);
         }
     }
 
-    /// A top-level fn: parameters become locals of a fresh scope stack; the
-    /// body sees the top-level `let`s defined before the fn (plus later
-    /// ones as forward references, see `lookup`).
-    fn fn_def(&mut self, d: &FnDef) {
-        let saved_locals = std::mem::take(&mut self.locals);
+    /// The signature an initialiser gives the binding `b`: that of a named
+    /// callee, of a lambda, or of the lambda at the end of a block (a `_`
+    /// partial after desugaring).
+    fn sig_of(&mut self, init: &Expr, b: &Binding) -> Option<usize> {
+        match &init.kind {
+            ExprKind::Name(_) => self
+                .out
+                .names
+                .get(&init.id)
+                .and_then(|r| self.known.get(&sig_key(*r)))
+                .copied(),
+            ExprKind::Lambda(l) => {
+                self.sigs.push(Sig {
+                    name: b.name.clone(),
+                    params: l.params.iter().map(|p| (p.name.clone(), false)).collect(),
+                    def: Some(b.name_span),
+                });
+                Some(self.sigs.len() - 1)
+            }
+            ExprKind::Block(items) => match items.last() {
+                Some(Item::Expr(e)) => self.sig_of(e, b),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A fn (top-level, or local with binding `local`): parameters become
+    /// locals of a new `FnScope`; the body sees the top-level `let`s defined
+    /// before the fn (plus later ones as forward references, see `lookup`)
+    /// and, for a local fn, the enclosing function's locals (captures).
+    fn fn_def(&mut self, d: &FnDef, local: Option<BindingId>) {
+        let mut type_params: Vec<String> = match (&self.fn_ctx, local) {
+            (Some(c), Some(_)) => c.type_params.clone(),
+            _ => Vec::new(),
+        };
+        type_params.extend(d.type_params.iter().map(|(n, _)| n.clone()));
         let saved_ctx = self.fn_ctx.replace(FnCtx {
-            top_len: self.lets_done,
-            type_params: d.type_params.iter().map(|(n, _)| n.clone()).collect(),
+            top_len: self.visible_lets(),
+            type_params,
+        });
+        self.funcs.push(FnScope {
+            self_name: local.map(|b| (d.name.clone(), b)),
+            ..FnScope::default()
         });
         for (i, (name, span)) in d.type_params.iter().enumerate() {
             if let Some((_, first)) = d.type_params[..i].iter().find(|(n, _)| n == name) {
@@ -422,21 +558,52 @@ impl Resolver {
         }
         // Parameters are added one by one, so a default sees only the
         // parameters before it (S19).
-        self.locals.push(Vec::new());
-        for p in &d.params {
+        self.func().scopes.push(Scope::default());
+        self.params(&d.params, &d.name);
+        if let Some(t) = &d.ret {
+            self.check_type(t);
+        }
+        self.expr(&d.body);
+        let f = self.funcs.pop().expect("pushed above");
+        if local.is_some() {
+            self.out.captures.insert(
+                d.id,
+                FnCaptures {
+                    name: d.name.clone(),
+                    span: d.name_span,
+                    list: f.captures,
+                },
+            );
+        }
+        self.fn_ctx = saved_ctx;
+    }
+
+    /// Declare parameters (of a fn or lambda) in the current scope, in
+    /// order; resolve their annotations and defaults. `_` binds nothing.
+    fn params(&mut self, params: &[Param], fn_name: &str) {
+        for p in params {
             if let Some(t) = &p.ann {
                 self.check_type(t);
             }
             if let Some(default) = &p.default {
                 self.expr(default);
             }
-            let scope = self.locals.last().expect("pushed above");
-            if let Some((_, first)) = scope.iter().find(|(n, _)| *n == p.name) {
+            if p.name == "_" {
+                self.out.lets.insert(p.id, None);
+                continue;
+            }
+            let first = self
+                .scope()
+                .names
+                .iter()
+                .find(|(n, _)| *n == p.name)
+                .map(|(_, b)| *b);
+            if let Some(first) = first {
                 let first_span = self.out.locals[first.0 as usize].span;
                 self.diags.push(
                     Diagnostic::new(
                         "E0207",
-                        format!("parameter `{}` is defined twice in fn `{}`", p.name, d.name),
+                        format!("parameter `{}` is defined twice in {fn_name}", p.name),
                         p.span,
                     )
                     .label("second definition")
@@ -445,17 +612,41 @@ impl Resolver {
             }
             let id = self.new_local(&p.name, p.span);
             self.out.lets.insert(p.id, Some(Res::Local(id)));
-            self.locals
-                .last_mut()
-                .expect("pushed above")
-                .push((p.name.clone(), id));
+            self.scope().names.push((p.name.clone(), id));
         }
-        if let Some(t) = &d.ret {
-            self.check_type(t);
-        }
-        self.expr(&d.body);
-        self.locals = saved_locals;
+    }
+
+    /// A lambda (S3): like a fn body, without a name or a return type. It
+    /// sees what the code around it sees (captures, type variables).
+    fn lambda(&mut self, e: &Expr, l: &Lambda) {
+        let type_params = self
+            .fn_ctx
+            .as_ref()
+            .map(|c| c.type_params.clone())
+            .unwrap_or_default();
+        let saved_ctx = self.fn_ctx.replace(FnCtx {
+            top_len: self.visible_lets(),
+            type_params,
+        });
+        self.funcs.push(FnScope::default());
+        self.func().scopes.push(Scope::default());
+        self.params(&l.params, "lambda");
+        self.expr(&l.body);
+        let f = self.funcs.pop().expect("pushed above");
+        self.out.captures.insert(
+            e.id,
+            FnCaptures {
+                name: "lambda".into(),
+                span: e.span,
+                list: f.captures,
+            },
+        );
         self.fn_ctx = saved_ctx;
+    }
+
+    /// How many top-level `let`s the code being resolved can see.
+    fn visible_lets(&self) -> usize {
+        self.fn_ctx.as_ref().map_or(self.lets_done, |c| c.top_len)
     }
 
     /// EXTEND: every new `ExprKind` with children recurses here.
@@ -486,13 +677,24 @@ impl Resolver {
                 self.expr(else_br);
             }
             ExprKind::Block(items) => {
-                self.locals.push(Vec::new());
+                let later_fns = items
+                    .iter()
+                    .filter_map(|i| match i {
+                        Item::Fn(d) => Some((d.name.clone(), d.name_span)),
+                        _ => None,
+                    })
+                    .collect();
+                self.func().scopes.push(Scope {
+                    names: Vec::new(),
+                    later_fns,
+                });
                 for item in items {
                     self.item(item, false);
                 }
-                self.locals.pop();
+                self.func().scopes.pop();
             }
             ExprKind::Call { callee, args, .. } => self.call(e, callee, args),
+            ExprKind::Lambda(l) => self.lambda(e, l),
             ExprKind::Pipe { .. } => unreachable!("pipes are removed by desugar.rs"),
         }
     }
@@ -506,17 +708,8 @@ impl Resolver {
         for a in args {
             match a {
                 Arg::Positional(x) | Arg::Keyword { value: x, .. } => self.expr(x),
-                Arg::Placeholder(span) => {
-                    self.diags.push(
-                        Diagnostic::new(
-                            "E0009",
-                            "partial application with `_` is not supported yet",
-                            *span,
-                        )
-                        .label("not implemented in this version of valo"),
-                    );
-                    return;
-                }
+                // `desugar.rs` has turned every `_` into a lambda parameter.
+                Arg::Placeholder(_) => unreachable!("placeholders are removed by desugar.rs"),
             }
         }
         let sig = match callee.kind {
@@ -524,7 +717,7 @@ impl Resolver {
                 .out
                 .names
                 .get(&callee.id)
-                .and_then(|r| self.known.get(r))
+                .and_then(|r| self.known.get(&sig_key(*r)))
                 .copied(),
             _ => None,
         };
@@ -647,7 +840,7 @@ impl Resolver {
                     }
                     Some(k) => slots[k] = Some(j),
                 },
-                Arg::Placeholder(_) => return None,
+                Arg::Placeholder(_) => unreachable!("placeholders are removed by desugar.rs"),
             }
         }
         let supplied = positional + named_required;
@@ -712,35 +905,33 @@ impl Resolver {
             self.diags.push(
                 Diagnostic::new("E0206", "`_` is not a value", e.span)
                     .label("`_` cannot be read")
-                    .help("`_` discards a value (`let _ = …`); it is not a variable"),
+                    .help("`_` discards a value (`let _ = …`) or stands for a missing argument in a call (`f(a, _)`); it is not a variable"),
             );
             return;
         }
-        match self.lookup(name) {
+        match self.lookup(name, e.span) {
             Some(res) => {
                 self.out.names.insert(e.id, res);
-                self.out.uses.push(Use {
-                    span: e.span,
-                    name: name.to_string(),
-                    res,
-                });
+                // Names made up by `desugar.rs` (`$a0`) are not user uses.
+                if !name.starts_with('$') {
+                    self.out.uses.push(Use {
+                        span: e.span,
+                        name: name.to_string(),
+                        res,
+                    });
+                }
             }
             None => self.undefined(e.span, name),
         }
     }
 
-    /// Find what `name` refers to here (order: see the module docs).
-    fn lookup(&self, name: &str) -> Option<Res> {
-        // RUST: `find_map` returns the first `Some` produced by the closure.
-        let local = self
-            .locals
-            .iter()
-            .rev()
-            .find_map(|s| s.iter().rev().find(|(n, _)| n == name).map(|(_, b)| *b));
-        if let Some(b) = local {
-            return Some(Res::Local(b));
+    /// Find what `name` refers to here (order: see the module docs). `span`
+    /// is the use, for the capture-limit error.
+    fn lookup(&mut self, name: &str, span: Span) -> Option<Res> {
+        if let Some(r) = self.lookup_in(self.funcs.len() - 1, name, span) {
+            return Some(r);
         }
-        let visible = self.fn_ctx.as_ref().map_or(self.lets_done, |c| c.top_len);
+        let visible = self.visible_lets();
         let global = self.all_lets[..visible]
             .iter()
             .rev()
@@ -766,8 +957,92 @@ impl Resolver {
         None
     }
 
-    /// E0203 if a top-level `let` of this name comes later, else E0201.
+    /// Look `name` up among the locals of `funcs[level]`, then of the
+    /// functions around it. A local of an enclosing function is captured by
+    /// every function in between (Lua `singlevar`).
+    fn lookup_in(&mut self, level: usize, name: &str, span: Span) -> Option<Res> {
+        let f = &self.funcs[level];
+        // RUST: `find_map` returns the first `Some` produced by the closure.
+        let local = f.scopes.iter().rev().find_map(|s| {
+            s.names
+                .iter()
+                .rev()
+                .find(|(n, _)| n == name)
+                .map(|(_, b)| *b)
+        });
+        if let Some(b) = local {
+            return Some(Res::Local(b));
+        }
+        if let Some((n, b)) = &f.self_name {
+            if n == name {
+                return Some(Res::SelfRef(*b));
+            }
+        }
+        if level == 0 {
+            return None;
+        }
+        let (binding, from) = match self.lookup_in(level - 1, name, span)? {
+            Res::Local(b) => (b, CaptureFrom::Local(b)),
+            Res::Upvalue { binding, index } => (binding, CaptureFrom::Upvalue(index)),
+            Res::SelfRef(b) => (b, CaptureFrom::SelfFn),
+            Res::Global(_) => unreachable!("lookup_in only finds locals"),
+        };
+        let captures = &mut self.funcs[level].captures;
+        let index = match captures.iter().position(|c| c.binding == binding) {
+            Some(i) => i,
+            None => {
+                captures.push(Capture { binding, from });
+                captures.len() - 1
+            }
+        };
+        if index > u8::MAX as usize {
+            if !self.diags.iter().any(|d| d.code == "E0301") {
+                self.diags.push(
+                    Diagnostic::new("E0301", "too many captured variables", span)
+                        .label("a function can capture at most 256 variables"),
+                );
+            }
+            return Some(Res::Upvalue { binding, index: 0 });
+        }
+        Some(Res::Upvalue {
+            binding,
+            index: index as u8,
+        })
+    }
+
+    /// E0203 if a top-level `let` of this name comes later; E0204/E0201 if
+    /// a local fn of an enclosing block comes later; else E0201.
     fn undefined(&mut self, span: Span, name: &str) {
+        // A later local fn of an enclosing block: from inside another
+        // function (a local fn or lambda) that is local mutual recursion.
+        let current = self.funcs.len() - 1;
+        let later = self.funcs.iter().enumerate().rev().find_map(|(level, f)| {
+            f.scopes.iter().rev().find_map(|s| {
+                s.later_fns
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, d)| (level, *d))
+            })
+        });
+        if let Some((level, def)) = later {
+            let d = if level < current {
+                Diagnostic::new(
+                    "E0204",
+                    format!("`{name}` is a local fn defined later in this block"),
+                    span,
+                )
+                .label("used here")
+                .with(def, "defined here")
+                .help("local fns cannot call each other (mutual recursion); define both fns at the top level of the file")
+            } else {
+                Diagnostic::new("E0201", format!("undefined name `{name}`"), span)
+                    .label("used here")
+                    .with(def, "defined later in this block")
+                    .help("move the local fn above this line")
+            };
+            self.diags.push(d);
+            return;
+        }
         if let Some((_, def, _)) = self.all_lets[self.lets_done..]
             .iter()
             .find(|(n, _, _)| n == name)
@@ -795,7 +1070,13 @@ impl Resolver {
                     .iter()
                     .map(|(n, _, _)| n.as_str()),
             )
-            .chain(self.locals.iter().flatten().map(|(n, _)| n.as_str()))
+            .chain(
+                self.funcs
+                    .iter()
+                    .flat_map(|f| f.scopes.iter().flat_map(|s| &s.names))
+                    .map(|(n, _)| n.as_str())
+                    .filter(|n| !n.starts_with('$')),
+            )
             .collect();
         let mut d = Diagnostic::new("E0201", format!("undefined name `{name}`"), span)
             .label("not found in this scope");
@@ -884,6 +1165,7 @@ impl Resolver {
     }
 
     fn is_type_var(&self, n: &str) -> bool {
+        // (`fn_ctx` holds the type variables of every enclosing fn.)
         self.fn_ctx
             .as_ref()
             .is_some_and(|c| c.type_params.iter().any(|t| t == n))
@@ -969,10 +1251,28 @@ fn edit_distance(a: &str, b: &str) -> usize {
     d[a.len()][b.len()]
 }
 
+/// The signature of a fn definition.
+fn fn_sig(d: &FnDef) -> Sig {
+    Sig {
+        name: d.name.clone(),
+        params: d
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), p.default.is_some()))
+            .collect(),
+        def: Some(d.name_span),
+    }
+}
+
 fn res_str(r: Res) -> String {
     match r {
         Res::Local(BindingId(i)) => format!("local#{i}"),
         Res::Global(GlobalId(i)) => format!("global#{i}"),
+        Res::Upvalue {
+            binding: BindingId(b),
+            index,
+        } => format!("upval#{index} (local#{b})"),
+        Res::SelfRef(BindingId(b)) => format!("self (local#{b})"),
     }
 }
 
@@ -1019,6 +1319,33 @@ pub fn dump(r: &Resolved, sm: &SourceMap) -> String {
         for (i, d) in r.locals.iter().enumerate() {
             let (l, c) = sm.line_col(d.span.start);
             let _ = writeln!(out, "  local#{i:<3} {:<12} {l}:{c}", d.name);
+        }
+    }
+    if !r.captures.is_empty() {
+        out.push_str("captures:\n");
+        let mut fns: Vec<&FnCaptures> = r.captures.values().collect();
+        fns.sort_by_key(|f| f.span.start);
+        for f in fns {
+            let (l, c) = sm.line_col(f.span.start);
+            let list: Vec<String> = f
+                .list
+                .iter()
+                .enumerate()
+                .map(|(i, cap)| {
+                    let from = match cap.from {
+                        CaptureFrom::Local(BindingId(b)) => format!("local#{b}"),
+                        CaptureFrom::Upvalue(u) => format!("upval#{u}"),
+                        CaptureFrom::SelfFn => "self".to_string(),
+                    };
+                    format!("#{i} {} <- {from}", r.locals[cap.binding.0 as usize].name)
+                })
+                .collect();
+            let list = if list.is_empty() {
+                "(none)".to_string()
+            } else {
+                list.join(", ")
+            };
+            let _ = writeln!(out, "  {:<12} {:<7} {list}", f.name, format!("{l}:{c}"));
         }
     }
     if r.uses.is_empty() {
@@ -1118,6 +1445,43 @@ mod tests {
         assert!(d.contains("2:17    x -> global#3"), "{d}");
     }
 
+    // Snapshot: src/snapshots/valo_compiler__resolve__tests__capture_chain.snap
+    #[test]
+    fn capture_chain() {
+        // `a` is captured by `mid` and, through it, by the lambda (3
+        // levels); `mid` inside the lambda is the lambda's capture of
+        // `mid`'s own closure.
+        insta::assert_snapshot!(
+            resolve_src(
+                "fn outer(a: int) -> int:\n    fn mid(b: int) -> int:\n        \
+                 let f = c => a + b + c + mid(0)\n        f(1)\n    mid(10)"
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn local_fns_and_lambdas() {
+        let ok = |s: &str| resolve_src(s).unwrap();
+        // A local fn calling itself is `self`, not a capture.
+        let d = ok(
+            "fn f() -> int:\n    fn g(n: int) -> int = if n == 0 then 0 else g(n - 1)\n    g(3)",
+        );
+        assert!(d.contains("g -> self (local#0)"), "{d}");
+        // Globals are never captured.
+        let d = ok("let k = 1\nlet f = x => x + k");
+        assert!(d.contains("k -> global#"), "{d}");
+        // Keyword arguments to a local fn with defaults.
+        assert!(
+            resolve_src(
+                "fn f() -> int:\n    fn g(a: int, b: int = 2) -> int = a + b\n    g(1, b=3)"
+            )
+            .is_ok()
+        );
+        // A lambda parameter `_` binds nothing.
+        assert_eq!(resolve_src("let f = (_, y) => _").unwrap_err(), ["E0206"]);
+    }
+
     #[test]
     fn keyword_arguments() {
         let codes = |s: &str| -> Vec<&'static str> { resolve_src(s).unwrap_err() };
@@ -1161,11 +1525,24 @@ mod tests {
         assert_eq!(codes("let x: list = 1"), ["E0403"]);
         assert_eq!(codes("let x: int[str] = 1"), ["E0403"]);
         assert_eq!(codes("let x: dict[str] = 1"), ["E0403"]);
+        // Local fns (M6): visible from their line on; no mutual recursion.
+        assert!(resolve_src("let v = if true:\n    fn g() -> int = 1\n    g()\nelse: 0").is_ok());
         assert_eq!(
-            codes("let v = if true:\n    fn g() -> int = 1\n    g()\nelse: 0"),
-            ["E0009", "E0201"]
+            codes("let v = if true:\n    let t = g()\n    fn g() -> int = 1\n    t\nelse: 0"),
+            ["E0201"]
         );
-        assert_eq!(codes("fn f(x: int) -> int = x\nf(_)"), ["E0009"]);
+        assert_eq!(
+            codes("fn f() -> int:\n    fn g() -> int = h()\n    fn h() -> int = 1\n    g()"),
+            ["E0204"]
+        );
+        // `_` partials (M6) get the lambda's signature.
+        assert!(resolve_src("fn f(x: int) -> int = x\nf(_)").is_ok());
+        assert_eq!(
+            codes("fn f(x: int, y: int) -> int = x\nlet g = f(1, _)\ng(1, 2)"),
+            ["E0205"]
+        );
+        assert_eq!(codes("let g = (a, b) => a\ng(1)"), ["E0205"]);
+        assert_eq!(codes("let g = (a, a) => a"), ["E0207"]);
         assert_eq!(codes("fn f(x: int) -> int = x\nf(x=1)"), ["E0424"]);
         // In main, a later `let` is still E0203; from a fn body it is fine.
         assert_eq!(codes("print(y)\nlet y = 1"), ["E0203"]);

@@ -34,7 +34,8 @@
 //! closure's captures are copied when it is created (plan D5), before the
 //! closure itself exists. A function refers to itself only through a global
 //! slot (top-level `fn`, M4) or `GETSELF` (local `fn`, M6), never through its
-//! own captures.
+//! own captures. A lambda inside a local fn may capture *that* fn
+//! (`UpvalSrc::Current`): the lambda points to the fn, never the reverse.
 //!
 //! The derived `PartialEq` is for tests only. The language's `==` has its own
 //! rules (no int/float mixing, NaN ≠ NaN) and lives in `vm.rs`
@@ -82,7 +83,8 @@ pub enum Value {
 pub struct Closure {
     /// The compiled function.
     pub proto: Rc<Proto>,
-    /// Captured values (always empty until closures arrive in M6).
+    /// Captured values, one per `proto.upvals` entry (M6), copied by
+    /// `CLOSURE`.
     pub captures: Box<[Value]>,
 }
 

@@ -1,0 +1,7 @@
+# `a` is captured through three nesting levels.
+fn outer(a: int) -> int:
+    fn mid(b: int) -> int:
+        let inner = c => a * 100 + b * 10 + c
+        inner(3)
+    mid(2)
+print(outer(1))

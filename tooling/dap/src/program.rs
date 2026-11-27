@@ -80,8 +80,9 @@ pub enum Command {
     },
     /// Run until the step is done (`next`, `stepIn`, `stepOut`).
     Step(StepKind),
-    /// The children of a `variablesReference` (`GLOBALS_REF`, or
-    /// `locals_ref(frame)`) as a DAP `variables` response body.
+    /// The children of a `variablesReference` (`GLOBALS_REF`,
+    /// `locals_ref(frame)` or `captures_ref(frame)`) as a DAP `variables`
+    /// response body.
     Variables {
         reference: i64,
         reply: Sender<Value>,
@@ -103,7 +104,13 @@ pub const GLOBALS_REF: i64 = 1;
 /// `variablesReference` of the Locals scope of frame `i` (innermost = 0).
 /// References only need to stay valid while the program is stopped.
 pub fn locals_ref(frame: usize) -> i64 {
-    2 + frame as i64
+    2 + 2 * frame as i64
+}
+
+/// `variablesReference` of the Closure scope (captured values, M6) of
+/// frame `i`.
+pub fn captures_ref(frame: usize) -> i64 {
+    3 + 2 * frame as i64
 }
 
 /// The three DAP steps. All of them stop at a *line start*
@@ -366,20 +373,21 @@ impl DapHook<'_> {
                     return Resume::Continue;
                 }
                 Ok(Command::Variables { reference, reply }) => {
-                    let vars = if reference == GLOBALS_REF {
-                        vm.globals()
-                    } else {
-                        usize::try_from(reference - locals_ref(0))
-                            .map(|i| vm.locals(i))
-                            .unwrap_or_default()
+                    let vars = match usize::try_from(reference - locals_ref(0)) {
+                        _ if reference == GLOBALS_REF => vm.globals(),
+                        Ok(k) if k % 2 == 0 => vm.locals(k / 2),
+                        Ok(k) => vm.captures(k / 2),
+                        Err(_) => Vec::new(),
                     };
                     let vars: Vec<Value> = vars.iter().map(variable_json).collect();
                     let _ = reply.send(json!({ "variables": vars }));
                 }
                 Ok(Command::Evaluate { frame, name, reply }) => {
                     let locals = frame.map(|i| vm.locals(i)).unwrap_or_default();
+                    let captures = frame.map(|i| vm.captures(i)).unwrap_or_default();
                     let found = locals
                         .into_iter()
+                        .chain(captures)
                         .chain(vm.globals())
                         .find(|v| *v.name == *name)
                         .map(|v| {

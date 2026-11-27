@@ -1,0 +1,11 @@
+# A closure keeps the value it captured, even after a same-scope rebinding.
+fn demo() -> int:
+    let x = 1
+    let get = () => x
+    let x = 2
+    get() * 10 + x
+print(demo())
+let y = 1
+let get_y = () => y
+let y = 5
+print(get_y())

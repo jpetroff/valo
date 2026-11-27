@@ -5,5 +5,5 @@
    │ ┬  
    │ ╰── `_` cannot be read
    │ 
-   │ Help: `_` discards a value (`let _ = …`); it is not a variable
+   │ Help: `_` discards a value (`let _ = …`) or stands for a missing argument in a call (`f(a, _)`); it is not a variable
 ───╯

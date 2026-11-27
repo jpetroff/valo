@@ -1,0 +1,4 @@
+fn sub(a: int, b: int) -> int = a - b
+print(1 |> sub(10, _))
+print(1 |> sub(_, 10))
+print(3 |> sub(_, _)(1))

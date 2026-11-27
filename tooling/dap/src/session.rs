@@ -312,7 +312,8 @@ impl Session {
                 self.out.respond(req, json!({}));
                 return Flow::Stop;
             }
-            // Scopes of a frame: its locals, and the globals. Label frames
+            // Scopes of a frame: its locals, its captures (if any) and the
+            // globals. Label frames
             // (odd ids: tail-call notes) have none.
             "scopes" => {
                 let id = args["frameId"].as_i64().unwrap_or(-1);
@@ -322,15 +323,29 @@ impl Session {
                     self.out.respond(req, json!({ "scopes": [] }));
                 } else {
                     let frame = (id / 2) as usize;
-                    self.out.respond(
-                        req,
-                        json!({ "scopes": [
-                            { "name": "Locals", "presentationHint": "locals",
-                              "variablesReference": program::locals_ref(frame), "expensive": false },
-                            { "name": "Globals",
-                              "variablesReference": program::GLOBALS_REF, "expensive": false },
-                        ] }),
-                    );
+                    let mut scopes = vec![json!(
+                        { "name": "Locals", "presentationHint": "locals",
+                          "variablesReference": program::locals_ref(frame), "expensive": false }
+                    )];
+                    // Closure: the values a lambda or local fn captured
+                    // (M6); only shown when there are any.
+                    let captures = program::captures_ref(frame);
+                    let has_captures = self
+                        .ask(|reply| Command::Variables {
+                            reference: captures,
+                            reply,
+                        })
+                        .is_some_and(|b| b["variables"].as_array().is_some_and(|v| !v.is_empty()));
+                    if has_captures {
+                        scopes.push(json!(
+                            { "name": "Closure", "variablesReference": captures, "expensive": false }
+                        ));
+                    }
+                    scopes.push(json!(
+                        { "name": "Globals",
+                          "variablesReference": program::GLOBALS_REF, "expensive": false }
+                    ));
+                    self.out.respond(req, json!({ "scopes": scopes }));
                 }
             }
             "variables" => {

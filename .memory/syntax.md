@@ -252,6 +252,14 @@ Global style: Python-like, indentation blocks (INDENT/DEDENT/NEWLINE), no `;`, s
 - A positional argument after a keyword argument is a syntax error (Python).
 - `x |> (y |> f)` calls the computed function `(y |> f)` with `x`; only a plain call on the right of `|>` receives the value as its first argument.
 
+## Implementation notes from M6 (PROVISIONAL, chosen while building; not yet confirmed by the user)
+- A lambda body after `=>` extends as far as possible (lowest precedence, like JS arrows): `x => x + 1 |> f` is `x => ((x + 1) |> f)`. Parenthesise the lambda to stop it earlier.
+- `=>` at the end of a line opens an indented block body (S3). Inside brackets line breaks are ignored, so a block-bodied lambda cannot be written directly as a call argument; bind it with `let` first.
+- Lambda parameters may be `_` (value ignored). Lambda parameters cannot have defaults (E0101).
+- A local `fn` is visible from its own line to the end of its block (not hoisted like top-level fns); using it earlier is E0201, and a local fn using a later local fn is E0204.
+- In a pipe, the value fills the FIRST `_` of the right-hand call; further `_` keep it a partial: `x |> f(_, _)` ≡ `f(x, _)`.
+- A lambda bound by `let` is named after the binding in traces (`<fn sq/1>`); other lambdas `<lambda@line:col>`, partials `<partial f@line:col>`.
+
 ## Composite example (rounds 1–6; builtin names provisional)
 
 ```

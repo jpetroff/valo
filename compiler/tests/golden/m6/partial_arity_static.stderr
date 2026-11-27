@@ -1,0 +1,13 @@
+[E0205] Error: `inc` takes 1 argument but 2 were given
+   ╭─[ partial_arity_static.vl:3:7 ]
+   │
+ 3 │ print(inc(1, 2))
+   │       ────┬────  
+   │           ╰────── called with 2 arguments
+   │
+   ├─[ partial_arity_static.vl:3:7 ]
+   │
+ 2 │ let inc = add(1, _)
+   │     ─┬─  
+   │      ╰─── defined here
+───╯

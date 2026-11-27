@@ -46,8 +46,8 @@ pub enum Value {
 Each register holds one `Value`. Rust's `enum` is a tagged union: the tag
 says which variant it is, so the VM can check operand types at runtime
 (**dynamic typing** at the VM level; valo's annotations add checks on top in
-M10). Functions are values: `Closure` (compiled code plus captured values;
-captures stay empty until M6) and `Native` (a built-in), both of type
+M10). Functions are values: `Closure` (compiled code plus captured values,
+M6) and `Native` (a built-in), both of type
 `function`, printed `<fn fact/1>` / `<native print/1>`. Later variants:
 strings, `none`, `Ok`/`Err` (M7), lists (M8). Heap values will be shared with
 `Rc` — safe because valo values are immutable, and enough for memory
@@ -248,6 +248,26 @@ RETURN X (in g):  stack[base'-1] = R'[X]   → the caller finds the result in R[
 - **`RETURN` cuts the stack** back to the caller's window, so values of
   finished calls are freed at once (with `Rc`, a value lives as long as a
   stack slot still points to it).
+
+**Closures** (M6). `CLOSURE A Bx` builds `Closure { proto, captures }` for
+child prototype `Bx`, copying one value per entry of the child's
+`Proto::upvals` from where the *running* function has it: a register
+(`UpvalSrc::Reg`), its own captures (`Upval`) or its own closure
+(`Current`). `GETUPVAL A B` reads `captures[B]` of the running closure,
+`GETSELF A` loads the running closure itself (a local fn calling itself).
+
+```text
+fn make_adder(n: int) -> int -> int = x => x + n
+   make_adder(5):  CLOSURE 1 0   ; upvals: n <- R0   → Closure { proto: <lambda>, captures: [5] }
+   add5(3):        GETUPVAL 1 0  ; n = 5, from the closure, not from a register
+```
+
+Because captures are copies of immutable values, there are no open
+upvalues, no `CLOSE`, and no `RefCell`: Lua needs those only because its
+locals can be assigned after a closure captured them. No `Rc` cycle can
+form either: a closure never captures itself (`GETSELF` instead), and a
+lambda that captures its enclosing local fn (`Current`) points *to* it,
+never back.
 
 Globals start empty except the built-in slots: `run` fills them with
 `Value::Native(id)` from `GlobalDesc::kind` before `<main>` starts.

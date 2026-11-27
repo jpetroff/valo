@@ -44,7 +44,7 @@ Every language milestone adds a tooling item:
 
 | Milestone | Tooling work |
 |-----------|--------------|
-| M6 lambdas, closures, `f(a, _)` | lambda params in hover/rename; `_` placeholder scope |
+| M6 lambdas, closures, `f(a, _)` | lambda params in hover/rename (resolver ready: lambda params are ordinary locals, a captured use is `Res::Upvalue`/`SelfRef` and `Res::binding()` names its definition; `$` names from `_` partials are never in `Resolved::uses`); `_` placeholder scope — with L2 |
 | M7 strings, `none`, `Ok/Err`, `?` | grammar already covers interpolation; semantic tokens inside `{…}`; exercise 2 of chapter 12 |
 | M8/M8b lists, dicts, comprehensions | comprehension loop variables in scope; completion after `.` for records/dicts (later) |
 | M9 diagnostics quality | multi-error recovery shows more errors at once in L1; did-you-mean → L4 quick fixes |

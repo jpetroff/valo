@@ -1,0 +1,8 @@
+fn show(n: int) -> int:
+    print(n)
+    n
+fn add(a: int, b: int) -> int = a + b
+let p = add(show(10), _)
+print(p(1))
+print(p(2))
+print(p(3))
