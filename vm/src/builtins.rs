@@ -14,7 +14,14 @@
 //!
 //! **Milestones:** M4 (`print`, `int`, `float`), M7a (`str`, `str_len`,
 //! `trim`, `print(end=…)`), M7b (`none`/Result helpers, files, stdin),
-//! M8 (`map`, `filter`, `reduce`, `range`, …). See `.memory/plan-mvp.md`.
+//! M8 (`len`, `get`, `range`, `map`, `filter`, `reduce`, `flat_map`, `each`,
+//! `contains`, `append`, `reverse`, `lines`, `split`, `join`). See
+//! `.memory/plan-mvp.md`.
+//!
+//! **Callbacks (M8, plan D7):** `map`, `filter`, … call valo functions with
+//! `Vm::call_value`, which runs them in a nested dispatch loop. A list
+//! argument that nothing else holds is consumed in place (`Rc::try_unwrap`,
+//! `Rc::make_mut`), so `append` on a fresh list does not copy it.
 //!
 //! **Textbook chapter:** `docs/07-virtual-machine.md` (section *Calls*).
 //!
@@ -25,6 +32,7 @@
 //! | add a built-in                | write `fn native_x(vm, args)`, append a `NativeDef` to `NATIVES` (append only: ids are table positions) |
 //! | give a built-in a keyword parameter with a default | `ParamSpec { has_default: true }`; the function then receives `Value::Missing` when it is omitted (M4b) |
 //! | report a wrong argument type  | `arg_type_error` (R0206)                                    |
+//! | call a valo function from a built-in | `vm.call_value(f, args)` (see `native_map`)          |
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -34,18 +42,23 @@
 
 use std::rc::Rc;
 
+use crate::chunk::NativeId;
 use crate::error::{ErrorKind, RuntimeError};
 use crate::value::{ErrVal, Value, quote};
-use crate::vm::Vm;
+use crate::vm::{Vm, values_equal};
 
 /// One parameter of a built-in function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParamSpec {
     /// Name, for keyword arguments and messages.
     pub name: &'static str,
-    /// Keyword-only parameter with a default (S19). Receives
-    /// `Value::Missing` when the caller omits it (M4b).
+    /// May be omitted (S19). Receives `Value::Missing` when the caller
+    /// omits it (M4b).
     pub has_default: bool,
+    /// An omittable parameter that is passed by position, not by name:
+    /// only for the positional overloads of a few built-ins (`range(n)` /
+    /// `range(a, b)`, Q26). User fns cannot declare these.
+    pub positional: bool,
 }
 
 /// Signature of a native implementation: the VM (for the host) and the
@@ -76,6 +89,7 @@ const fn req(name: &'static str) -> ParamSpec {
     ParamSpec {
         name,
         has_default: false,
+        positional: false,
     }
 }
 
@@ -84,7 +98,27 @@ const fn opt(name: &'static str) -> ParamSpec {
     ParamSpec {
         name,
         has_default: true,
+        positional: false,
     }
+}
+
+/// A trailing positional parameter that may be omitted (Q26).
+const fn pos_opt(name: &'static str) -> ParamSpec {
+    ParamSpec {
+        name,
+        has_default: true,
+        positional: true,
+    }
+}
+
+/// The id of the built-in called `name` (desugarings refer to `map`,
+/// `contains`, … by id, so user code that shadows the name cannot break
+/// them, plan D14).
+pub fn native_id(name: &str) -> Option<NativeId> {
+    NATIVES
+        .iter()
+        .position(|n| n.name == name)
+        .map(|i| NativeId(i as u16))
 }
 
 /// Every built-in, indexed by `NativeId`. Append only.
@@ -198,6 +232,91 @@ pub static NATIVES: &[NativeDef] = &[
         params: &[req("path"), req("content")],
         effect: true,
         f: native_write_file,
+    },
+    // ---- M8: lists and higher-order functions (data first, D21) ----
+    NativeDef {
+        name: "len",
+        params: &[req("x")],
+        effect: false,
+        f: native_len,
+    },
+    NativeDef {
+        name: "get",
+        params: &[req("xs"), req("i")],
+        effect: false,
+        f: native_get,
+    },
+    NativeDef {
+        name: "range",
+        params: &[req("a"), pos_opt("b")],
+        effect: false,
+        f: native_range,
+    },
+    NativeDef {
+        name: "map",
+        params: &[req("xs"), req("f")],
+        effect: false,
+        f: native_map,
+    },
+    NativeDef {
+        name: "filter",
+        params: &[req("xs"), req("p")],
+        effect: false,
+        f: native_filter,
+    },
+    NativeDef {
+        name: "reduce",
+        params: &[req("xs"), req("init"), req("f")],
+        effect: false,
+        f: native_reduce,
+    },
+    NativeDef {
+        name: "flat_map",
+        params: &[req("xs"), req("f")],
+        effect: false,
+        f: native_flat_map,
+    },
+    NativeDef {
+        name: "each",
+        params: &[req("xs"), req("f")],
+        effect: false,
+        f: native_each,
+    },
+    NativeDef {
+        name: "contains",
+        params: &[req("xs"), req("x")],
+        effect: false,
+        f: native_contains,
+    },
+    NativeDef {
+        name: "append",
+        params: &[req("xs"), req("x")],
+        effect: false,
+        f: native_append,
+    },
+    NativeDef {
+        name: "reverse",
+        params: &[req("xs")],
+        effect: false,
+        f: native_reverse,
+    },
+    NativeDef {
+        name: "lines",
+        params: &[req("s")],
+        effect: false,
+        f: native_lines,
+    },
+    NativeDef {
+        name: "split",
+        params: &[req("s"), req("sep")],
+        effect: false,
+        f: native_split,
+    },
+    NativeDef {
+        name: "join",
+        params: &[req("xs"), req("sep")],
+        effect: false,
+        f: native_join,
     },
 ];
 
@@ -433,4 +552,230 @@ fn io_message(e: &std::io::Error) -> String {
             }
         }
     }
+}
+
+// ---- M8: lists and higher-order functions ---------------------------------
+
+/// R0206 unless `v` is a list.
+fn list_arg(native: &str, v: Value) -> Result<Rc<Vec<Value>>, RuntimeError> {
+    match v {
+        Value::List(xs) => Ok(xs),
+        other => Err(arg_type_error(native, "a list", &other)),
+    }
+}
+
+/// R0206 unless `v` is an int.
+fn int_arg(native: &str, v: &Value) -> Result<i64, RuntimeError> {
+    match v {
+        Value::Int(n) => Ok(*n),
+        other => Err(arg_type_error(native, "an int", other)),
+    }
+}
+
+/// The elements of a list argument, owned: moved out when nothing else
+/// holds the list, cloned otherwise.
+fn owned_items(xs: Rc<Vec<Value>>) -> Vec<Value> {
+    Rc::try_unwrap(xs).unwrap_or_else(|rc| (*rc).clone())
+}
+
+/// The two-argument split of `args` (no allocation).
+fn two(mut args: Vec<Value>) -> (Value, Value) {
+    let b = args.pop().expect("two arguments");
+    let a = args.pop().expect("two arguments");
+    (a, b)
+}
+
+/// `len(x)`: number of elements of a list, or of Unicode scalar values of
+/// a str (like `str_len`).
+fn native_len(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    match &args[0] {
+        Value::List(xs) => Ok(Value::Int(xs.len() as i64)),
+        Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+        other => Err(arg_type_error("len", "a list or a str", other)),
+    }
+}
+
+/// `get(xs, i)`: `xs[i]`, or `none` when `i` is out of range (S14).
+fn native_get(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let (xs, i) = two(args);
+    let i = int_arg("get", &i)?;
+    let xs = list_arg("get", xs)?;
+    Ok(usize::try_from(i)
+        .ok()
+        .and_then(|i| xs.get(i))
+        .cloned()
+        .unwrap_or(Value::None))
+}
+
+/// `range(n)` = `0, 1, …, n-1`; `range(a, b)` = `a, …, b-1` (end-exclusive,
+/// S14); empty when the end is not above the start.
+fn native_range(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let (lo, hi) = match &args[1] {
+        Value::Missing => (0, int_arg("range", &args[0])?),
+        b => (int_arg("range", &args[0])?, int_arg("range", b)?),
+    };
+    Ok(Value::List(Rc::new(
+        (lo..hi.max(lo)).map(Value::Int).collect(),
+    )))
+}
+
+/// `map(xs, f)`: `[f(x) for each x]`.
+fn native_map(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let (xs, f) = two(args);
+    let xs = owned_items(list_arg("map", xs)?);
+    let mut out = Vec::with_capacity(xs.len());
+    for x in xs {
+        out.push(vm.call_value(f.clone(), vec![x])?);
+    }
+    Ok(Value::List(Rc::new(out)))
+}
+
+/// `filter(xs, p)`: the elements for which `p` returns `true` (`p` must
+/// return a bool, R0206).
+fn native_filter(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let (xs, p) = two(args);
+    let xs = owned_items(list_arg("filter", xs)?);
+    let mut out = Vec::new();
+    for x in xs {
+        match vm.call_value(p.clone(), vec![x.clone()])? {
+            Value::Bool(true) => out.push(x),
+            Value::Bool(false) => {}
+            other => {
+                return Err(arg_type_error(
+                    "filter",
+                    "a predicate that returns a bool",
+                    &other,
+                ));
+            }
+        }
+    }
+    Ok(Value::List(Rc::new(out)))
+}
+
+/// `reduce(xs, init, f)`: `f(…f(f(init, x0), x1)…, xn)`.
+fn native_reduce(vm: &mut Vm<'_>, mut args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let f = args.pop().expect("three arguments");
+    let mut acc = args.pop().expect("three arguments");
+    let xs = owned_items(list_arg("reduce", args.pop().expect("three arguments"))?);
+    for x in xs {
+        acc = vm.call_value(f.clone(), vec![acc, x])?;
+    }
+    Ok(acc)
+}
+
+/// `flat_map(xs, f)`: the lists `f(x)` joined (`f` must return a list).
+fn native_flat_map(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let (xs, f) = two(args);
+    let xs = owned_items(list_arg("flat_map", xs)?);
+    let mut out = Vec::new();
+    for x in xs {
+        match vm.call_value(f.clone(), vec![x])? {
+            Value::List(ys) => out.extend(owned_items(ys)),
+            other => {
+                return Err(arg_type_error(
+                    "flat_map",
+                    "a function that returns a list",
+                    &other,
+                ));
+            }
+        }
+    }
+    Ok(Value::List(Rc::new(out)))
+}
+
+/// `each(xs, f)`: call `f(x)` for every element (for its effects); `()`.
+fn native_each(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let (xs, f) = two(args);
+    let xs = owned_items(list_arg("each", xs)?);
+    for x in xs {
+        vm.call_value(f.clone(), vec![x])?;
+    }
+    Ok(Value::Unit)
+}
+
+/// `contains(xs, x)` (`x in xs`): whether a list has an element equal to
+/// `x` (`==` rules: comparing different types is an error), or whether a
+/// str contains the str `x`.
+fn native_contains(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    match (&args[0], &args[1]) {
+        (Value::List(xs), x) => {
+            for y in xs.iter() {
+                if values_equal(y, x)? {
+                    return Ok(Value::Bool(true));
+                }
+            }
+            Ok(Value::Bool(false))
+        }
+        (Value::Str(s), Value::Str(t)) => Ok(Value::Bool(s.contains(&**t))),
+        (Value::Str(_), other) => Err(arg_type_error(
+            "contains",
+            "a str to search for in a str",
+            other,
+        )),
+        (other, _) => Err(arg_type_error("contains", "a list or a str", other)),
+    }
+}
+
+/// `append(xs, x)`: a list with `x` added at the end. O(1) when nothing
+/// else holds `xs` (it is reused), else a copy.
+fn native_append(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let (xs, x) = two(args);
+    let mut xs = list_arg("append", xs)?;
+    Rc::make_mut(&mut xs).push(x);
+    Ok(Value::List(xs))
+}
+
+/// `reverse(xs)`: the elements in reverse order.
+fn native_reverse(_vm: &mut Vm<'_>, mut args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let mut xs = list_arg("reverse", args.swap_remove(0))?;
+    Rc::make_mut(&mut xs).reverse();
+    Ok(Value::List(xs))
+}
+
+/// `lines(s)`: the lines of `s` without their line endings (`\n` or
+/// `\r\n`); a final line ending does not start another line.
+fn native_lines(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let s = str_arg("lines", &args[0])?;
+    Ok(Value::List(Rc::new(
+        s.lines().map(|l| Value::Str(l.into())).collect(),
+    )))
+}
+
+/// `split(s, sep)`: the pieces of `s` between occurrences of `sep`
+/// (Python's `s.split(sep)`; an empty `sep` is an error).
+fn native_split(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let s = str_arg("split", &args[0])?;
+    let sep = str_arg("split", &args[1])?;
+    if sep.is_empty() {
+        return Err(arg_type_error("split", "a non-empty separator", &args[1]));
+    }
+    Ok(Value::List(Rc::new(
+        s.split(sep).map(|p| Value::Str(p.into())).collect(),
+    )))
+}
+
+/// `join(xs, sep)`: the strs of `xs` with `sep` between them.
+fn native_join(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let sep = str_arg("join", &args[1])?;
+    let Value::List(xs) = &args[0] else {
+        return Err(arg_type_error("join", "a list of str", &args[0]));
+    };
+    let mut out = String::new();
+    for (i, x) in xs.iter().enumerate() {
+        let Value::Str(t) = x else {
+            return Err(RuntimeError::new(
+                ErrorKind::NativeArgType,
+                format!(
+                    "join() expects a list of str, but element {i} is {}",
+                    x.describe()
+                ),
+            )
+            .note("help: convert the elements first, e.g. map(xs, str)"));
+        };
+        if i > 0 {
+            out.push_str(sep);
+        }
+        out.push_str(t);
+    }
+    Ok(Value::Str(out.into()))
 }

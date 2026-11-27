@@ -4,14 +4,14 @@ expression: "disasm(\"let a = 1\\nlet b = a + 2\\nlet _ = b\\nb * a\")"
 ---
 function <main> arity=0 regs=2 consts=0 protos=0   ; t.vl:1:1
   0000  [1:9]   LOADI     0 1
-  0001  [1:5]   SETGLOBAL 0 18     ; a
-  0002  [2:9]   GETGLOBAL 0 18     ; a
+  0001  [1:5]   SETGLOBAL 0 32     ; a
+  0002  [2:9]   GETGLOBAL 0 32     ; a
   0003  [2:13]  LOADI     1 2
   0004  [2:9]   ADD       0 0 1
-  0005  [2:5]   SETGLOBAL 0 19     ; b
-  0006  [3:9]   GETGLOBAL 0 19     ; b
-  0007  [4:1]   GETGLOBAL 0 19     ; b
-  0008  [4:5]   GETGLOBAL 1 18     ; a
+  0005  [2:5]   SETGLOBAL 0 33     ; b
+  0006  [3:9]   GETGLOBAL 0 33     ; b
+  0007  [4:1]   GETGLOBAL 0 33     ; b
+  0008  [4:5]   GETGLOBAL 1 32     ; a
   0009  [4:1]   MUL       0 0 1
   0010  [4:1]   TRY       0 0 1
   0011  [4:6]   LOADUNIT  0

@@ -65,9 +65,9 @@
 use std::rc::Rc;
 
 use crate::builtins::NATIVES;
-use crate::chunk::{Const, GlobalKind, Program, Proto, SrcSpan, UpvalSrc};
+use crate::chunk::{Const, GlobalKind, NativeId, Program, Proto, SrcSpan, UpvalSrc};
 use crate::debug::{DebugHook, LineTable, Resume, VmView};
-use crate::error::{ErrTrail, ErrorKind, RuntimeError, Site, TraceEntry};
+use crate::error::{Access, ErrTrail, ErrorKind, RuntimeError, Site, TraceEntry};
 use crate::host::Host;
 use crate::opcode::{Format, Instr, OpCode};
 use crate::value::{Closure, ErrVal, Value};
@@ -76,6 +76,15 @@ use crate::value::{Closure, ErrVal, Value};
 pub const MAX_FRAMES: usize = 200_000;
 /// Most value-stack slots (16 MiB of values; R0301 beyond).
 pub const MAX_STACK: usize = 1 << 20;
+/// Most built-ins that may be calling back into valo at once (`map` whose
+/// callback calls `map` …, plan D7); each level is a Rust recursion of the
+/// dispatch loop, so it is capped well below the frame limit (R0301).
+pub const MAX_REENTRY: usize = 200;
+/// Rust stack a thread running `Vm::run` should have. Each re-entry level
+/// (`MAX_REENTRY`) nests the dispatch loop in Rust; unoptimised builds need
+/// more than the 2 MiB of a default spawned thread for all 200 levels, so
+/// the CLI and the debugger run the VM on a thread of this size.
+pub const VM_STACK_BYTES: usize = 64 << 20;
 
 /// Interpreter options.
 #[derive(Debug, Clone, Copy, Default)]
@@ -97,6 +106,9 @@ pub(crate) struct Frame {
     pub(crate) pc: usize,
     /// Frames this one replaced by tail calls (M5); shown in traces.
     pub(crate) tail_calls: u32,
+    /// Entered from a built-in through `Vm::call_value` (M8): its `RETURN`
+    /// ends the nested dispatch loop instead of resuming a caller frame.
+    pub(crate) reentry: bool,
 }
 
 /// The virtual machine.
@@ -124,6 +136,11 @@ pub struct Vm<'h> {
     hook: Option<&'h mut dyn DebugHook>,
     /// Which instructions start a line; built by `run` when a hook is set.
     lines: Option<LineTable>,
+    /// Built-ins running right now: `(id, frames.len() when called)`, for
+    /// `<native map>` lines in stack traces (M8).
+    native_marks: Vec<(NativeId, usize)>,
+    /// Nested dispatch loops started by `call_value` (≤ `MAX_REENTRY`).
+    reentry_depth: usize,
 }
 
 impl<'h> Vm<'h> {
@@ -139,6 +156,8 @@ impl<'h> Vm<'h> {
             options,
             hook: None,
             lines: None,
+            native_marks: Vec::new(),
+            reentry_depth: 0,
         }
     }
 
@@ -154,6 +173,8 @@ impl<'h> Vm<'h> {
         let main = Rc::new(Closure::new(Rc::clone(&program.main)));
         self.stack.clear();
         self.frames.clear();
+        self.native_marks.clear();
+        self.reentry_depth = 0;
         // Built-in slots are filled now; user slots wait for SETGLOBAL.
         self.globals = program
             .globals
@@ -181,6 +202,7 @@ impl<'h> Vm<'h> {
             base: 1,
             pc: 0,
             tail_calls: 0,
+            reentry: false,
         });
         // RUST: `map_err` transforms only the error case; here it attaches
         // the stack trace before the error leaves the VM.
@@ -191,15 +213,24 @@ impl<'h> Vm<'h> {
     }
 
     /// Attach a stack trace (innermost first) to an error.
+    ///
+    /// For each frame, newest first: function name + the span of the
+    /// instruction that was executing (`pc - 1`, because `pc` was already
+    /// advanced past it). A built-in that was running a callback when the
+    /// error happened appears between the callback's frames and its caller
+    /// (`<native map>`, M8). A built-in that failed itself is not listed:
+    /// its caller's line (the call) is the error's location.
     fn unwind(&mut self, mut err: RuntimeError) -> RuntimeError {
-        // For each frame, newest first: function name + the span of the
-        // instruction that was executing (`pc - 1`, because `pc` was already
-        // advanced past it).
-        err.trace = self
-            .frames
-            .iter()
-            .rev()
-            .map(|f| TraceEntry {
+        let mut trace = Vec::with_capacity(self.frames.len());
+        for (k, f) in self.frames.iter().enumerate().rev() {
+            // Built-ins called by frame k (mark depth k+1) that have frames
+            // above them, innermost (latest) first.
+            if k + 1 < self.frames.len() {
+                for &(id, _) in self.native_marks.iter().rev().filter(|m| m.1 == k + 1) {
+                    trace.push(native_entry(id));
+                }
+            }
+            trace.push(TraceEntry {
                 fn_name: Rc::clone(&f.closure.proto.name),
                 span: f
                     .closure
@@ -209,9 +240,13 @@ impl<'h> Vm<'h> {
                     .copied()
                     .unwrap_or_default(),
                 tail_calls: f.tail_calls,
-            })
-            .collect();
+                native: false,
+            });
+        }
+        err.trace = trace;
         self.frames.clear();
+        self.native_marks.clear();
+        self.reentry_depth = 0;
         err
     }
 
@@ -541,6 +576,26 @@ impl<'h> Vm<'h> {
                         ));
                     }
                 },
+                // R[A] = [R[B], …, R[B+C-1]] (M8). The element registers are
+                // temporaries, so their values are moved, not cloned.
+                OpCode::NEWLIST => {
+                    let first = base + instr.b() as usize;
+                    let items = self
+                        .stack
+                        .get_mut(first..first + instr.c() as usize)
+                        .ok_or_else(|| internal("register out of range"))?
+                        .iter_mut()
+                        .map(|v| std::mem::replace(v, Value::Unit))
+                        .collect();
+                    self.stack[ra] = Value::List(Rc::new(items));
+                }
+                // R[A] = R[B][R[C]] (M8): a list and an int in 0..len.
+                OpCode::INDEX => {
+                    let b = &self.stack[base + instr.b() as usize];
+                    let c = &self.stack[base + instr.c() as usize];
+                    let v = index(b, c)?;
+                    self.stack[ra] = v;
+                }
                 OpCode::ECHO => {
                     let s = format!("{}\n", self.stack[ra]);
                     self.host.write_stdout(&s).map_err(host_io)?;
@@ -637,8 +692,16 @@ impl<'h> Vm<'h> {
 
     /// Finish the running frame with result `v`. Returns `Some(v)` when that
     /// frame was `<main>` (the program is done).
+    /// A frame entered through `call_value` also returns `Some(v)`: that
+    /// ends the nested dispatch loop, and `call_value` hands `v` to the
+    /// built-in that asked for it.
     fn do_return(&mut self, v: Value) -> Option<Value> {
         let done = self.frames.pop().expect("RETURN without a frame");
+        if done.reentry {
+            // Drop the callee slot and the frame's registers.
+            self.stack.truncate(done.base - 1);
+            return Some(v);
+        }
         let Some(caller) = self.frames.last() else {
             return Some(v);
         };
@@ -736,10 +799,11 @@ impl<'h> Vm<'h> {
                     base,
                     pc: 0,
                     tail_calls: 0,
+                    reentry: false,
                 });
                 Ok(())
             }
-            Value::Native(id) => {
+            &Value::Native(id) => {
                 let def = NATIVES
                     .get(id.0 as usize)
                     .ok_or_else(|| internal("native index out of range"))?;
@@ -751,7 +815,11 @@ impl<'h> Vm<'h> {
                     .collect();
                 // Omitted keyword parameters arrive as `Missing` (M4b).
                 args.resize(def.params.len(), Value::Missing);
+                // Remember the running built-in for stack traces of errors
+                // in its callbacks; on error the mark stays for `unwind`.
+                self.native_marks.push((id, self.frames.len()));
                 let result = (def.f)(self, args)?;
+                self.native_marks.pop();
                 self.stack[ra] = result;
                 Ok(())
             }
@@ -760,6 +828,48 @@ impl<'h> Vm<'h> {
                 format!("cannot call a value of type {}", other.type_name()),
             )),
         }
+    }
+
+    /// Call the function value `f` with `args` from inside a built-in
+    /// (`map`, `filter`, …, plan D7) and return its result.
+    ///
+    /// The callee and arguments go on top of the stack like a `CALL`'s
+    /// window; a valo function then runs in a *nested* dispatch loop that
+    /// ends when that frame returns (`Frame::reentry`). Tail calls inside
+    /// the callback work as usual. Errors come back as `Err` with the frames
+    /// still in place, so the trace shows the callback, `<native map>` and
+    /// the caller. Nesting deeper than `MAX_REENTRY` is R0301.
+    pub fn call_value(&mut self, f: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let ra = self.stack.len();
+        let nargs = args.len();
+        if ra + 1 + nargs > MAX_STACK {
+            return Err(stack_overflow());
+        }
+        let is_closure = matches!(f, Value::Closure(_));
+        self.stack.push(f);
+        self.stack.extend(args);
+        if !is_closure {
+            // A built-in runs right away; anything else is R0202.
+            self.call(ra, nargs)?;
+            let v = std::mem::replace(&mut self.stack[ra], Value::Unit);
+            self.stack.truncate(ra);
+            return Ok(v);
+        }
+        if self.reentry_depth >= MAX_REENTRY {
+            return Err(RuntimeError::new(
+                ErrorKind::StackOverflow,
+                format!(
+                    "stack overflow: more than {MAX_REENTRY} nested calls through built-ins such as map"
+                ),
+            )
+            .note("help: a callback that calls map/filter/reduce on deeper and deeper data recurses through the built-in; use a recursive fn instead"));
+        }
+        self.call(ra, nargs)?;
+        self.frame_mut().reentry = true;
+        self.reentry_depth += 1;
+        let result = self.execute();
+        self.reentry_depth -= 1;
+        result
     }
 
     /// Write program output (used by natives such as `print`).
@@ -870,7 +980,6 @@ fn host_io(e: std::io::Error) -> RuntimeError {
 /// Mixed int/float is an error (R0201), with one exception: true division
 /// `/` converts int operands to float and always returns a float (D9).
 ///
-/// EXTEND (M8): `+` on two lists gets an arm here.
 pub fn arith(op: OpCode, b: &Value, c: &Value) -> Result<Value, RuntimeError> {
     // RUST: matching on a tuple of two references checks both types at once.
     match (b, c) {
@@ -885,6 +994,14 @@ pub fn arith(op: OpCode, b: &Value, c: &Value) -> Result<Value, RuntimeError> {
             out.push_str(x);
             out.push_str(y);
             Ok(Value::Str(out.into()))
+        }
+        // `+` joins two lists into a new one (D11). The operands are
+        // registers that may still be read, so neither is reused in place.
+        (Value::List(x), Value::List(y)) if op == OpCode::ADD => {
+            let mut out = Vec::with_capacity(x.len() + y.len());
+            out.extend(x.iter().cloned());
+            out.extend(y.iter().cloned());
+            Ok(Value::List(Rc::new(out)))
         }
         (Value::Int(x), Value::Float(y)) if op == OpCode::DIV => {
             float_arith(op, *x as f64, *y, b, c).map(Value::Float)
@@ -966,6 +1083,19 @@ pub fn values_equal(b: &Value, c: &Value) -> Result<bool, RuntimeError> {
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
+        // Lists: same length and equal elements, in order (M8). Comparing
+        // elements of different types is an error, as it is outside lists.
+        (Value::List(x), Value::List(y)) => {
+            if x.len() != y.len() {
+                return Ok(false);
+            }
+            for (a, b) in x.iter().zip(y.iter()) {
+                if !values_equal(a, b)? {
+                    return Ok(false);
+                }
+            }
+            true
+        }
         // Any value may be compared with `none`: that is how an optional
         // is tested (plan §2.4).
         (Value::None, other) | (other, Value::None) => matches!(other, Value::None),
@@ -1006,6 +1136,51 @@ pub fn less(b: &Value, c: &Value, or_equal: bool) -> Result<bool, RuntimeError> 
             b,
             c,
         )),
+    }
+}
+
+/// `xs[i]` (M8): a list and an int index in `0..len` (no negative
+/// indexing in the MVP). Out of range → R0401 with the index and length
+/// (`RuntimeError::access`, so the CLI can name the access path).
+pub fn index(b: &Value, c: &Value) -> Result<Value, RuntimeError> {
+    match (b, c) {
+        (Value::List(xs), Value::Int(i)) => usize::try_from(*i)
+            .ok()
+            .and_then(|i| xs.get(i))
+            .cloned()
+            .ok_or_else(|| {
+                let mut err = RuntimeError::new(
+                    ErrorKind::IndexOutOfRange,
+                    format!("index {i} out of range (len {})", xs.len()),
+                );
+                if *i < 0 {
+                    err = err.note("help: negative indices are not supported; count from the start (len(xs) - 1 is the last element)");
+                }
+                err.access = Some(Box::new(Access {
+                    index: i.to_string(),
+                    len: xs.len(),
+                }));
+                err
+            }),
+        (Value::List(_), other) => Err(RuntimeError::new(
+            ErrorKind::TypeMismatch,
+            format!("list index must be an int, not {}", other.describe()),
+        )),
+        (other, _) => Err(RuntimeError::new(
+            ErrorKind::TypeMismatch,
+            format!("cannot index a value of type {}", other.type_name()),
+        )),
+    }
+}
+
+/// A `<native map>` line of a stack trace.
+fn native_entry(id: NativeId) -> TraceEntry {
+    let name = NATIVES.get(id.0 as usize).map_or("?", |n| n.name);
+    TraceEntry {
+        fn_name: format!("<native {name}>").into(),
+        span: SrcSpan::default(),
+        tail_calls: 0,
+        native: true,
     }
 }
 
@@ -1277,10 +1452,7 @@ mod tests {
 
     /// Index of a built-in by name.
     fn native(name: &str) -> u16 {
-        NATIVES
-            .iter()
-            .position(|n| n.name == name)
-            .expect("known native") as u16
+        crate::builtins::native_id(name).expect("known native").0
     }
 
     /// M7: `fail()` returns `Err("bad")` (made by the `Err` built-in);
@@ -1785,6 +1957,230 @@ mod tests {
                 prop_assert!(r == 0 || (r < 0) == (y < 0));
                 prop_assert!(r.unsigned_abs() < y.unsigned_abs());
             }
+        }
+    }
+
+    // ---- M8: lists, re-entry from built-ins ---------------------------------
+
+    fn ints(xs: &[i64]) -> Value {
+        Value::List(Rc::new(xs.iter().map(|&n| Value::Int(n)).collect()))
+    }
+
+    /// `[10, 20, 30][i]` for an index loaded by `load` into R4.
+    fn index_program(load: Instr) -> Program {
+        ProtoBuilder::new("<main>", 5)
+            .op(Instr::asbx(OpCode::LOADI, 1, 10))
+            .op(Instr::asbx(OpCode::LOADI, 2, 20))
+            .op(Instr::asbx(OpCode::LOADI, 3, 30))
+            .op(Instr::abc(OpCode::NEWLIST, 0, 1, 3))
+            .op(load)
+            .op(Instr::abc(OpCode::INDEX, 0, 0, 4))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program()
+    }
+
+    #[test]
+    fn newlist_and_index() {
+        assert_eq!(
+            run(&index_program(Instr::asbx(OpCode::LOADI, 4, 2))).0,
+            Ok(Value::Int(30))
+        );
+        for (i, msg) in [
+            (3, "index 3 out of range (len 3)"),
+            (-1, "index -1 out of range (len 3)"),
+        ] {
+            let e = run(&index_program(Instr::asbx(OpCode::LOADI, 4, i)))
+                .0
+                .unwrap_err();
+            assert_eq!(e.kind.code(), "R0401");
+            assert_eq!(e.message, msg);
+            let a = e.access.expect("access");
+            assert_eq!((a.index.as_str(), a.len), (i.to_string().as_str(), 3));
+        }
+        let e = run(&index_program(Instr::abc(OpCode::LOADNONE, 4, 0, 0)))
+            .0
+            .unwrap_err();
+        assert_eq!(e.kind.code(), "R0201");
+        assert_eq!(e.message, "list index must be an int, not none");
+        // An empty NEWLIST.
+        let p = ProtoBuilder::new("<main>", 1)
+            .op(Instr::abc(OpCode::NEWLIST, 0, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        assert_eq!(run(&p).0, Ok(ints(&[])));
+    }
+
+    #[test]
+    fn lists_add_compare_and_display() {
+        let (a, b) = (ints(&[1, 2]), ints(&[3]));
+        assert_eq!(arith(OpCode::ADD, &a, &b), Ok(ints(&[1, 2, 3])));
+        assert_eq!(arith(OpCode::SUB, &a, &b).unwrap_err().kind.code(), "R0201");
+        assert!(values_equal(&a, &ints(&[1, 2])).unwrap());
+        assert!(!values_equal(&a, &b).unwrap());
+        let mixed = Value::List(Rc::new(vec![Value::Float(1.0)]));
+        assert_eq!(values_equal(&b, &mixed).unwrap_err().kind.code(), "R0201");
+        assert_eq!(less(&a, &b, false).unwrap_err().kind.code(), "R0205");
+        let nested = Value::List(Rc::new(vec![a, Value::Str("x".into()), ints(&[])]));
+        assert_eq!(nested.to_string(), "[[1, 2], \"x\", []]");
+        assert_eq!(nested.type_name(), "list");
+    }
+
+    /// `<main>`: `map([1, 2, 3], f)` with `f` = the prototype `child`.
+    fn map_program(child: Proto) -> Program {
+        ProtoBuilder::new("<main>", 6)
+            .native_global(native("map"))
+            .proto(child)
+            .op(Instr::abx(OpCode::GETGLOBAL, 0, 0))
+            .op(Instr::asbx(OpCode::LOADI, 3, 1))
+            .op(Instr::asbx(OpCode::LOADI, 4, 2))
+            .op(Instr::asbx(OpCode::LOADI, 5, 3))
+            .op(Instr::abc(OpCode::NEWLIST, 1, 3, 3))
+            .op(Instr::abx(OpCode::CLOSURE, 2, 0))
+            .op(Instr::abc(OpCode::CALL, 0, 2, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program()
+    }
+
+    #[test]
+    fn map_calls_back_into_bytecode() {
+        let double = ProtoBuilder::new("double", 1)
+            .arity(1)
+            .op(Instr::abc(OpCode::ADD, 0, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        let (r, host) = run(&map_program(double));
+        assert_eq!(r, Ok(ints(&[2, 4, 6])));
+        assert_eq!(host.stdout, "");
+    }
+
+    #[test]
+    fn tail_calls_inside_a_callback_return_to_the_builtin() {
+        // f(x) = str(x)   — a tail call to a built-in, from a callback;
+        // g(x) = add(x, x) — a tail call to a closure (global slot 1).
+        let f = ProtoBuilder::new("f", 3)
+            .arity(1)
+            .op(Instr::abx(OpCode::GETGLOBAL, 1, 1))
+            .op(Instr::abc(OpCode::MOVE, 2, 0, 0))
+            .op(Instr::abc(OpCode::TAILCALL, 1, 1, 0))
+            .build();
+        let mut p = map_program(f);
+        p.globals.push(crate::chunk::GlobalDesc {
+            name: "str".into(),
+            kind: GlobalKind::Native(NativeId(native("str"))),
+        });
+        let strs = |xs: &[&str]| {
+            Value::List(Rc::new(
+                xs.iter().map(|s| Value::Str((*s).into())).collect(),
+            ))
+        };
+        assert_eq!(run(&p).0, Ok(strs(&["1", "2", "3"])));
+        let g = ProtoBuilder::new("g", 4)
+            .arity(1)
+            .proto(add_proto())
+            .op(Instr::abx(OpCode::CLOSURE, 1, 0))
+            .op(Instr::abc(OpCode::MOVE, 2, 0, 0))
+            .op(Instr::abc(OpCode::MOVE, 3, 0, 0))
+            .op(Instr::abc(OpCode::TAILCALL, 1, 2, 0))
+            .build();
+        assert_eq!(run(&map_program(g)).0, Ok(ints(&[2, 4, 6])));
+    }
+
+    #[test]
+    fn errors_in_callbacks_show_the_builtin_in_the_trace() {
+        // f(x) = x // 0
+        let f = ProtoBuilder::new("f", 2)
+            .arity(1)
+            .op(Instr::asbx(OpCode::LOADI, 1, 0))
+            .op(Instr::abc(OpCode::IDIV, 0, 0, 1))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        let e = run(&map_program(f)).0.unwrap_err();
+        assert_eq!(e.kind.code(), "R0102");
+        let names: Vec<_> = e.trace.iter().map(|t| (&*t.fn_name, t.native)).collect();
+        assert_eq!(
+            names,
+            [("f", false), ("<native map>", true), ("<main>", false)]
+        );
+        // A built-in that fails itself is not listed: the call is the place.
+        let p = ProtoBuilder::new("<main>", 3)
+            .native_global(native("map"))
+            .op(Instr::abx(OpCode::GETGLOBAL, 0, 0))
+            .op(Instr::asbx(OpCode::LOADI, 1, 1))
+            .op(Instr::asbx(OpCode::LOADI, 2, 1))
+            .op(Instr::abc(OpCode::CALL, 0, 2, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        let e = run(&p).0.unwrap_err();
+        assert_eq!(e.message, "map() expects a list, got int (1)");
+        assert_eq!(e.trace.len(), 1);
+    }
+
+    /// `f(x) = map([x], f)` called with 1: recurses through `map` forever.
+    fn endless_map_recursion() -> Program {
+        let f = ProtoBuilder::new("f", 4)
+            .arity(1)
+            .op(Instr::abx(OpCode::GETGLOBAL, 1, 0))
+            .op(Instr::abc(OpCode::MOVE, 3, 0, 0))
+            .op(Instr::abc(OpCode::NEWLIST, 2, 3, 1))
+            .op(Instr::abc(OpCode::GETSELF, 3, 0, 0))
+            .op(Instr::abc(OpCode::CALL, 1, 2, 0))
+            .op(Instr::abc(OpCode::RETURN, 1, 0, 0))
+            .build();
+        ProtoBuilder::new("<main>", 2)
+            .native_global(native("map"))
+            .proto(f)
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+            .op(Instr::asbx(OpCode::LOADI, 1, 1))
+            .op(Instr::abc(OpCode::CALL, 0, 1, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program()
+    }
+
+    #[test]
+    fn recursion_through_builtins_is_capped() {
+        // On a thread with the stack the CLI gives the VM (test threads get
+        // 2 MiB). `Rc` values cannot cross threads, so only plain data comes
+        // back.
+        let (code, message, depth) = std::thread::Builder::new()
+            .stack_size(VM_STACK_BYTES)
+            .spawn(|| {
+                let e = run(&endless_map_recursion()).0.unwrap_err();
+                (e.kind.code(), e.message, e.trace.len())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(code, "R0301");
+        assert!(message.contains("built-ins"), "{message}");
+        // <main>, the first f, 200 re-entered f frames and their 200 marks.
+        assert_eq!(depth, 2 * MAX_REENTRY + 2);
+    }
+
+    /// `reduce(xs, 0, add)` on a list built by NEWLIST.
+    fn reduce_sum(xs: &[i64]) -> Result<Value, RuntimeError> {
+        let mut b = ProtoBuilder::new("<main>", 4 + xs.len() as u8)
+            .native_global(native("reduce"))
+            .proto(add_proto());
+        for (i, &x) in xs.iter().enumerate() {
+            b = b
+                .konst(Const::Int(x))
+                .op(Instr::abx(OpCode::LOADK, 4 + i as u8, i as u16));
+        }
+        let p = b
+            .op(Instr::abx(OpCode::GETGLOBAL, 0, 0))
+            .op(Instr::abc(OpCode::NEWLIST, 1, 4, xs.len() as u8))
+            .op(Instr::asbx(OpCode::LOADI, 2, 0))
+            .op(Instr::abx(OpCode::CLOSURE, 3, 0))
+            .op(Instr::abc(OpCode::CALL, 0, 3, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        run(&p).0
+    }
+
+    proptest! {
+        #[test]
+        fn reduce_add_is_the_sum(xs in prop::collection::vec(-1_000_000i64..1_000_000, 0..60)) {
+            prop_assert_eq!(reduce_sum(&xs), Ok(Value::Int(xs.iter().sum())));
         }
     }
 }

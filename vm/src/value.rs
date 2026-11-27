@@ -30,7 +30,8 @@
 //! ## No reference cycles (invariant)
 //!
 //! Values are reference counted (`Rc`) and there is no garbage collector, so
-//! a cycle of `Rc`s would leak. None can form: values are immutable, and a
+//! a cycle of `Rc`s would leak. None can form: values are immutable (a list
+//! is built from values that already exist, M8), and a
 //! closure's captures are copied when it is created (plan D5), before the
 //! closure itself exists. A function refers to itself only through a global
 //! slot (top-level `fn`, M4) or `GETSELF` (local `fn`, M6), never through its
@@ -69,6 +70,10 @@ pub enum Value {
     Float(f64),
     /// Immutable UTF-8 text (M7); shared, never copied by `MOVE` (D11).
     Str(Rc<str>),
+    /// An immutable list (M8, D12). Shared; built-ins that take a list by
+    /// value change it in place (`Rc::make_mut`) only when nothing else
+    /// holds it.
+    List(Rc<Vec<Value>>),
     /// The empty value `none` (S9): an optional `T | none` is a plain `T`
     /// or `none`, with no wrapper (M7).
     None,
@@ -134,6 +139,7 @@ impl Value {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
             Value::Str(_) => "str",
+            Value::List(_) => "list",
             Value::None => "none",
             Value::Ok(_) | Value::Err(_) => "result",
             Value::Closure(_) | Value::Native(_) => "function",
@@ -200,6 +206,17 @@ impl fmt::Display for Value {
             // `print("hi")` prints the text itself; inside other values and in
             // messages strings are quoted (`Value::repr`).
             Value::Str(s) => f.write_str(s),
+            // `[1, "a"]`: elements in their `repr` form (strings quoted).
+            Value::List(xs) => {
+                f.write_str("[")?;
+                for (i, x) in xs.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    f.write_str(&x.repr())?;
+                }
+                f.write_str("]")
+            }
             Value::None => f.write_str("none"),
             Value::Ok(v) => write!(f, "Ok({})", v.repr()),
             Value::Err(e) => write!(f, "Err({})", e.payload.repr()),

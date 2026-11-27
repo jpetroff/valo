@@ -268,6 +268,10 @@ struct Sig {
     name: String,
     /// Parameter names in order, and whether each has a default.
     params: Vec<(String, bool)>,
+    /// How many leading parameters may be passed by position: the required
+    /// ones, plus a built-in's omittable positional ones (`range(a, b)`,
+    /// Q26). The rest are keyword-only (S19).
+    positional: usize,
     /// Where it is defined (`None` for built-ins).
     def: Option<Span>,
 }
@@ -378,6 +382,11 @@ impl Resolver {
                         .iter()
                         .map(|p| (p.name.to_string(), p.has_default))
                         .collect(),
+                    positional: n
+                        .params
+                        .iter()
+                        .filter(|p| !p.has_default || p.positional)
+                        .count(),
                     def: None,
                 },
             );
@@ -514,6 +523,7 @@ impl Resolver {
                 self.sigs.push(Sig {
                     name: b.name.clone(),
                     params: l.params.iter().map(|p| (p.name.clone(), false)).collect(),
+                    positional: l.params.len(),
                     def: Some(b.name_span),
                 });
                 Some(self.sigs.len() - 1)
@@ -772,7 +782,7 @@ impl Resolver {
                 Arg::Positional(x) => {
                     positional += 1;
                     let k = positional - 1;
-                    if k >= required && k < sig.params.len() {
+                    if k >= sig.positional && k < sig.params.len() {
                         let name = &sig.params[k].0;
                         self.diags.push(
                             Diagnostic::new(
@@ -821,7 +831,7 @@ impl Resolver {
                         self.diags.push(d);
                         ok = false;
                     }
-                    Some(k) if !sig.params[k].1 => {
+                    Some(k) if k < sig.positional => {
                         named_required += 1;
                         self.diags.push(
                             Diagnostic::new(
@@ -876,17 +886,22 @@ impl Resolver {
     /// E0205: wrong number of positional arguments to a known callee.
     fn wrong_count(&mut self, e: &Expr, sig: &Sig, want: usize, given: usize) {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
-        let what = if want == sig.params.len() {
+        let what = if want == sig.params.len() || sig.positional == sig.params.len() {
             "argument"
         } else {
             "positional argument"
         };
+        // `range` takes 1 to 2 arguments (Q26).
+        let takes = if sig.positional > want {
+            format!("{want} to {} {what}s", sig.positional)
+        } else {
+            format!("{want} {what}{}", plural(want))
+        };
         let mut d = Diagnostic::new(
             "E0205",
             format!(
-                "`{}` takes {want} {what}{} but {given} {} given",
+                "`{}` takes {takes} but {given} {} given",
                 sig.name,
-                plural(want),
                 if given == 1 { "was" } else { "were" }
             ),
             e.span,
@@ -1270,6 +1285,7 @@ fn fn_sig(d: &FnDef) -> Sig {
             .iter()
             .map(|p| (p.name.clone(), p.default.is_some()))
             .collect(),
+        positional: d.params.iter().filter(|p| p.default.is_none()).count(),
         def: Some(d.name_span),
     }
 }
@@ -1452,7 +1468,7 @@ mod tests {
     fn fn_bodies_see_globals_as_at_definition() {
         let src = "let x = 1\nfn f() -> int = x\nlet x = 2\nf()";
         let d = resolve_src(src).unwrap();
-        assert!(d.contains("2:17    x -> global#18"), "{d}");
+        assert!(d.contains("2:17    x -> global#32"), "{d}");
     }
 
     // Snapshot: src/snapshots/valo_compiler__resolve__tests__capture_chain.snap

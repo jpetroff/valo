@@ -508,14 +508,22 @@ impl Session {
         let out = Arc::clone(&self.out);
         let shared = Arc::clone(&self.shared);
         let tx = self.tx.clone();
-        thread::spawn(move || {
-            let ended = tx.clone();
-            let exit_code = catch_unwind(AssertUnwindSafe(|| {
-                program::run_program(launch, &out, &shared, tx, cmd_rx)
-            }))
-            .unwrap_or(EXIT_PANIC);
-            let _ = ended.send(Input::ProgramEnded { exit_code });
-        });
+        // A big stack: built-ins calling back into valo nest the VM's loop.
+        let spawned = thread::Builder::new()
+            .stack_size(valo_vm::vm::VM_STACK_BYTES)
+            .spawn(move || {
+                let ended = tx.clone();
+                let exit_code = catch_unwind(AssertUnwindSafe(|| {
+                    program::run_program(launch, &out, &shared, tx, cmd_rx)
+                }))
+                .unwrap_or(EXIT_PANIC);
+                let _ = ended.send(Input::ProgramEnded { exit_code });
+            });
+        if spawned.is_err() {
+            let _ = self.tx.send(Input::ProgramEnded {
+                exit_code: EXIT_PANIC,
+            });
+        }
     }
 
     /// Ask the stopped program something and wait for the answer. `None`
