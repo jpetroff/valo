@@ -69,6 +69,8 @@ want to change something quickly, use the table below.
 
 ## Related documents
 
+- [`lang/`](lang/README.md) — the language itself: a [syntax guide](lang/syntax.md)
+  with runnable examples and the [formal grammar](lang/grammar.md).
 - `.memory/plan-mvp.md` — the implementation plan (milestones M0–M10, design
   decisions D1–D29, error-code catalogue). Written for AI agents: dense.
 - `.memory/syntax.md` — every syntax decision made so far.
