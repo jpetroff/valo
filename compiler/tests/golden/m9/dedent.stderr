@@ -1,0 +1,7 @@
+error[E0003]: unindent does not match any outer indentation level
+   ╭─[ dedent.vl:4:1 ]
+   │
+ 4 │     else: 2
+   │ ──┬─  
+   │   ╰─── here
+───╯

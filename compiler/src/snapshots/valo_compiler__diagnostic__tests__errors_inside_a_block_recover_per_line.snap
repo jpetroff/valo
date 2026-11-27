@@ -1,0 +1,25 @@
+---
+source: compiler/src/diagnostic.rs
+expression: "errors_of(\"fn f(x: int) -> int:\\n  let a = x +\\n  let b = )\\n  a\\nprint(f(1) +)\\n\")"
+---
+error[E0101]: expected an expression, found end of line
+   ╭─[ t.vl:2:14 ]
+   │
+ 2 │   let a = x +
+   │              ┬  
+   │              ╰── expected an expression here
+───╯
+error[E0101]: expected an expression, found `)`
+   ╭─[ t.vl:3:11 ]
+   │
+ 3 │   let b = )
+   │           ┬  
+   │           ╰── expected an expression here
+───╯
+error[E0101]: expected an expression, found `)`
+   ╭─[ t.vl:5:13 ]
+   │
+ 5 │ print(f(1) +)
+   │             ┬  
+   │             ╰── expected an expression here
+───╯

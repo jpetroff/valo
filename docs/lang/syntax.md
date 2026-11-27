@@ -816,7 +816,7 @@ print("never")
 
 ```text
 error[R0601]: unhandled Err: "bad port"
-  --> example.vl:5:1
+   ╭─[ example.vl:5:1 ]   (source box with line 5 shortened here)
   context (outermost first):
     loading config
   origin: inner at example.vl:1:29

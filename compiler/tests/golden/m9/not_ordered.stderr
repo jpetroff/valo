@@ -1,0 +1,10 @@
+error[R0205]: values of type bool cannot be ordered
+   ╭─[ not_ordered.vl:2:7 ]
+   │
+ 2 │ print(true < false)
+   │       ──────┬─────  
+   │             ╰─────── cannot be compared
+───╯
+  help: only int, float and str have an order
+stack trace (most recent call first):
+  0: <main> at not_ordered.vl:2:7

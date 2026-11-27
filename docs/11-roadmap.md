@@ -25,7 +25,7 @@ now read. The authoritative plan is `.memory/plan-mvp.md`; syntax is in
 | ~~M7~~ (done) | strings `"…{x}…"`, file/stdin I/O, `none`, `Ok/Err`, `?` | string scanner with a mode stack | `Str`/`Interp`, `None`, postfix `Try` | pipe + `?` rewriting | `CONCAT`, `LOADNONE`, `TRY` (lenient after top-level lines) | `Value::{Str, None, Ok, Err}`, `Host` gains stdin/files, R0601 with the `Err`'s history |
 | ~~M8~~ (done) | lists, indexing, `map/filter/reduce`, comprehensions, `in` | — | `List`, postfix `Index`, `Comprehension`, `In` | comprehension and `in` rewriting to built-ins by id (`ExprKind::Builtin`), E0208 | `NEWLIST`, `INDEX` | `Value::List`, `Vm::call_value` (nested loop, `<native map>` in traces), R0401 |
 | **M8b** | tuples, dicts, `.key` | — | dict/tuple literals | — | `NEWTUPLE`, `NEWDICT`, `GETFIELD` | `Value::Dict` |
-| **M9** | diagnostics quality | — | multi-error recovery, did-you-mean | — | — | source snippets in runtime errors |
+| ~~M9~~ (done) | diagnostics quality | — | per-line recovery, 20-error cap | did-you-mean | — | `error[CODE]:` header and source box for runtime errors too, messages in `error.rs` constructors, `--color` |
 | **M10** | runtime type checks for annotations | — | — | — | `CHECKTYPE` | type checks with precise paths |
 
 After the MVP: bytecode files (`valo build`, `valo-vm`, M11), `match` (M12),

@@ -1,0 +1,7 @@
+error[E0403]: `list` needs type arguments, e.g. list[int]
+   ╭─[ bad_type.vl:1:14 ]
+   │
+ 1 │ fn first(xs: list) -> int = xs[0]
+   │              ──┬─  
+   │                ╰─── missing `[…]`
+───╯

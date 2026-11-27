@@ -210,7 +210,12 @@ When `execute` returns `Err(e)`, `Vm::unwind` fills `e.trace` with one
 
 ```text
 error[R0102]: division by zero: 7 // 0
-  --> div_zero.vl:2:1
+   ╭─[ div_zero.vl:2:1 ]
+   │
+ 2 │ 7 // (2 - 2)
+   │ ──────┬─────
+   │       ╰─────── divisor is zero
+───╯
 stack trace (most recent call first):
   0: <main> at div_zero.vl:2:1
 ```

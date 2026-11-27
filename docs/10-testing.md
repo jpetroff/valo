@@ -135,10 +135,20 @@ names in messages are stable and files a program writes stay there.
 ## 10.5 CLI tests
 
 `compiler/tests/cli.rs` checks what golden files cannot: exit 64 for a missing
-file and bad arguments, exit 0 for `--help`/`--version`, and that
-`check --dump bytecode` prints a disassembly.
+file and bad arguments, exit 0 for `--help`/`--version`, that
+`check --dump bytecode` prints a disassembly, `--color`, and R0501 when
+stdout is `/dev/full` (Linux).
 
-## 10.6 Exercises
+## 10.6 Error-code coverage
+
+`compiler/tests/codes.rs` reads every expected `.stderr` file and checks
+that each code of the two catalogues — `E_CODES` in `diagnostic.rs` and
+`ErrorKind::ALL` in `vm/src/error.rs` — appears in at least one of them
+(retired codes, the debugger-only R0801, internal R0901 and R0501 are
+exempt). Adding a code without a golden test fails this test. Goldens for
+codes no earlier milestone needed live in `compiler/tests/golden/m9/`.
+
+## 10.7 Exercises
 
 1. Add a golden test `m1/mod_neg.vl` for `-1 % 7` (expect `6`).
 2. Break `int_arith`'s floor adjustment on purpose (remove `- 1`) and see
@@ -146,7 +156,7 @@ file and bad arguments, exit 0 for `--help`/`--version`, and that
 3. Write a property test: for random `x`, the source text `format!("{x}")`
    lexes to exactly `[Int(x), NEWLINE, EOF]`.
 
-## 10.7 Further reading
+## 10.8 Further reading
 
 - insta documentation (insta.rs); proptest book (altsysrq.github.io/proptest-book).
 - The rustc test suite's "UI tests" — the industrial form of golden tests.

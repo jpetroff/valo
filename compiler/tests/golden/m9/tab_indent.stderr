@@ -1,0 +1,7 @@
+error[E0006]: tab character in indentation; indent with spaces
+   ╭─[ tab_indent.vl:2:1 ]
+   │
+ 2 │     1
+   │ ┬───  
+   │ ╰───── here
+───╯

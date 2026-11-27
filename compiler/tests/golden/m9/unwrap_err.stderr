@@ -1,0 +1,10 @@
+error[R0403]: unwrap of Err("disk full")
+   ╭─[ unwrap_err.vl:2:7 ]
+   │
+ 2 │ print(unwrap(r))
+   │       ────┬────  
+   │           ╰────── value is an Err
+───╯
+  help: handle the error with `?`, is_err(r) or or_else(r, default)
+stack trace (most recent call first):
+  0: <main> at unwrap_err.vl:2:7

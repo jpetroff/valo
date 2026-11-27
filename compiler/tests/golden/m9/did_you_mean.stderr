@@ -1,0 +1,18 @@
+error[E0201]: undefined name `widht`
+   ╭─[ did_you_mean.vl:3:12 ]
+   │
+ 3 │ print(area(widht, 4))
+   │            ──┬──  
+   │              ╰──── not found in this scope
+   │ 
+   │ Help: did you mean `width`?
+───╯
+error[E0201]: undefined name `lenn`
+   ╭─[ did_you_mean.vl:4:7 ]
+   │
+ 4 │ print(lenn([1, 2]))
+   │       ──┬─  
+   │         ╰─── not found in this scope
+   │ 
+   │ Help: did you mean `len`?
+───╯

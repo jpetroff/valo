@@ -1,0 +1,37 @@
+---
+source: compiler/src/diagnostic.rs
+expression: "errors_of(\"fn add(a: int, b: int) -> int = a + b\\nprint(ad(1, 2))\\nprint(add(1))\\nlet x: integer = 1\\n\")"
+---
+error[E0201]: undefined name `ad`
+   ╭─[ t.vl:2:7 ]
+   │
+ 2 │ print(ad(1, 2))
+   │       ─┬  
+   │        ╰── not found in this scope
+   │ 
+   │ Help: did you mean `add`?
+───╯
+error[E0205]: `add` takes 2 arguments but 1 was given
+   ╭─[ t.vl:3:7 ]
+   │
+ 3 │ print(add(1))
+   │       ───┬──  
+   │          ╰──── called with 1 argument
+   │
+   ├─[ t.vl:3:7 ]
+   │
+ 1 │ fn add(a: int, b: int) -> int = a + b
+   │    ─┬─  
+   │     ╰─── defined here
+   │ 
+   │ Help: to fix only some arguments, use a partial: `add(a, _)`
+───╯
+error[E0402]: unknown type `integer`
+   ╭─[ t.vl:4:8 ]
+   │
+ 4 │ let x: integer = 1
+   │        ───┬───  
+   │           ╰───── not a type
+   │ 
+   │ Help: the types are int, float, bool, str, none, any, error, list[T], dict[K, V], tuple[…]
+───╯

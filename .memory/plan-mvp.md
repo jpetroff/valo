@@ -293,14 +293,17 @@ constants: (none)
 | R08xx | interruption | R0801 run stopped from outside (debugger Stop/terminate; later Ctrl+C) — never printed by valo-dap |
 | R05xx | host | R0501 stdout/stderr write failure (file errors are `Err` values, not faults) |
 
-Runtime error output (stderr), exact shape from M4, polished in M9:
+Runtime error output (stderr), shape since M9 (compile errors share header + box):
 
 ```
-error[R0102]: division by zero
-  --> div.vl:3:5
-   |
- 3 |     <source line 3>          (ariadne snippet, M9; before M9 omitted)
-   |     ^^^^^ divisor is 0
+error[R0102]: division by zero: 10 // 0
+   ╭─[ div.vl:3:5 ]
+   │
+ 3 │     <source line 3>
+   │     ──┬──
+   │       ╰──── divisor is zero
+───╯
+  help: … / left: … / right: …   (notes)
 stack trace (most recent call first):
   0: safe_div   at div.vl:3:5
   1: compute    at div.vl:7:3
@@ -610,7 +613,16 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 
 > Q24: dict semantics — (a) insertion-ordered (Python 3.7+, `indexmap`), keys Str/Int/Bool/Tuple (b) sorted `BTreeMap`, no new dep. Default (a).
 
-### M9 — Diagnostics quality pass
+### M9 — Diagnostics quality pass — DONE 2026-11-27
+
+- Implementation notes (branch `m9-m10`, three commits M9a/M9b/M9c):
+  - User decision: one rustc-style layout for compile AND runtime errors: our own header `error[CODE]: message`, then an ariadne box (ariadne's own `Error:` header line is rendered with an empty message and dropped by `diagnostic::snippet`; a unit test guards the ariadne layout). The box's `╭─[ file:l:c ]` replaces the old `  --> file:l:c` line. Runtime errors draw the box for the innermost frame's instruction; its label is `ErrorKind::label()` (`divisor is zero`, `not a function`, …); notes, R0601 trail and trace follow below the box. Every `.stderr` golden re-blessed (formatting only in M9a).
+  - `--color auto|always|never` (global clap flag) → `diagnostic::ColorChoice`; `stderr_color()` removed. DAP renders without colour.
+  - User decision: `ErrorKind` stays a plain `Copy` code enum (DAP matches on it); all wording moved into named constructors in `vm/src/error.rs` (`RuntimeError::operand_types`, `::not_callable`, `::division_by_zero`, … ~30) + `RuntimeError::help`. `Value::describe` cuts the value to 40 chars (`value::preview`, `PREVIEW_CHARS`). Message changes: R0201 `unsupported operand types for `+`: int (1) and float (2.0)` (Python wording kept instead of the planned `cannot add …`), R0202 `cannot call int (3): it is not a function`, R0203 shows the value, R0104's explanation became a help note.
+  - Recovery was already per line at top level and inside blocks (`Parser::sync_line`, `block()`); the cap is in the renderer (`MAX_SHOWN = 20`, then `error: N more errors not shown`) so LSP still gets every diagnostic.
+  - Catalogue: `diagnostic::E_CODES` + `E_RETIRED` (E0202), `ErrorKind::ALL`. `compiler/tests/codes.rs` requires an `error[CODE]` in some golden `.stderr` for every code (exempt: retired, R0501 — `cli.rs` test with stdout = `/dev/full`, R0801 debugger-only, R0901 internal; `PENDING` = E0401 until M10). Reuses existing goldens instead of a `m9/codes/` copy per code.
+  - New goldens `m9/`: `dedent` E0003, `unterminated_str` E0004, `bad_escape` E0005, `tab_indent` E0006, `empty_interp` E0008, `not_supported` E0009, `bad_number` E0010, `too_deep` E0105, `too_many_elems` E0301, `bad_type` E0403, `dup_keyword` E0425, `not_ordered` R0205, `unwrap_err` R0403, `recovery` (3 errors), `did_you_mean` (local + builtin). insta: 4 multi-error snapshots in `diagnostic.rs` + a 23-error cap test.
+  - `debug_assert!` in `Diagnostic::new` against inverted spans (a `Span` always exists, so "no diagnostic lacks a span" holds by type). W0201 not done (post-MVP lint).
 
 - Goal: errors are the product: snippets everywhere, recovery, hints, stable codes.
 - Tasks:

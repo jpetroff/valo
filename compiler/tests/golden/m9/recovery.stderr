@@ -1,0 +1,23 @@
+error[E0101]: expected an expression, found end of line
+   ╭─[ recovery.vl:1:12 ]
+   │
+ 1 │ let a = 1 +
+   │            ┬  
+   │            ╰── expected an expression here
+───╯
+error[E0101]: expected end of line, found `)`
+   ╭─[ recovery.vl:2:9 ]
+   │
+ 2 │ print(a))
+   │         ┬  
+   │         ╰── unexpected here
+───╯
+error[E0101]: expected a name after `let`, found `=`
+   ╭─[ recovery.vl:3:5 ]
+   │
+ 3 │ let = 2
+   │ ─┬─ ┬  
+   │  ╰───── binding starts here
+   │     │  
+   │     ╰── expected a name here
+───╯

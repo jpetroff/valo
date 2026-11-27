@@ -40,6 +40,60 @@ use valo_vm::error::{ErrorKind, RuntimeError};
 
 use crate::span::{SourceMap, Span};
 
+/// Catalogue of compile-time error codes (plan §5): code and meaning.
+/// Codes are stable once a golden test uses them; `compiler/tests/codes.rs`
+/// checks that every live code here has a golden test.
+pub const E_CODES: &[(&str, &str)] = &[
+    // lexer
+    ("E0001", "unexpected character"),
+    ("E0002", "integer literal out of range"),
+    ("E0003", "inconsistent dedent"),
+    ("E0004", "unterminated string"),
+    ("E0005", "invalid escape"),
+    ("E0006", "tab in indentation"),
+    ("E0007", "unterminated interpolation (missing `}`)"),
+    ("E0008", "empty interpolation `{}`"),
+    ("E0009", "syntax not supported yet"),
+    ("E0010", "malformed number literal"),
+    // parser
+    ("E0101", "unexpected token"),
+    ("E0102", "`if` without `else`"),
+    ("E0103", "unclosed delimiter"),
+    ("E0104", "block ends with a `let` or `fn`"),
+    ("E0105", "expression nested too deeply"),
+    // resolver
+    ("E0201", "undefined name"),
+    ("E0202", "retired (same-scope rebinding is allowed)"),
+    ("E0203", "top-level name used before its definition"),
+    ("E0204", "local mutual recursion"),
+    ("E0205", "wrong number of arguments to a known function"),
+    ("E0206", "`_` used as a value"),
+    ("E0207", "defined twice"),
+    ("E0208", "`?` directly inside a comprehension"),
+    // code generation
+    (
+        "E0301",
+        "limit exceeded (registers, constants, jumps, elements)",
+    ),
+    // types
+    ("E0401", "literal does not match its annotation"),
+    ("E0402", "unknown type name"),
+    ("E0403", "malformed type"),
+    ("E0410", "missing parameter or return annotation"),
+    // arguments
+    ("E0421", "defaulted parameter passed by position"),
+    (
+        "E0422",
+        "keyword arguments to a function not known at compile time",
+    ),
+    ("E0423", "required parameter after a defaulted one"),
+    ("E0424", "unknown keyword argument"),
+    ("E0425", "duplicate keyword argument"),
+];
+
+/// Codes in `E_CODES` that are no longer produced.
+pub const E_RETIRED: &[&str] = &["E0202"];
+
 /// A compile-time error with a stable `E####` code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -190,9 +244,12 @@ fn snippet(
 ///    │ Help: did you mean `len`?
 /// ───╯
 /// ```
+///
+/// At most `MAX_SHOWN` diagnostics are drawn; a last line counts the rest
+/// (every stage keeps going after an error, so one typo can cascade).
 pub fn render(sm: &SourceMap, diags: &[Diagnostic], color: bool) -> String {
     let mut out = String::new();
-    for d in diags {
+    for d in diags.iter().take(MAX_SHOWN) {
         header(&mut out, d.code, &d.message, color);
         out.push_str(&snippet(
             sm,
@@ -203,8 +260,16 @@ pub fn render(sm: &SourceMap, diags: &[Diagnostic], color: bool) -> String {
             color,
         ));
     }
+    if diags.len() > MAX_SHOWN {
+        let more = diags.len() - MAX_SHOWN;
+        let s = if more == 1 { "" } else { "s" };
+        let _ = writeln!(out, "error: {more} more error{s} not shown");
+    }
     out
 }
+
+/// Most compile errors `render` draws (plan M9).
+pub const MAX_SHOWN: usize = 20;
 
 /// Keep spans inside the text so ariadne never panics on EOF positions.
 fn clamp(sm: &SourceMap, s: Span) -> Span {
@@ -385,6 +450,50 @@ mod tests {
         assert_eq!(lines.next(), Some("error[E0001]: unexpected character `$`"));
         assert_eq!(lines.next(), Some("   ╭─[ t.vl:1:3 ]"));
         assert!(!out.contains("Error:"), "{out}");
+    }
+
+    /// Compile `src` and render every diagnostic (plain, no colour).
+    fn errors_of(src: &str) -> String {
+        let sm = SourceMap::new("t.vl", src);
+        match crate::compile_source(&sm, crate::CompileOptions::default()) {
+            Ok(_) => "(no errors)".to_string(),
+            Err(d) => render(&sm, &d, false),
+        }
+    }
+
+    // Multi-error files (plan M9): each stage reports every error it finds
+    // before the pipeline stops.
+
+    #[test]
+    fn multi_lexer_errors() {
+        insta::assert_snapshot!(errors_of("let a = 1 $ 2\nprint(\"x\\q\")\nlet b = 007\n"));
+    }
+
+    #[test]
+    fn multi_parser_errors() {
+        insta::assert_snapshot!(errors_of("let a = 1 +\nprint(a))\nif a then 1\nlet = 2\n"));
+    }
+
+    #[test]
+    fn multi_resolver_errors() {
+        insta::assert_snapshot!(errors_of(
+            "fn add(a: int, b: int) -> int = a + b\nprint(ad(1, 2))\nprint(add(1))\nlet x: integer = 1\n"
+        ));
+    }
+
+    #[test]
+    fn errors_inside_a_block_recover_per_line() {
+        insta::assert_snapshot!(errors_of(
+            "fn f(x: int) -> int:\n  let a = x +\n  let b = )\n  a\nprint(f(1) +)\n"
+        ));
+    }
+
+    #[test]
+    fn more_than_twenty_errors_are_counted() {
+        let src = "print(nope)\n".repeat(23);
+        let out = errors_of(&src);
+        assert_eq!(out.matches("error[E0201]").count(), MAX_SHOWN);
+        assert!(out.ends_with("error: 3 more errors not shown\n"), "{out}");
     }
 
     #[test]

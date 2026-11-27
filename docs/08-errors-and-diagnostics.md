@@ -74,12 +74,13 @@ only report consequences of the earlier ones.
 
 ### Rendering
 
-`render(sm, diags, color)` turns diagnostics into text with the `ariadne`
-crate: the file name and position, the source line, an underline and the
-label:
+`render(sm, diags, color)` turns diagnostics into text: a rustc-style header
+line `error[CODE]: message` that we write ourselves, then a box drawn by the
+`ariadne` crate with the file name and position, the source line, an
+underline and the label:
 
 ```text
-[E0101] Error: expected an expression, found end of line
+error[E0101]: expected an expression, found end of line
    ╭─[ parse_error.vl:2:4 ]
    │
  2 │ 3 *
@@ -95,8 +96,17 @@ Details:
   makes ariadne panic.
 - A label without text would draw no marker in ariadne, so `render` uses
   "here" as a default.
-- Colours are on only if stderr is a terminal and `NO_COLOR` is unset
-  (`stderr_color`), so golden test files contain no colour codes.
+- ariadne always starts a report with its own header (`Error: …`); the
+  helper `snippet` renders the report and drops that first line, so compile
+  and runtime errors share our header (M9). A unit test fails if an ariadne
+  upgrade changes this.
+- `--color auto|always|never` (`ColorChoice`): `auto`, the default, colours
+  only if stderr is a terminal and `NO_COLOR` is unset, so golden test files
+  contain no colour codes.
+- At most 20 diagnostics are drawn (`MAX_SHOWN`); a last line
+  `error: N more errors not shown` counts the rest.
+- Every code and its meaning is listed in `E_CODES` (`diagnostic.rs`); the
+  test `compiler/tests/codes.rs` checks that each one has a golden test.
 
 ## 8.4 Runtime errors
 
@@ -122,19 +132,32 @@ pub struct TraceEntry { pub fn_name: Rc<str>, pub span: SrcSpan, pub tail_calls:
                         pub native: bool }  // `<native map>`: no source position
 ```
 
-The VM creates the error at the failing instruction (`RuntimeError::new`);
-`Vm::unwind` adds the trace (chapter 7). Messages include the operand values
-(`9223372036854775807 + 1`), because at runtime the values are what the
-reader cannot see in the source.
+The VM creates the error at the failing instruction with one of the named
+constructors in `error.rs` (`RuntimeError::division_by_zero`,
+`RuntimeError::operand_types`, …): all wording lives there (M9), the VM
+only says what failed. `Vm::unwind` adds the trace (chapter 7). Messages
+include the operand values (`9223372036854775807 + 1`,
+`unsupported operand types for `+`: str ("n = ") and int (3)`), because at
+runtime the values are what the reader cannot see in the source.
+`Value::describe` writes a value as `type (value)`, cut to 40 characters.
 
-`render_runtime(sm, err)` in `diagnostic.rs` prints:
+`render_runtime(sm, err, color)` in `diagnostic.rs` prints the same header
+as a compile error, a source box for the instruction that failed (its label
+is `ErrorKind::label`), notes, and the stack trace:
 
 ```text
 error[R0101]: integer overflow: 9223372036854775807 + 1
-  --> overflow.vl:1:1
+   ╭─[ overflow.vl:1:1 ]
+   │
+ 1 │ 9223372036854775807 + 1
+   │ ───────────┬───────────
+   │            ╰───────────── result does not fit in an int
+───╯
 stack trace (most recent call first):
   0: <main> at overflow.vl:1:1
 ```
+
+In the examples below the source box is cut down to its first line.
 
 The trace has one line per active call, innermost first. For a caller the
 span is the call it is waiting on, so the list reads like a path from the
@@ -142,7 +165,7 @@ failure back to the top level:
 
 ```text
 error[R0102]: division by zero: 10 // 0
-  --> trace3.vl:1:27
+   ╭─[ trace3.vl:1:27 ] …
 stack trace (most recent call first):
   0: inner  at trace3.vl:1:27
   1: middle at trace3.vl:2:28
@@ -158,7 +181,7 @@ elided ...)`, and a trace longer than 15 entries shows the innermost 10, a
 
 ```text
 error[R0102]: division by zero: 1 // 0
-  --> tail_trace.vl:1:41
+   ╭─[ tail_trace.vl:1:41 ] …
 stack trace (most recent call first):
   0: down   at tail_trace.vl:1:41
      (... 5 tail calls elided ...)
@@ -172,7 +195,7 @@ instruction is that expression, so `render_runtime` slices it from the file:
 
 ```text
 error[R0701]: assertion failed: a + a == 5
-  --> assert_cmp_fail.vl:2:8
+   ╭─[ assert_cmp_fail.vl:2:8 ] …
   left: 4
   right: 5
 stack trace (most recent call first):
@@ -189,7 +212,7 @@ program, with R0601 and that history:
 
 ```text
 error[R0601]: unhandled Err: "bad port"
-  --> context_chain.vl:9:1
+   ╭─[ context_chain.vl:9:1 ] …
   context (outermost first):
     loading config
     parsing port
@@ -217,7 +240,7 @@ actual index from `RuntimeError::access`:
 
 ```text
 error[R0102]: division by zero: 10 // 0
-  --> err_in_callback.vl:4:18
+   ╭─[ err_in_callback.vl:4:18 ] …
 stack trace (most recent call first):
   0: <lambda@4:13> at err_in_callback.vl:4:18
   1: <native map>
@@ -225,12 +248,9 @@ stack trace (most recent call first):
   3: <main>        at err_in_callback.vl:6:7
 
 error[R0401]: rows[r][3]: index out of range (len 2)
-  --> index_oob.vl:3:34
+   ╭─[ index_oob.vl:3:34 ] …
 ```
 
-M9 adds the source snippet (like compile errors) and unifies both header
-styles: compile errors currently use ariadne's `[E0101] Error:` header,
-runtime errors `error[R0101]:`.
 
 ## 8.5 Exit codes
 
@@ -248,9 +268,10 @@ wrong" (2) from "the script failed while running" (1).
 
 | Task | Where |
 |------|-------|
-| new compile error | `Diagnostic::new("E0xxx", msg, span)` in the stage; add the code to `.memory/plan-mvp.md` §5 and a golden test |
-| new runtime error | `ErrorKind` variant + `code()` in `vm/src/error.rs`; raise with `RuntimeError::new` in `vm.rs` |
-| reword a message | search for its code |
+| new compile error | `Diagnostic::new("E0xxx", msg, span)` in the stage; add the code to `E_CODES`, `.memory/plan-mvp.md` §5 and a golden test |
+| new runtime error | `ErrorKind` variant + `code()`, `label()`, `ALL` in `vm/src/error.rs`; a constructor next to the others; a golden test |
+| reword a runtime message | its constructor in `vm/src/error.rs` |
+| reword a compile message | search for its code |
 | compile error layout | `render` |
 | runtime error layout | `render_runtime` |
 

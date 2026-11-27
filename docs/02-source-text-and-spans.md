@@ -100,7 +100,12 @@ expression, so the error is reported at its first character:
 
 ```text
 error[R0102]: division by zero: 7 // 0
-  --> div_zero.vl:2:1
+   ╭─[ div_zero.vl:2:1 ]
+   │
+ 2 │ 7 // (2 - 2)
+   │ ──────┬─────
+   │       ╰─────── divisor is zero
+───╯
 ```
 
 ## 2.5 Where to change things

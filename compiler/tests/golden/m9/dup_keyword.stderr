@@ -1,0 +1,9 @@
+error[E0425]: keyword argument `b` is given twice
+   ╭─[ dup_keyword.vl:2:17 ]
+   │
+ 2 │ print(f(1, b=2, b=3))
+   │              ┬  ┬  
+   │              ╰───── first time
+   │                 │  
+   │                 ╰── second time
+───╯

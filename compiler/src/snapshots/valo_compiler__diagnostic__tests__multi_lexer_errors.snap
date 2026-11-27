@@ -1,0 +1,29 @@
+---
+source: compiler/src/diagnostic.rs
+expression: "errors_of(\"let a = 1 $ 2\\nprint(\\\"x\\\\q\\\")\\nlet b = 007\\n\")"
+---
+error[E0001]: unexpected character `$`
+   ╭─[ t.vl:1:11 ]
+   │
+ 1 │ let a = 1 $ 2
+   │           ┬  
+   │           ╰── here
+───╯
+error[E0005]: invalid escape sequence in a string
+   ╭─[ t.vl:2:9 ]
+   │
+ 2 │ print("x\q")
+   │         ─┬  
+   │          ╰── an unknown escape `\q`
+   │ 
+   │ Help: valid escapes: \n \t \r \0 \" \\ \{ \} \u{…}; use a raw string r"…" for backslashes
+───╯
+error[E0010]: leading zeros are not allowed in decimal integer literals
+   ╭─[ t.vl:3:9 ]
+   │
+ 3 │ let b = 007
+   │         ─┬─  
+   │          ╰─── here
+   │ 
+   │ Help: use 0o for octal
+───╯

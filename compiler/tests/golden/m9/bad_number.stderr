@@ -1,0 +1,9 @@
+error[E0010]: leading zeros are not allowed in decimal integer literals
+   ╭─[ bad_number.vl:1:7 ]
+   │
+ 1 │ print(007)
+   │       ─┬─  
+   │        ╰─── here
+   │ 
+   │ Help: use 0o for octal
+───╯
