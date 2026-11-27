@@ -1,0 +1,20 @@
+error[R0301]: stack overflow: more than 200000 nested calls
+  --> deep_nontail.vl:2:53
+  help: make the recursive call the last thing the function does (a tail call), e.g. by passing an accumulator
+stack trace (most recent call first):
+       0: depth  at deep_nontail.vl:2:53
+       1: depth  at deep_nontail.vl:2:53
+       2: depth  at deep_nontail.vl:2:53
+       3: depth  at deep_nontail.vl:2:53
+       4: depth  at deep_nontail.vl:2:53
+       5: depth  at deep_nontail.vl:2:53
+       6: depth  at deep_nontail.vl:2:53
+       7: depth  at deep_nontail.vl:2:53
+       8: depth  at deep_nontail.vl:2:53
+       9: depth  at deep_nontail.vl:2:53
+          ... 199985 frames omitted ...
+  199995: depth  at deep_nontail.vl:2:53
+  199996: depth  at deep_nontail.vl:2:53
+  199997: depth  at deep_nontail.vl:2:53
+  199998: depth  at deep_nontail.vl:2:53
+  199999: <main> at deep_nontail.vl:3:7

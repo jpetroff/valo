@@ -262,6 +262,22 @@ print(sq(3))             5 |> add(1)  into R0
   CALL      0 1
 ```
 
+**Tail calls** (M5). `FuncState::expr_at(e, dst, tail)` carries one more
+fact: whether `e`'s value is the function's result. That holds for the fn
+body, for both branches of an `if` in tail position and for the last line
+of a block in tail position — not for `and`/`or` operands, comparisons or
+anything in `<main>`. A call in tail position is emitted as `TAILCALL`,
+which makes the callee *replace* the current frame:
+
+```text
+fn loop(n: int, acc: int) -> int =                 GETGLOBAL 2 loop
+    if n == 0 then acc else loop(n - 1, acc + n)   … arguments …
+                                                   TAILCALL  2 2
+```
+
+So a loop written as recursion runs in one frame; `1 + loop(…)` is not a
+tail call (the addition still needs the result) and stays `CALL`.
+
 ## 6.9 What codegen does *not* do
 
 - It does not check types: `1 + 2.0` compiles, and the VM reports R0201

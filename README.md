@@ -4,7 +4,7 @@ valo is a functional, indentation-based scripting language. Source is compiled
 to bytecode and executed by a register-based virtual machine; Lua 5.x is the
 guiding model for the VM and runtime.
 
-Status: early MVP. Bindings, ints, floats, bools, conditionals, functions, calls, keyword arguments and `print` run (milestones M0–M4b).
+Status: early MVP. Bindings, ints, floats, bools, conditionals, functions, calls, keyword arguments and `print` run, with proper tail calls (milestones M0–M5).
 
 File extensions (tentative): source files use `.vl`, compiled bytecode uses `.vlc`.
 
@@ -27,11 +27,12 @@ like Lua running `luac` output).
 
 ## Status
 
-Milestones M0–M4b of `.memory/plan-mvp.md` are done: `let` bindings with shadowing,
+Milestones M0–M5 of `.memory/plan-mvp.md` are done: `let` bindings with shadowing,
 indented blocks, ints, floats, bools, comparisons (chained), `and`/`or`/`not`,
 `if`/`elif`/`else`, `assert`, top-level `fn` definitions (hoisted, annotated), calls with
 compile-time argument checks, keyword-only parameters with defaults (`f(x, retries=2)`),
-pipes `|>`, and the built-ins `print`, `int`, `float`
+pipes `|>`, proper tail calls (loops as tail recursion run in constant stack space; deep
+non-tail recursion stops with a clean R0301), and the built-ins `print`, `int`, `float`
 run end to end (indentation-aware lexer → Pratt parser → desugaring → name resolver →
 register bytecode → VM with call frames and stack traces).
 

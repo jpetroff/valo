@@ -1,23 +1,17 @@
 error[R0102]: division by zero: 1 // 0
   --> deep_trace.vl:3:16
 stack trace (most recent call first):
-  0: down   at deep_trace.vl:3:16
-  1: down   at deep_trace.vl:4:11
-  2: down   at deep_trace.vl:4:11
-  3: down   at deep_trace.vl:4:11
-  4: down   at deep_trace.vl:4:11
-  5: down   at deep_trace.vl:4:11
-  6: down   at deep_trace.vl:4:11
-  7: down   at deep_trace.vl:4:11
-  8: down   at deep_trace.vl:4:11
-  9: down   at deep_trace.vl:4:11
-  10: down   at deep_trace.vl:4:11
-  11: down   at deep_trace.vl:4:11
-  12: down   at deep_trace.vl:4:11
-  13: down   at deep_trace.vl:4:11
-  14: down   at deep_trace.vl:4:11
-  15: down   at deep_trace.vl:4:11
-  16: down   at deep_trace.vl:4:11
+   0: down   at deep_trace.vl:3:16
+   1: down   at deep_trace.vl:4:11
+   2: down   at deep_trace.vl:4:11
+   3: down   at deep_trace.vl:4:11
+   4: down   at deep_trace.vl:4:11
+   5: down   at deep_trace.vl:4:11
+   6: down   at deep_trace.vl:4:11
+   7: down   at deep_trace.vl:4:11
+   8: down   at deep_trace.vl:4:11
+   9: down   at deep_trace.vl:4:11
+      ... 7 frames omitted ...
   17: down   at deep_trace.vl:4:11
   18: down   at deep_trace.vl:4:11
   19: down   at deep_trace.vl:4:11

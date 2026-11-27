@@ -1,0 +1,4 @@
+# Mutual tail recursion between two top-level fns.
+fn is_even(n: int) -> bool = if n == 0 then true else is_odd(n - 1)
+fn is_odd(n: int) -> bool = if n == 0 then false else is_even(n - 1)
+print(is_even(1_000_001))

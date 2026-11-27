@@ -25,7 +25,7 @@
 //! | change conditions and jumps                  | `TEST`, `JMP`, `ASSERT` arms in `execute`           |
 //! | change the stack trace contents              | `Vm::unwind`                                       |
 //! | change `--trace-exec` output                 | `Vm::trace_instr`                                  |
-//! | change how calls work                        | `Vm::call` (CALL), `RETURN` arm, `Frame`            |
+//! | change how calls work                        | `Vm::call` (CALL), `Vm::tail_call` (TAILCALL), `Vm::do_return` (RETURN), `Frame` |
 //! | change stack/recursion limits                | `MAX_FRAMES`, `MAX_STACK`                           |
 //! | let natives do I/O                           | `Vm::write_stdout` (natives get `&mut Vm`)          |
 //! | change how globals are stored                | `Vm::globals`, `GETGLOBAL`/`SETGLOBAL` arms         |
@@ -220,18 +220,17 @@ impl<'h> Vm<'h> {
                 OpCode::RETURN => {
                     // `mem::replace` moves the value out and leaves `Unit` behind.
                     let v = std::mem::replace(&mut self.stack[ra], Value::Unit);
-                    let done = self.frames.pop().expect("RETURN without a frame");
-                    let Some(caller) = self.frames.last() else {
-                        // `<main>` returned: the program is finished.
-                        return Ok(v);
-                    };
-                    // The result replaces the callee in its function slot,
-                    // which is the caller's `R[A]` of the CALL.
-                    self.stack[done.base - 1] = v;
-                    // Drop the callee's registers (and the values they hold).
-                    let end = caller.base + caller.closure.proto.num_regs as usize;
-                    self.stack.truncate(end);
+                    if let Some(result) = self.do_return(v) {
+                        return Ok(result);
+                    }
                     // Not traced: `ra` belongs to the finished frame.
+                    continue;
+                }
+                OpCode::TAILCALL => {
+                    if let Some(result) = self.tail_call(ra, instr.b() as usize)? {
+                        return Ok(result);
+                    }
+                    // Not traced: the frame now runs another function.
                     continue;
                 }
                 OpCode::CLOSURE => {
@@ -429,6 +428,74 @@ impl<'h> Vm<'h> {
         self.frames.last_mut().expect("execute without a frame")
     }
 
+    /// Finish the running frame with result `v`. Returns `Some(v)` when that
+    /// frame was `<main>` (the program is done).
+    fn do_return(&mut self, v: Value) -> Option<Value> {
+        let done = self.frames.pop().expect("RETURN without a frame");
+        let Some(caller) = self.frames.last() else {
+            return Some(v);
+        };
+        // The result replaces the callee in its function slot, which is the
+        // caller's `R[A]` of the CALL.
+        self.stack[done.base - 1] = v;
+        // Drop the callee's registers (and the values they hold).
+        let end = caller.base + caller.closure.proto.num_regs as usize;
+        self.stack.truncate(end);
+        None
+    }
+
+    /// `TAILCALL A B` (M5): call `R[A]` and return its result, reusing the
+    /// running frame instead of pushing one, so a loop written as tail
+    /// recursion runs in constant stack space.
+    ///
+    /// ```text
+    ///   before:  [ f | R0 … R[A]=g  args… ]      frame of f, base
+    ///   after:   [ g | args…  (Missing…)  ]      same frame, now running g
+    /// ```
+    ///
+    /// A built-in callee is simply called, then the frame returns its result.
+    /// Returns `Some(result)` when `<main>` finished (only via a native).
+    fn tail_call(&mut self, ra: usize, nargs: usize) -> Result<Option<Value>, RuntimeError> {
+        let c = match &self.stack[ra] {
+            Value::Closure(c) => Rc::clone(c),
+            Value::Native(_) => {
+                self.call(ra, nargs)?;
+                let v = std::mem::replace(&mut self.stack[ra], Value::Unit);
+                return Ok(self.do_return(v));
+            }
+            other => {
+                return Err(RuntimeError::new(
+                    ErrorKind::NotCallable,
+                    format!("cannot call a value of type {}", other.type_name()),
+                ));
+            }
+        };
+        let arity = c.proto.arity as usize;
+        check_arg_count(&c.proto.name, c.proto.required as usize, arity, nargs)?;
+        let base = self.frame_mut().base;
+        let top = base + c.proto.num_regs as usize;
+        if top > MAX_STACK {
+            return Err(stack_overflow());
+        }
+        // Move callee and arguments down over the function slot and the
+        // first registers (destination is always below the source).
+        for i in 0..=nargs {
+            let v = std::mem::replace(&mut self.stack[ra + i], Value::Unit);
+            self.stack[base - 1 + i] = v;
+        }
+        // Drop the old function's other registers, then size the window.
+        self.stack.truncate(base + nargs);
+        self.stack.resize(top, Value::Unit);
+        for slot in &mut self.stack[base + nargs..base + arity] {
+            *slot = Value::Missing;
+        }
+        let frame = self.frame_mut();
+        frame.closure = c;
+        frame.pc = 0;
+        frame.tail_calls = frame.tail_calls.saturating_add(1);
+        Ok(None)
+    }
+
     /// `CALL A B`: call `R[A]` with the `nargs` arguments `R[A+1..=A+nargs]`.
     ///
     /// - valo function: push a frame whose window starts at `A+1`; the loop
@@ -540,6 +607,7 @@ fn stack_overflow() -> RuntimeError {
         ErrorKind::StackOverflow,
         format!("stack overflow: more than {MAX_FRAMES} nested calls"),
     )
+    .note("help: make the recursive call the last thing the function does (a tail call), e.g. by passing an accumulator")
 }
 
 /// R0207 unless `required <= nargs <= arity`.
@@ -1012,6 +1080,100 @@ mod tests {
             .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
             .program();
         assert_eq!(run(&p).0, Ok(Value::Int(15)));
+    }
+
+    #[test]
+    fn tail_calls_run_in_constant_stack() {
+        // fn count(n) = if n == 0 then 7 else count(n - 1)   (tail call)
+        let count = ProtoBuilder::new("count", 4)
+            .arity(1)
+            .global("count")
+            .op(Instr::asbx(OpCode::LOADI, 1, 0))
+            .op(Instr::abc(OpCode::EQ, 1, 0, 1))
+            .op(Instr::abc(OpCode::TEST, 1, 0, 0))
+            .op(Instr::sj(OpCode::JMP, 2))
+            .op(Instr::asbx(OpCode::LOADI, 1, 7))
+            .op(Instr::abc(OpCode::RETURN, 1, 0, 0))
+            .op(Instr::abx(OpCode::GETGLOBAL, 1, 0))
+            .op(Instr::asbx(OpCode::LOADI, 3, 1))
+            .op(Instr::abc(OpCode::SUB, 2, 0, 3))
+            .op(Instr::abc(OpCode::TAILCALL, 1, 1, 0))
+            .build();
+        let p = ProtoBuilder::new("<main>", 2)
+            .global("count")
+            .proto(count)
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+            .op(Instr::abx(OpCode::SETGLOBAL, 0, 0))
+            .op(Instr::asbx(OpCode::LOADI, 1, 1000))
+            .op(Instr::abc(OpCode::CALL, 0, 1, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        let mut host = TestHost::default();
+        let mut vm = Vm::new(&mut host, Options::default());
+        assert_eq!(vm.run(&p), Ok(Value::Int(7)));
+        // 1000 tail calls reused one frame: only main's window is left, and
+        // the frame count never grew (a CALL would have pushed 1001 frames).
+        assert_eq!(vm.stack.len(), 1 + 2, "callee window dropped on return");
+    }
+
+    #[test]
+    fn tail_call_keeps_one_frame_and_counts_elisions() {
+        // f(n) = if n == 0 then 1 // 0 else f(n - 1), called with 5: the
+        // error trace has one `f` frame that made 5 tail calls.
+        let f = ProtoBuilder::new("f", 4)
+            .arity(1)
+            .global("f")
+            .op(Instr::asbx(OpCode::LOADI, 1, 0))
+            .op(Instr::abc(OpCode::EQ, 1, 0, 1))
+            .op(Instr::abc(OpCode::TEST, 1, 0, 0))
+            .op(Instr::sj(OpCode::JMP, 3))
+            .op(Instr::asbx(OpCode::LOADI, 1, 1))
+            .op(Instr::abc(OpCode::IDIV, 1, 1, 0))
+            .op(Instr::abc(OpCode::RETURN, 1, 0, 0))
+            .op(Instr::abx(OpCode::GETGLOBAL, 1, 0))
+            .op(Instr::asbx(OpCode::LOADI, 3, 1))
+            .op(Instr::abc(OpCode::SUB, 2, 0, 3))
+            .op(Instr::abc(OpCode::TAILCALL, 1, 1, 0))
+            .build();
+        let p = ProtoBuilder::new("<main>", 2)
+            .global("f")
+            .proto(f)
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+            .op(Instr::abx(OpCode::SETGLOBAL, 0, 0))
+            .op(Instr::asbx(OpCode::LOADI, 1, 5))
+            .op(Instr::abc(OpCode::CALL, 0, 1, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        let e = run(&p).0.unwrap_err();
+        assert_eq!(e.kind.code(), "R0102");
+        let frames: Vec<(&str, u32)> = e
+            .trace
+            .iter()
+            .map(|t| (&*t.fn_name, t.tail_calls))
+            .collect();
+        assert_eq!(frames, [("f", 5), ("<main>", 0)]);
+    }
+
+    #[test]
+    fn tail_call_to_a_native_returns_its_result() {
+        // fn show(x) = print(x)   (tail call to a native), called from main.
+        let show = ProtoBuilder::new("show", 3)
+            .arity(1)
+            .op(Instr::abx(OpCode::GETGLOBAL, 1, 0))
+            .op(Instr::abc(OpCode::MOVE, 2, 0, 0))
+            .op(Instr::abc(OpCode::TAILCALL, 1, 1, 0))
+            .build();
+        let p = ProtoBuilder::new("<main>", 2)
+            .native_global(0)
+            .proto(show)
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+            .op(Instr::asbx(OpCode::LOADI, 1, 9))
+            .op(Instr::abc(OpCode::CALL, 0, 1, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        let (r, host) = run(&p);
+        assert_eq!(r, Ok(Value::Unit));
+        assert_eq!(host.stdout, "9\n");
     }
 
     fn float(x: f64) -> Value {

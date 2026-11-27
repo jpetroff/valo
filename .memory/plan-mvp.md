@@ -463,7 +463,14 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q26: positional overloads on natives (`range(n)` / `range(a, b)`) — (a) keep arity ranges as a native-only exception (b) `range(stop, start=0)`-style keyword default (breaks Python reading) (c) two natives (`range`, `range_from`). Default (a).
 > Q27: dynamic calls omitting defaulted params — (a) allowed, VM pads Missing (b) dynamic calls must supply every param positionally. Default (a).
 
-### M5 — Recursion depth and proper tail calls
+### M5 — Recursion depth and proper tail calls — DONE 2026-11-27
+
+- Implementation notes (branch `m4-m5`):
+  - Codegen: `FuncState::expr_at(e, dst, tail)`; tail positions = fn body, both `if` branches in tail position, last line of a block in tail position. TAILCALL emits no trailing MOVE (dead code); the function's final `RETURN dst` stays for non-call branches.
+  - VM: `tail_call` moves callee+args to `base-1..`, truncates the stack to `base+nargs`, resizes to the new window, pads `Missing` (M4b defaults work through tail calls), replaces `frame.closure`, `tail_calls += 1`. Native in tail position: CALL path then shared `do_return`. MAX_FRAMES/MAX_STACK checks were already in CALL (M4); R0301 carries a `help:` note about accumulators.
+  - Trace rendering (in `diagnostic.rs`, VM keeps the full trace): `(... N tail calls elided ...)` under the frame; > 15 entries → first 10, `... N frames omitted ...`, last 5; trace indices are right-aligned to the widest index (existing short traces unchanged).
+  - Goldens: no strings yet, so `m5/countdown` prints `0` instead of `done`; extra `m5/tail_native`. `m4/deep_trace` re-blessed (truncated). All m5 goldens together take ~1.5 s in a debug build.
+  - Memory check (release, max RSS via getrusage): countdown 10^3 → 9.9 MB, 10^7 → 9.6 MB (0.54 s); non-tail depth 150 000 → 14.3 MB.
 
 - Goal: loops via tail recursion in O(1) stack; clean overflow error for deep non-tail recursion.
 - Blocks: tail position (no new syntax).

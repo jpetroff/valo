@@ -38,6 +38,7 @@
 //! | change how a function is compiled           | `compile_fn` (parameters, body, `RETURN`)         |
 //! | change how calls are compiled               | `FuncState::call` (the argument window)           |
 //! | change how defaults are computed            | the prologue loop in `compile_fn` (`JMPIFSET`)    |
+//! | change what counts as a tail position       | `FuncState::expr_at` and its callers (`if_expr`, `block`) |
 //! | change how names are loaded                 | `FuncState::name` (globals: `GETGLOBAL`, locals: `MOVE`) |
 //! | map an operator to an opcode                | `ExprKind::Binary` arm (`let opcode = match op`) |
 //! | add a constant type (string, M7)            | `ConstKey` + `FuncState::constant` + `Const` in `vm/src/chunk.rs` |
@@ -218,7 +219,8 @@ fn compile_fn(d: &FnDef, resolved: &Resolved) -> Result<Proto, Vec<Diagnostic>> 
         fs.patch_sbx(at);
     }
     let dst = fs.alloc(d.body.span);
-    fs.expr(&d.body, dst);
+    // The body is in tail position: a call there becomes TAILCALL (M5).
+    fs.expr_at(&d.body, dst, true);
     fs.emit(Instr::abc(OpCode::RETURN, dst, 0, 0), d.body.span);
     fs.finish()
 }
@@ -461,6 +463,32 @@ impl<'r> FuncState<'r> {
         self.proto.code[at] = Instr::asbx(OpCode::JMPIFSET, a, off);
     }
 
+    /// Evaluate `e` into `dst`; `tail` = `e` is in tail position (its value
+    /// is the function's result, M5). Tail positions: the fn body, both
+    /// branches of an `if` in tail position, the last line of a block in
+    /// tail position. A call there is compiled as `TAILCALL`. Operands of
+    /// `and`/`or`, comparisons and anything in `<main>` are never tail
+    /// positions.
+    fn expr_at(&mut self, e: &Expr, dst: u8, tail: bool) {
+        if !tail {
+            return self.expr(e, dst);
+        }
+        match &e.kind {
+            ExprKind::Call {
+                callee,
+                args,
+                piped,
+            } => self.call(e, callee, args, *piped, dst, true),
+            ExprKind::If {
+                cond,
+                then_br,
+                else_br,
+            } => self.if_expr(e, cond, then_br, else_br, dst, true),
+            ExprKind::Block(items) => self.block(items, dst, true),
+            _ => self.expr(e, dst),
+        }
+    }
+
     /// Evaluate `e` into register `dst`.
     /// EXTEND: every new `ExprKind` variant needs an arm here.
     fn expr(&mut self, e: &Expr, dst: u8) {
@@ -475,7 +503,7 @@ impl<'r> FuncState<'r> {
                 callee,
                 args,
                 piped,
-            } => self.call(e, callee, args, *piped, dst),
+            } => self.call(e, callee, args, *piped, dst, false),
             ExprKind::Pipe { .. } => unreachable!("pipes are removed by desugar.rs"),
             ExprKind::Name(_) => self.name(e, dst),
             ExprKind::Unary {
@@ -525,8 +553,8 @@ impl<'r> FuncState<'r> {
                 cond,
                 then_br,
                 else_br,
-            } => self.if_expr(e, cond, then_br, else_br, dst),
-            ExprKind::Block(items) => self.block(items, dst),
+            } => self.if_expr(e, cond, then_br, else_br, dst, false),
+            ExprKind::Block(items) => self.block(items, dst, false),
             ExprKind::Assert(inner) => self.assert(inner, dst),
         }
     }
@@ -537,7 +565,7 @@ impl<'r> FuncState<'r> {
     /// the callee, then the rest in source order. With a `CallPlan` (known
     /// callee, M4b) slot `k` is parameter `k`: keyword arguments land in
     /// their parameter's slot and omitted parameters get `LOADMISSING`.
-    fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg], piped: bool, dst: u8) {
+    fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg], piped: bool, dst: u8, tail: bool) {
         // Reuse dst as the window base when it is the topmost register.
         let base = if u16::from(dst) + 1 == self.free_reg {
             dst
@@ -580,12 +608,15 @@ impl<'r> FuncState<'r> {
         for r in missing {
             self.emit(Instr::abc(OpCode::LOADMISSING, r, 0, 0), e.span);
         }
-        self.emit(
-            Instr::abc(OpCode::CALL, base, nslots.min(255) as u8, 0),
-            e.span,
-        );
+        // In tail position the callee replaces this frame and returns to our
+        // caller itself (M5); nothing after the TAILCALL runs.
+        let op = if tail { OpCode::TAILCALL } else { OpCode::CALL };
+        self.emit(Instr::abc(op, base, nslots.min(255) as u8, 0), e.span);
         if base != dst {
-            self.emit(Instr::abc(OpCode::MOVE, dst, base, 0), e.span);
+            // After a TAILCALL nothing runs: no copy to dst.
+            if !tail {
+                self.emit(Instr::abc(OpCode::MOVE, dst, base, 0), e.span);
+            }
             self.free_to(base);
         } else {
             self.free_to(base + 1);
@@ -596,12 +627,12 @@ impl<'r> FuncState<'r> {
     /// of the block; the last expression goes into `dst`; then every
     /// register the block allocated is released, so the next block reuses
     /// them.
-    fn block(&mut self, items: &[Item], dst: u8) {
+    fn block(&mut self, items: &[Item], dst: u8, tail: bool) {
         let mark = self.free_reg;
         for (i, item) in items.iter().enumerate() {
             let last = i + 1 == items.len();
             match item {
-                Item::Expr(e) if last => self.expr(e, dst),
+                Item::Expr(e) if last => self.expr_at(e, dst, tail),
                 Item::Expr(e) => {
                     let tmp = self.alloc(e.span);
                     self.expr(e, tmp);
@@ -634,15 +665,23 @@ impl<'r> FuncState<'r> {
     /// else: else → dst
     /// end:
     /// ```
-    fn if_expr(&mut self, e: &Expr, cond: &Expr, then_br: &Expr, else_br: &Expr, dst: u8) {
+    fn if_expr(
+        &mut self,
+        e: &Expr,
+        cond: &Expr,
+        then_br: &Expr,
+        else_br: &Expr,
+        dst: u8,
+        tail: bool,
+    ) {
         // The condition can use `dst`: the branches overwrite it anyway.
         self.expr(cond, dst);
         self.emit(Instr::abc(OpCode::TEST, dst, 0, 0), cond.span);
         let to_else = self.emit_jmp(cond.span);
-        self.expr(then_br, dst);
+        self.expr_at(then_br, dst, tail);
         let to_end = self.emit_jmp(e.span);
         self.patch_here(to_else);
-        self.expr(else_br, dst);
+        self.expr_at(else_br, dst, tail);
         self.patch_here(to_end);
     }
 
@@ -895,6 +934,18 @@ mod tests {
         insta::assert_snapshot!(disasm(
             "fn f(a: int, b: int = 1, c: int = a * 2) -> int = a + b + c\n\
              f(1, c=3, b=4)\nf(1, c=3)\nf(1)\n5 |> f(b=0)"
+        ));
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__codegen__tests__tail_calls.snap
+    #[test]
+    fn tail_calls() {
+        // Tail calls in both branches and at the end of a block; the call in
+        // `1 + loop(...)` and the calls in <main> are not tail calls.
+        insta::assert_snapshot!(disasm(
+            "fn loop(n: int, acc: int) -> int:\n    if n == 0: acc\n    elif n < 0: loop(-n, acc)\n    \
+             else:\n        let m = n - 1\n        loop(m, acc + 1)\n\
+             fn g(n: int) -> int = 1 + loop(n, 0)\nprint(g(3))"
         ));
     }
 }

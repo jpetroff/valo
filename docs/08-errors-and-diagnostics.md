@@ -142,6 +142,22 @@ stack trace (most recent call first):
   3: <main> at trace3.vl:7:7
 ```
 
+Two things keep traces readable after deep recursion (M5): a frame that
+replaced itself by tail calls shows one line plus `(... N tail calls
+elided ...)`, and a trace longer than 15 entries shows the innermost 10, a
+`... N frames omitted ...` line and the outermost 5 (`TRACE_HEAD`,
+`TRACE_TAIL` in `diagnostic.rs`; the VM keeps the full trace):
+
+```text
+error[R0102]: division by zero: 1 // 0
+  --> tail_trace.vl:1:41
+stack trace (most recent call first):
+  0: down   at tail_trace.vl:1:41
+     (... 5 tail calls elided ...)
+  1: start  at tail_trace.vl:3:13
+  2: <main> at tail_trace.vl:6:7
+```
+
 Notes follow the location line. A failed `assert` also quotes the asserted
 expression — the VM has no source text, but the span of the `ASSERT`
 instruction is that expression, so `render_runtime` slices it from the file:

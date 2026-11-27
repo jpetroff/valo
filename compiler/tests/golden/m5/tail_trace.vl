@@ -1,0 +1,6 @@
+fn down(n: int) -> int = if n == 0 then 1 // n else down(n - 1)
+fn start(n: int) -> int:
+    let r = down(n)
+    r + 1
+
+print(start(5))

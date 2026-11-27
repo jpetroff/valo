@@ -239,6 +239,12 @@ RETURN X (in g):  stack[base'-1] = R'[X]   → the caller finds the result in R[
 - anything else: R0202 "cannot call a value of type int".
 - **Limits**: more than `MAX_FRAMES` (200 000) frames or `MAX_STACK` (2^20)
   slots is R0301, a clean error instead of exhausting memory.
+- **`TAILCALL A B`** (M5) does what CALL does, but moves the callee and its
+  arguments down to `base-1…` and reuses the running frame (`pc = 0`, new
+  closure, `tail_calls += 1` for the trace). The stack is cut to the new
+  function's window, so memory stays flat however many times a tail-recursive
+  loop runs. A built-in in tail position is called normally and the frame
+  then returns its result (`Vm::do_return`, shared with `RETURN`).
 - **`RETURN` cuts the stack** back to the caller's window, so values of
   finished calls are freed at once (with `Rc`, a value lives as long as a
   stack slot still points to it).
@@ -284,7 +290,7 @@ crash.
 | execute a new opcode | `Vm::execute`, new `match` arm |
 | float arithmetic | `float_arith`; type dispatch in `arith` |
 | what `==` / `<` accept | `values_equal`, `less` |
-| how calls work | `Vm::call` (CALL), the `RETURN` arm, `Frame` |
+| how calls work | `Vm::call` (CALL), `Vm::tail_call` (TAILCALL), `Vm::do_return` (RETURN), `Frame` |
 | add a built-in | `builtins.rs`: a function + an entry appended to `NATIVES` |
 | recursion limits | `MAX_FRAMES`, `MAX_STACK` |
 | a new effect | method on `Host` + both implementations |

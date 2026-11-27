@@ -1,0 +1,7 @@
+fn sum_to(n: int, acc: int = 0) -> int:
+    if n == 0: acc
+    else:
+        let next = acc + n
+        sum_to(n - 1, acc=next)
+
+print(sum_to(1_000_000))
