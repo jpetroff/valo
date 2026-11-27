@@ -94,7 +94,8 @@ use std::fmt::Write as _;
 use valo_vm::builtins::NATIVES;
 
 use crate::ast::{
-    Arg, Binding, Expr, ExprKind, FnDef, Item, Lambda, NodeId, Param, Program, TypeExpr, TypeKind,
+    Arg, Binding, Expr, ExprKind, FnDef, Item, Lambda, NodeId, Param, Program, StrPart, TypeExpr,
+    TypeKind,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceMap, Span};
@@ -695,6 +696,14 @@ impl Resolver {
             }
             ExprKind::Call { callee, args, .. } => self.call(e, callee, args),
             ExprKind::Lambda(l) => self.lambda(e, l),
+            ExprKind::Str(_) => {}
+            ExprKind::Interp(parts) => {
+                for p in parts {
+                    if let StrPart::Expr(x) = p {
+                        self.expr(x);
+                    }
+                }
+            }
             ExprKind::Pipe { .. } => unreachable!("pipes are removed by desugar.rs"),
         }
     }
@@ -1442,7 +1451,7 @@ mod tests {
     fn fn_bodies_see_globals_as_at_definition() {
         let src = "let x = 1\nfn f() -> int = x\nlet x = 2\nf()";
         let d = resolve_src(src).unwrap();
-        assert!(d.contains("2:17    x -> global#3"), "{d}");
+        assert!(d.contains("2:17    x -> global#6"), "{d}");
     }
 
     // Snapshot: src/snapshots/valo_compiler__resolve__tests__capture_chain.snap
@@ -1501,7 +1510,8 @@ mod tests {
         assert_eq!(codes("fn g(a: int = b, b: int = 1) -> int = a"), ["E0201"]);
         assert!(resolve_src("fn g(a: int, b: int = a * 2) -> int = b").is_ok());
         // Built-ins go through the same signature check.
-        assert_eq!(codes("print(1, end=2)"), ["E0424"]);
+        assert_eq!(codes("print(1, sep=2)"), ["E0424"]);
+        assert!(resolve_src("print(1, end=\"\")").is_ok());
     }
 
     #[test]

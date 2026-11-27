@@ -140,9 +140,10 @@ finish()                                                # final NEWLINE, DEDENTs
   ```
 
 - brackets update `depth`;
-- `"` and `` ` `` (strings, commands) and `r"…"`, `re"…"` are reserved for
-  later milestones: `quoted()` skips to the closing quote and reports
-  `E0009 … not supported yet`; `=~` likewise via `unsupported()`.
+- `"` and `r"` start a string (`string()`, below); `` ` `` (commands) and
+  `re"…"` (regexes) are reserved for later milestones: `quoted()` skips to
+  the closing quote and reports `E0009 … not supported yet`; `=~` and `!~`
+  likewise via `unsupported()`.
 - anything else → `E0001 unexpected character`.
 
 ### Numbers — `Lexer::number`
@@ -163,6 +164,36 @@ The lexer has no negative literals: `-5` is the token `Minus` followed by
 `Int(5)`. Consequently the smallest `i64` cannot be written as a single
 literal (its positive counterpart overflows); see chapter 6 for how `-5`
 still becomes a single instruction.
+
+### Strings — a lexer with modes (M7)
+
+A string is not one token. `"a {x + 1} b"` (syntax.md S12: every normal
+string interpolates) becomes
+
+```text
+STR_START  STR_TEXT("a ")  INTERP_START  x + 1  INTERP_END  STR_TEXT(" b")  STR_END
+```
+
+so the parser can parse `x + 1` with its ordinary expression rules. The
+lexer therefore switches between two *modes*: in string mode
+(`string_body`) it collects text, decoding escapes (`\n \t \r \0 \" \\
+\{ \} \u{1F600}`, else E0005), until the closing `"` or a `{`; at a `{` it
+emits `INTERP_START`, pushes an entry on the mode stack `interps` and goes
+back to normal tokens. The `}` that closes the interpolation is recognised
+by the bracket depth recorded on that entry — so `{ f({1: 2}) }` works —
+and switches back to string mode (the `'}'` arm of `token`). Because normal
+mode is fully active inside `{…}`, a string may contain another string with
+its own interpolations: `"{"in{y}"}"`. This is the plan's D25; Python 3.12
+(PEP 701) lexes f-strings the same way.
+
+While an interpolation is open, `depth` is one higher, so line layout is
+suspended as inside brackets; still, a line break inside `{…}` is E0007
+(interpolations end on their line), and so is the end of the file. Other
+string errors: a string reaching the end of its line is E0004 (inside an
+unclosed `{…}` only the E0007 is reported: `"a {x"` means the `"` was meant
+to close the string), `{}` with nothing inside is E0008. A raw string
+`r"…"` (`raw_body`) has no escapes and no interpolation; it ends at the
+first `"`.
 
 ## 3.4 The pending NEWLINE and pipe continuation
 
@@ -202,7 +233,11 @@ newlines and indentation are ignored completely:
 | E0001 | unexpected character `$` | `token`, last arm |
 | E0002 | integer literal is out of range | `out_of_range` |
 | E0003 | unindent does not match any outer level | `line_start` |
+| E0004 | unterminated string | `unterminated` |
+| E0005 | invalid escape sequence | `escape`, `bad_escape` |
 | E0006 | tab character in indentation | `line_start` |
+| E0007 | unterminated interpolation (`{` without `}` on the line) | `unclosed_interps` |
+| E0008 | empty interpolation `{}` | `string_body` |
 | E0009 | … not supported yet | `quoted`, `unsupported` |
 | E0010 | malformed number literal | `number`, `bad_suffix`, `check_underscores` |
 
@@ -225,7 +260,8 @@ tests in `lexer.rs` store two such dumps:
 |------|-------|
 | new operator, e.g. `+=` | 1. add `PlusEq` to `TokenKind` and its spelling in `Display` (`token.rs`); 2. in `Lexer::token`, add `'+' if two(self, "+=") => (TokenKind::PlusEq, 2),` **above** `'+' => …`; 3. add it to the `operators_maximal_munch` snapshot test |
 | new keyword | `Keyword` + `lookup` + `as_str` in `token.rs` (nothing in the lexer) |
-| string literals (M7) | replace the `'"'` arm of `Lexer::token` with a real string scanner producing string tokens (plan D25: interpolation segments) |
+| new escape sequence | `Lexer::escape` (and `value::quote` in the VM, which writes strings back) |
+| triple-quoted strings (S12, later) | `Lexer::string` (detect `"""`), `string_body` (allow newlines) |
 | allow tabs | `Lexer::line_start` |
 
 ## 3.8 Exercises

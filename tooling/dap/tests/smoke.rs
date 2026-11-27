@@ -595,6 +595,22 @@ fn closures_show_their_captures() {
 }
 
 #[test]
+fn strings_show_quoted() {
+    let file = program("dap_str.vl", "let s = \"a\\tb\"\nprint(s)\n");
+    let mut c = Client::start();
+    assert_eq!(c.launch(&file)["success"], true);
+    c.breakpoints(&file, &[2]);
+    c.request("configurationDone", json!({}));
+    c.stopped("breakpoint");
+    assert_eq!(vars(&c.variables(1)), [("s", "\"a\\tb\"", "str")]);
+    assert_eq!(c.evaluate("s", 0), Ok("\"a\\tb\"".to_string()));
+    c.resume();
+    assert_eq!(c.event("exited")["body"]["exitCode"], 0);
+    assert_eq!(c.output("stdout"), "a\tb\n");
+    c.disconnect();
+}
+
+#[test]
 fn locals_appear_as_their_lines_run() {
     let file = program("dap_vars_step.vl", VARS);
     let mut c = Client::start();

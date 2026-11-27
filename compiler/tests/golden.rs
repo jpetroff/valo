@@ -12,6 +12,7 @@
 //! | `<name>.exit`     | expected exit code (absent = 0)                      |
 //! | `<name>.args`     | extra `run` flags, e.g. `--echo` (optional)          |
 //! | `<name>.stdin`    | standard input to feed (optional)                    |
+//! | `<name>.files/`   | fixtures copied next to the program (optional, M7)  |
 //!
 //! **How to add a test:** create `tests/golden/mN/<name>.vl` and a
 //! `<name>.stdout` with the output you *expect* (write it by hand first), then
@@ -22,7 +23,8 @@
 //! - `VALO_GOLDEN=<substring>` runs only tests whose path contains it.
 //!
 //! Each program runs in a fresh directory holding only a copy of the `.vl`
-//! file, so paths in messages are stable (`name.vl:1:1`).
+//! file (and the contents of `<name>.files/`), so paths in messages are
+//! stable (`name.vl:1:1`) and files the program writes go nowhere else.
 //!
 //! **Textbook chapter:** `docs/10-testing.md`.
 
@@ -37,10 +39,27 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let p = entry.path();
+        // `<name>.files/` holds fixtures, not tests.
+        if p.is_dir() && p.extension().is_some_and(|e| e == "files") {
+            continue;
+        }
         if p.is_dir() {
             collect(&p, out);
         } else if p.extension().is_some_and(|e| e == "vl") {
             out.push(p);
+        }
+    }
+}
+
+/// Copy the contents of directory `from` into `to` (recursively).
+fn copy_dir(from: &Path, to: &Path) {
+    for entry in fs::read_dir(from).expect("read fixtures").flatten() {
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        if src.is_dir() {
+            fs::create_dir_all(&dst).expect("create fixture dir");
+            copy_dir(&src, &dst);
+        } else {
+            fs::copy(&src, &dst).expect("copy fixture");
         }
     }
 }
@@ -62,6 +81,10 @@ fn run_case(vl: &Path, scratch: &Path) -> Outcome {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create scratch dir");
     fs::copy(vl, dir.join(name)).expect("copy source");
+    let fixtures = vl.with_extension("files");
+    if fixtures.is_dir() {
+        copy_dir(&fixtures, &dir);
+    }
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_valo"));
     cmd.arg("run")

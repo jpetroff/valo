@@ -458,7 +458,8 @@ fn variable_json(v: &Variable) -> Value {
     let value = match &v.value {
         // An omitted parameter whose default the prologue has not computed.
         VmValue::Missing => "(default not computed yet)".to_string(),
-        other => other.to_string(),
+        // Strings quoted (`"hi"`), as inside other values (M7).
+        other => other.repr(),
     };
     json!({
         "name": &*v.name,

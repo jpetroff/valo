@@ -4,7 +4,7 @@ valo is a functional, indentation-based scripting language. Source is compiled
 to bytecode and executed by a register-based virtual machine; Lua 5.x is the
 guiding model for the VM and runtime.
 
-Status: early MVP. Bindings, ints, floats, bools, conditionals, functions, lambdas and closures, calls, keyword arguments, `_` partial application and `print` run, with proper tail calls (milestones M0–M6).
+Status: early MVP. Bindings, ints, floats, bools, conditionals, functions, lambdas and closures, calls, keyword arguments, `_` partial application, strings with `{…}` interpolation and `print` run, with proper tail calls (milestones M0–M6, M7a).
 
 File extensions (tentative): source files use `.vl`, compiled bytecode uses `.vlc`.
 
@@ -38,7 +38,9 @@ blocks, annotated), lambdas (`x => x + 1`, `(a, b) => …`) and closures that ca
 value, `_` partial application (`add(1, _)`, `x |> sub(10, _)`), calls with
 compile-time argument checks, keyword-only parameters with defaults (`f(x, retries=2)`),
 pipes `|>`, proper tail calls (loops as tail recursion run in constant stack space; deep
-non-tail recursion stops with a clean R0301), and the built-ins `print`, `int`, `float`
+non-tail recursion stops with a clean R0301), strings (`"Hello, {name}!"`, escapes, raw
+`r"…"`, `+`, comparisons), and the built-ins `print` (with `end=`), `int`, `float`, `str`,
+`str_len`, `trim`
 run end to end (indentation-aware lexer → Pratt parser → desugaring → name resolver →
 register bytecode → VM with call frames and stack traces).
 

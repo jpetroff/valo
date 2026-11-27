@@ -94,7 +94,7 @@
 
 use crate::ast::{
     Arg, BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, FnDef, Item, Lambda, LogicOp, NodeId,
-    Param, Program, TypeExpr, TypeKind, UnaryOp,
+    Param, Program, StrPart, TypeExpr, TypeKind, UnaryOp,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -1239,6 +1239,63 @@ impl Parser<'_> {
         })
     }
 
+    /// The rest of a string literal after `StrStart` (at `open`):
+    ///
+    /// ```text
+    /// string := STR_START (STR_TEXT | INTERP_START expr INTERP_END)* STR_END
+    /// ```
+    ///
+    /// Without interpolation the result is a plain `Str`.
+    fn string(&mut self, open: Span) -> PResult<Expr> {
+        let mut parts = Vec::new();
+        let end = loop {
+            let t = self.bump();
+            match t.kind {
+                TokenKind::StrText(text) => parts.push(StrPart::Text(text)),
+                TokenKind::InterpStart => {
+                    let e = self.expr(0)?;
+                    if self.peek().kind != TokenKind::InterpEnd {
+                        let at = self.peek().clone();
+                        return Err(self.error(
+                            Diagnostic::new(
+                                "E0101",
+                                format!(
+                                    "expected `}}` after the interpolated expression, found {}",
+                                    at.kind.describe()
+                                ),
+                                at.span,
+                            )
+                            .label("expected `}` here")
+                            .with(t.span, "interpolation starts here"),
+                        ));
+                    }
+                    self.bump();
+                    parts.push(StrPart::Expr(e));
+                }
+                TokenKind::StrEnd => break t.span,
+                // The lexer always closes a string; anything else is a bug.
+                other => {
+                    return Err(self.error(Diagnostic::new(
+                        "E0101",
+                        format!("unexpected {} in a string", other.describe()),
+                        t.span,
+                    )));
+                }
+            }
+        };
+        let span = open.to(end);
+        let kind = match parts.as_slice() {
+            [] => ExprKind::Str(String::new()),
+            [StrPart::Text(t)] => ExprKind::Str(t.clone()),
+            _ => ExprKind::Interp(parts),
+        };
+        Ok(Expr {
+            id: self.id(),
+            span,
+            kind,
+        })
+    }
+
     /// Prefix position: literals, `()`, names, `-x`, `not x`, `if`,
     /// `assert`, parenthesised groups, lambdas.
     /// EXTEND: strings (M7) and list literals (M8) start here.
@@ -1285,6 +1342,7 @@ impl Parser<'_> {
                 })
             }
             TokenKind::Kw(Keyword::If) => self.if_expr(t),
+            TokenKind::StrStart => self.string(t.span),
             // `assert e` (plan D29): an expression of type `()`.
             TokenKind::Kw(Keyword::Assert) => {
                 let e = self.expr(0)?;
@@ -1505,6 +1563,14 @@ mod tests {
              map(xs, x => x * 2)\n(1 + 2)\n(a)\n\
              let sq = x =>\n    let y = x * x\n    y\n\
              fn outer(a: int) -> int:\n    fn inner(b: int) -> int = a + b\n    inner(1)"
+        ));
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__parser__tests__strings.snap
+    #[test]
+    fn strings() {
+        insta::assert_snapshot!(parse_ok(
+            "\"plain\"\n\"\"\n\"{x}\"\n\"a {x + 1} b {f(\"in {y}\")}\"\nr\"{raw}\" + \"s\""
         ));
     }
 

@@ -42,7 +42,8 @@
 //! | change what counts as a tail position       | `FuncState::expr_at` and its callers (`if_expr`, `block`) |
 //! | change how names are loaded                 | `FuncState::name` (`GETGLOBAL`, `MOVE`, `GETUPVAL`, `GETSELF`) |
 //! | map an operator to an opcode                | `ExprKind::Binary` arm (`let opcode = match op`) |
-//! | add a constant type (string, M7)            | `ConstKey` + `FuncState::constant` + `Const` in `vm/src/chunk.rs` |
+//! | add a constant type                         | `ConstKey` + `FuncState::constant` + `Const` in `vm/src/chunk.rs` |
+//! | change string interpolation (M7)            | `FuncState::interp` (`CONCAT`)                   |
 //! | compile a branch / jump                     | `emit_jmp` + `patch_here` (backpatching); see `if_expr`, `logic`, `compare` |
 //! | change how blocks use registers             | `FuncState::block`                               |
 //! | add an optimisation (constant folding…)     | `FuncState::expr` (see the `-<literal>` fold)    |
@@ -97,7 +98,7 @@ use valo_vm::opcode::{Instr, MAX_SJ, MIN_SJ, OpCode};
 
 use crate::ast::{
     self, Arg, BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, Item, Lambda, LogicOp, NodeId,
-    Param, UnaryOp,
+    Param, StrPart, UnaryOp,
 };
 use crate::diagnostic::Diagnostic;
 use crate::resolve::{BindingId, CaptureFrom, GlobalId, GlobalSlot, Res, Resolved, Slot};
@@ -271,10 +272,11 @@ struct FuncState<'r> {
 
 /// Constant-pool deduplication key. Floats are compared by bit pattern, so
 /// `0.0` and `-0.0` stay distinct (and `NaN` would be a valid key).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ConstKey {
     Int(i64),
     Float(u64),
+    Str(Rc<str>),
 }
 
 /// Registers are 8-bit operands.
@@ -385,9 +387,10 @@ impl<'r> FuncState<'r> {
 
     /// Index of a constant in the pool, adding it if new.
     fn constant(&mut self, k: Const, span: Span) -> u16 {
-        let key = match k {
-            Const::Int(n) => ConstKey::Int(n),
+        let key = match &k {
+            Const::Int(n) => ConstKey::Int(*n),
             Const::Float(x) => ConstKey::Float(x.to_bits()),
+            Const::Str(t) => ConstKey::Str(Rc::clone(t)),
         };
         if let Some(&i) = self.consts.get(&key) {
             return i;
@@ -621,7 +624,47 @@ impl<'r> FuncState<'r> {
             ExprKind::Block(items) => self.block(items, dst, false),
             ExprKind::Assert(inner) => self.assert(inner, dst),
             ExprKind::Lambda(l) => self.lambda(e, l, None, dst),
+            ExprKind::Str(text) => self.load_str(text, dst, e.span),
+            ExprKind::Interp(parts) => self.interp(parts, dst, e.span),
         }
+    }
+
+    /// `LOADK dst k` for a string constant.
+    fn load_str(&mut self, text: &str, dst: u8, span: Span) {
+        let k = self.constant(Const::Str(text.into()), span);
+        self.emit(Instr::abx(OpCode::LOADK, dst, k), span);
+    }
+
+    /// An interpolated string (D25): every part into consecutive registers
+    /// (text pieces are string constants), then one `CONCAT dst base n`,
+    /// which converts and joins them with a single allocation.
+    fn interp(&mut self, parts: &[StrPart], dst: u8, span: Span) {
+        if parts.len() > MAX_REGS as usize {
+            if !self.diags.iter().any(|d| d.code == "E0301") {
+                self.diags.push(
+                    Diagnostic::new(
+                        "E0301",
+                        "string has too many interpolated parts (max 255)",
+                        span,
+                    )
+                    .help("split it into several strings joined with `+`"),
+                );
+            }
+            return;
+        }
+        let base = self.free_reg as u8;
+        for p in parts {
+            let r = self.alloc(span);
+            match p {
+                StrPart::Text(t) => self.load_str(t, r, span),
+                StrPart::Expr(e) => self.expr(e, r),
+            }
+        }
+        self.emit(
+            Instr::abc(OpCode::CONCAT, dst, base, parts.len() as u8),
+            span,
+        );
+        self.free_to(base);
     }
 
     /// The initialiser of `let b`: a lambda written there is named after
@@ -1101,6 +1144,16 @@ mod tests {
         // pipe into `_` is a plain call (no CLOSURE).
         insta::assert_snapshot!(disasm(
             "fn add(a: int, b: int) -> int = a + b\nlet inc = add(1, _)\nprint(5 |> add(2, _))"
+        ));
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__codegen__tests__strings.snap
+    #[test]
+    fn strings() {
+        // Text pieces are constants (deduplicated); every part goes into
+        // consecutive registers, then one CONCAT.
+        insta::assert_snapshot!(disasm(
+            "let n = 2\nprint(\"a\")\nprint(\"n = {n}, next {n + 1}, a\")"
         ));
     }
 

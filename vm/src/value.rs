@@ -24,7 +24,7 @@
 //! (strings, lists — later) will be shared with `Rc` rather than mutated in
 //! place. There is no nil: optional values use `none` (M7), and registers
 //! start out as `Unit`. Variants arrive milestone by milestone:
-//! `Closure`, `Native` (M4), `Str`, `None`, `Ok`, `Err` (M7), `List` (M8),
+//! `Closure`, `Native` (M4), `Str` (M7a), `None`, `Ok`, `Err` (M7b), `List` (M8),
 //! `Tuple`, `Dict` (M8b), `Missing` (M4b, internal).
 //!
 //! ## No reference cycles (invariant)
@@ -66,6 +66,8 @@ pub enum Value {
     /// 64-bit IEEE float; arithmetic follows IEEE (overflow gives `inf`),
     /// except that division by zero is an error (Q20).
     Float(f64),
+    /// Immutable UTF-8 text (M7); shared, never copied by `MOVE` (D11).
+    Str(Rc<str>),
     /// A function defined in valo (M4).
     Closure(Rc<Closure>),
     /// A built-in function: index into `builtins::NATIVES` (M4).
@@ -108,13 +110,49 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Int(_) => "int",
             Value::Float(_) => "float",
+            Value::Str(_) => "str",
             Value::Closure(_) | Value::Native(_) => "function",
             Value::Missing => "<missing>",
         }
     }
 }
 
-// How a value looks when printed by `--echo` (and later by `print`).
+impl Value {
+    /// How a value is written *inside* another value and in messages
+    /// (`left: "a"`, `Err("bad port")`, the debugger): strings quoted and
+    /// escaped like valo source, everything else as `Display`.
+    pub fn repr(&self) -> String {
+        match self {
+            Value::Str(s) => quote(s),
+            other => other.to_string(),
+        }
+    }
+}
+
+/// `s` as a valo string literal: `"a\"b\n"`. Braces are escaped too, so
+/// the result reads back as the same text.
+pub fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+// How a value looks when printed by `--echo` and `print`.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -125,6 +163,9 @@ impl fmt::Display for Value {
             // `{:?}` always shows a decimal point or exponent (`1.0`, `1e100`)
             // and spells the specials `inf`, `-inf`, `NaN` (plan §2.4).
             Value::Float(x) => write!(f, "{x:?}"),
+            // `print("hi")` prints the text itself; inside other values and in
+            // messages strings are quoted (`Value::repr`).
+            Value::Str(s) => f.write_str(s),
             // `<fn fact/1>`: name and number of parameters.
             Value::Closure(c) => write!(f, "<fn {}/{}>", c.proto.name, c.proto.arity),
             Value::Native(id) => match NATIVES.get(id.0 as usize) {

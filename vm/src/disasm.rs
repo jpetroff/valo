@@ -177,6 +177,7 @@ fn const_repr(k: &Const) -> String {
     match k {
         Const::Int(n) => n.to_string(),
         Const::Float(x) => format!("{x:?}"),
+        Const::Str(t) => format!("{t:?}"),
     }
 }
 
@@ -185,5 +186,6 @@ fn const_entry(k: &Const) -> String {
     match k {
         Const::Int(n) => format!("int {n}"),
         Const::Float(x) => format!("float {x:?}"),
+        Const::Str(t) => format!("str {t:?}"),
     }
 }

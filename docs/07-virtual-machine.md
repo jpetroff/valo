@@ -46,7 +46,13 @@ pub enum Value {
 Each register holds one `Value`. Rust's `enum` is a tagged union: the tag
 says which variant it is, so the VM can check operand types at runtime
 (**dynamic typing** at the VM level; valo's annotations add checks on top in
-M10). Functions are values: `Closure` (compiled code plus captured values,
+M10). Strings (M7) are `Str(Rc<str>)`: immutable UTF-8, shared by `MOVE` and
+`LOADK` without copying; `+` joins two strings, `==`/`<` compare them (by
+code point), and `CONCAT A B C` builds an interpolated string from
+`R[B..B+C]` in one allocation, each part in its `Display` form. `print`
+shows a string as its text; inside other values and in messages
+(`left: "a"`, the debugger) `Value::repr` quotes and escapes it.
+Functions are values: `Closure` (compiled code plus captured values,
 M6) and `Native` (a built-in), both of type
 `function`, printed `<fn fact/1>` / `<native print/1>`. Later variants:
 strings, `none`, `Ok`/`Err` (M7), lists (M8). Heap values will be shared with
@@ -283,6 +289,9 @@ pub trait Host {
     fn write_stdout(&mut self, s: &str) -> io::Result<()>;
     fn write_stderr(&mut self, s: &str) -> io::Result<()>;
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn read_line(&mut self) -> io::Result<Option<String>>;     // M7: None at end of input
+    fn read_file(&mut self, path: &str) -> io::Result<String>;  // M7
+    fn write_file(&mut self, path: &str, content: &str) -> io::Result<()>; // M7
 }
 ```
 
@@ -292,13 +301,17 @@ The VM never touches `std::io` directly. Every effect goes through the
 - `StdHost` — the real process streams (used by `valo run`). Stdout is
   buffered (`BufWriter`): flushed before anything is written to stderr and
   by the CLI when the program ends, normally or with an error;
-- `TestHost` — collects output in two `String`s (used by unit tests).
+- `TestHost` — collects output in two `String`s, serves scripted stdin
+  lines and an in-memory file system (used by unit tests);
+- `DapHost` (`tooling/dap/src/host.rs`) — output becomes Debug Console
+  events; stdin reports end of input until the debugger runs programs in
+  a terminal (D6). `StdHost::read_line` flushes stdout first, so a prompt
+  printed before a read is visible.
 
 This is the seed of a key valo feature from the feasibility report: because
 *all* effects pass through one interface, a different host can log them
 (`--trace`), pretend to perform them (`--dry-run`), record them to a file
-(`--record`) or answer them from a recording (`--replay`). M7 adds stdin and
-file access to the trait.
+(`--record`) or answer them from a recording (`--replay`).
 
 A write failure (e.g. stdout is a closed pipe) becomes R0501 instead of a
 crash.

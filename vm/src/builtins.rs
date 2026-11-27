@@ -12,7 +12,8 @@
 //! Natives that touch the outside world (`effect: true`) go through
 //! `host::Host`, which is what makes `--dry-run` / `--replay` possible later.
 //!
-//! **Milestones:** M4 (`print`, `int`, `float`), M7 (strings, files, stdin),
+//! **Milestones:** M4 (`print`, `int`, `float`), M7a (`str`, `str_len`,
+//! `trim`, `print(end=…)`), M7b (`none`/Result helpers, files, stdin),
 //! M8 (`map`, `filter`, `reduce`, `range`, …). See `.memory/plan-mvp.md`.
 //!
 //! **Textbook chapter:** `docs/07-virtual-machine.md` (section *Calls*).
@@ -30,6 +31,8 @@
 //! - function pointers `fn(&mut Vm<'_>, Vec<Value>) -> …` stored in a struct (*Closures and iterators*).
 //! - a `static` table (`pub static NATIVES: &[NativeDef]`) (*Structs*).
 //! - `f64::trunc`, range checks before an `as i64` cast (*Integer types and casts*).
+
+use std::rc::Rc;
 
 use crate::error::{ErrorKind, RuntimeError};
 use crate::value::Value;
@@ -76,11 +79,19 @@ const fn req(name: &'static str) -> ParamSpec {
     }
 }
 
+/// A keyword-only parameter with a default (S19).
+const fn opt(name: &'static str) -> ParamSpec {
+    ParamSpec {
+        name,
+        has_default: true,
+    }
+}
+
 /// Every built-in, indexed by `NativeId`. Append only.
 pub static NATIVES: &[NativeDef] = &[
     NativeDef {
         name: "print",
-        params: &[req("x")],
+        params: &[req("x"), opt("end")],
         effect: true,
         f: native_print,
     },
@@ -96,6 +107,25 @@ pub static NATIVES: &[NativeDef] = &[
         effect: false,
         f: native_float,
     },
+    // ---- M7a: text ----
+    NativeDef {
+        name: "str",
+        params: &[req("x")],
+        effect: false,
+        f: native_str,
+    },
+    NativeDef {
+        name: "str_len",
+        params: &[req("s")],
+        effect: false,
+        f: native_str_len,
+    },
+    NativeDef {
+        name: "trim",
+        params: &[req("s")],
+        effect: false,
+        f: native_trim,
+    },
 ];
 
 /// R0206 for a native that got an argument of the wrong type.
@@ -103,17 +133,52 @@ fn arg_type_error(native: &str, expected: &str, got: &Value) -> RuntimeError {
     RuntimeError::new(
         ErrorKind::NativeArgType,
         format!(
-            "{native}() expects {expected}, got {} ({got})",
-            got.type_name()
+            "{native}() expects {expected}, got {} ({})",
+            got.type_name(),
+            got.repr()
         ),
     )
 }
 
-/// `print(x)`: write `x` (Display form) and a newline; returns `()`.
+/// R0206 unless `v` is a string.
+fn str_arg<'v>(native: &str, v: &'v Value) -> Result<&'v str, RuntimeError> {
+    match v {
+        Value::Str(s) => Ok(s),
+        other => Err(arg_type_error(native, "a str", other)),
+    }
+}
+
+/// `print(x, end="\n")`: write `x` (Display form: strings without quotes)
+/// followed by `end`; returns `()`.
 fn native_print(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
-    let line = format!("{}\n", args[0]);
+    let end = match &args[1] {
+        Value::Missing => "\n",
+        other => str_arg("print", other)?,
+    };
+    let line = format!("{}{end}", args[0]);
     vm.write_stdout(&line)?;
     Ok(Value::Unit)
+}
+
+/// `str(x)`: the text `print` would show (a string is returned unchanged).
+fn native_str(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    match &args[0] {
+        Value::Str(s) => Ok(Value::Str(Rc::clone(s))),
+        other => Ok(Value::Str(other.to_string().into())),
+    }
+}
+
+/// `str_len(s)`: number of Unicode scalar values (not bytes): `str_len("héllo")`
+/// is 5.
+fn native_str_len(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let s = str_arg("str_len", &args[0])?;
+    Ok(Value::Int(s.chars().count() as i64))
+}
+
+/// `trim(s)`: `s` without leading and trailing whitespace.
+fn native_trim(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    let s = str_arg("trim", &args[0])?;
+    Ok(Value::Str(s.trim().into()))
 }
 
 /// `int(x)`: float → int, rounding toward zero (R0103 for NaN, infinities and

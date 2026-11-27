@@ -1,0 +1,9 @@
+let a = 2
+let b = 3
+print("{a} + {b} = {a + b}")
+fn greet(name: str) -> str = "Hello, {name}!"
+print(greet("valo"))
+print("nested: {"inner {a * 10}"}")
+print("{1.5} {true} {()} {print}")
+let s = "x"
+print("{s}{s}{s}")

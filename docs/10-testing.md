@@ -107,6 +107,7 @@ compiler/tests/golden/m1/
 | `.exit` | expected exit code (absent = 0) |
 | `.args` | extra flags for `valo run` |
 | `.stdin` | input to feed |
+| `.files/` | a directory whose contents are copied next to the program (fixtures for `read_file`, M7) |
 
 Golden tests test what the user sees, including error message wording. They
 are the regression suite for every later milestone: M1's goldens must keep
@@ -128,7 +129,8 @@ Present goldens: `m0/empty`, `m0/no_echo`, and in `m1/`: `precedence`,
 
 `VALO_GOLDEN=floor cargo test -p valo-compiler --test golden` runs only
 matching tests. Each test runs in a fresh scratch directory under `target/`
-with a copy of the `.vl`, so file names in messages are stable.
+with a copy of the `.vl` (plus the fixtures from `<name>.files/`), so file
+names in messages are stable and files a program writes stay there.
 
 ## 10.5 CLI tests
 

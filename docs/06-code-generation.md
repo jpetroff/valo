@@ -349,7 +349,29 @@ function <partial add@2:11> upvals=1          CALL      1 2
 The call inside the partial is a tail call, so a loop driven through a
 partial still runs in constant stack space.
 
-## 6.10 What codegen does *not* do
+## 6.10 Strings (M7)
+
+A string literal is a constant (`Const::Str`, deduplicated like numbers)
+loaded with `LOADK`. An interpolated string puts every part — text pieces
+as constants, expressions compiled normally — into consecutive registers
+and joins them with one `CONCAT` (plan D25; `FuncState::interp`):
+
+```text
+print("n = {n}, next {n + 1}")
+  GETGLOBAL 0 0      ; print
+  LOADK     2 1      ; "n = "
+  GETGLOBAL 3 6      ; n
+  LOADK     4 2      ; ", next "
+  GETGLOBAL 5 6      ; n
+  LOADI 6 1; ADD 5 5 6
+  CONCAT    1 2 4    ; R1 = R2 ++ R3 ++ R4 ++ R5
+  CALL      0 1
+```
+
+The alternative — rewriting to `"n = " + str(n) + …` — would allocate an
+intermediate string per `+`.
+
+## 6.11 What codegen does *not* do
 
 - It does not check types: `1 + 2.0` compiles, and the VM reports R0201
   (`arith`, chapter 7). Type errors are found at runtime until static checks
@@ -357,7 +379,7 @@ partial still runs in constant stack space.
 - It does not decide *meaning* of operators: `IDIV` is emitted for `//`; what
   `//` does with negative numbers is defined once, in the VM.
 
-## 6.11 Where to change things
+## 6.12 Where to change things
 
 | Task | Where |
 |------|-------|
@@ -372,7 +394,7 @@ partial still runs in constant stack space.
 | how calls are compiled | `FuncState::call` (the argument window) |
 | point runtime errors at the operator | pass `*op_span` instead of `e.span` to the arithmetic `emit` |
 
-## 6.12 Exercises
+## 6.13 Exercises
 
 1. Compile `1 + (2 + (3 + 4))` and `((1 + 2) + 3) + 4` with
    `valo check f.vl --dump bytecode`. Compare `regs=`. Why do they differ?
@@ -384,7 +406,7 @@ partial still runs in constant stack space.
    `Binary` arm so that an operand which is a local is used from its own
    register (`ADD 0 1 2`). Which snapshot changes?
 
-## 6.13 Further reading
+## 6.14 Further reading
 
 - *The Implementation of Lua 5.0*, §6 (register allocation in the compiler).
 - Lua 5.4 source: `lcode.c` — `luaK_exp2nextreg`, `freereg`, `luaK_code`.

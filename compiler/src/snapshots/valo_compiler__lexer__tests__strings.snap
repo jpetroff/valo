@@ -1,0 +1,44 @@
+---
+source: compiler/src/lexer.rs
+expression: "lex_dump(\"\\\"a\\\\t\\\\\\\"b\\\\u{e9} \\\\{x\\\\}\\\"\\nr\\\"\\\\d{2}\\\"\\n\\\"{n + 1} and {\\\"in{m}\\\"}!\\\"\\n\\\"{ f({1: 2}) }\\\"\")"
+---
+   0..1    STR_START
+   1..19   STR_TEXT("a\t\"bé {x}")
+  19..20   STR_END
+  20..21   NEWLINE
+  21..23   STR_START
+  23..28   STR_TEXT("\\d{2}")
+  28..29   STR_END
+  29..30   NEWLINE
+  30..31   STR_START
+  31..32   INTERP_START
+  32..33   n
+  34..35   +
+  36..37   1
+  37..38   INTERP_END
+  38..43   STR_TEXT(" and ")
+  43..44   INTERP_START
+  44..45   STR_START
+  45..47   STR_TEXT("in")
+  47..48   INTERP_START
+  48..49   m
+  49..50   INTERP_END
+  50..51   STR_END
+  51..52   INTERP_END
+  52..53   STR_TEXT("!")
+  53..54   STR_END
+  54..55   NEWLINE
+  55..56   STR_START
+  56..57   INTERP_START
+  58..59   f
+  59..60   (
+  60..61   {
+  61..62   1
+  62..63   :
+  64..65   2
+  65..66   }
+  66..67   )
+  68..69   INTERP_END
+  69..70   STR_END
+  70..70   NEWLINE
+  70..70   EOF

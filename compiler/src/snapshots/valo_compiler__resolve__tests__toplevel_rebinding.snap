@@ -2,15 +2,15 @@
 source: compiler/src/resolve.rs
 expression: "resolve_src(\"let x = 1\\nlet x = x + 1\\nlet y = x * x\\ny + x\").unwrap()"
 ---
-natives: global#0..#2 (print int float)
+natives: global#0..#5 (print int float str str_len trim)
 globals:
-  global#3   x            1:5
-  global#4   x            2:5
-  global#5   y            3:5
+  global#6   x            1:5
+  global#7   x            2:5
+  global#8   y            3:5
 locals: (none)
 uses:
-  2:9     x -> global#3
-  3:9     x -> global#4
-  3:13    x -> global#4
-  4:1     y -> global#5
-  4:5     x -> global#4
+  2:9     x -> global#6
+  3:9     x -> global#7
+  3:13    x -> global#7
+  4:1     y -> global#8
+  4:5     x -> global#7

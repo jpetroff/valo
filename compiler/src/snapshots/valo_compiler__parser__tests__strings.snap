@@ -1,0 +1,9 @@
+---
+source: compiler/src/parser.rs
+expression: "parse_ok(\"\\\"plain\\\"\\n\\\"\\\"\\n\\\"{x}\\\"\\n\\\"a {x + 1} b {f(\\\"in {y}\\\")}\\\"\\nr\\\"{raw}\\\" + \\\"s\\\"\")"
+---
+(expr "plain")
+(expr "")
+(expr (interp x))
+(expr (interp "a " (+ x 1) " b " (call f (interp "in " y))))
+(expr (+ "{raw}" "s"))

@@ -297,6 +297,27 @@ impl<'h> Vm<'h> {
                         captures: captures.into_boxed_slice(),
                     }));
                 }
+                // String interpolation (M7, D25): R[A] = the text of
+                // R[B], …, R[B+C-1] joined, in one allocation.
+                OpCode::CONCAT => {
+                    let first = base + instr.b() as usize;
+                    let parts = self
+                        .stack
+                        .get(first..first + instr.c() as usize)
+                        .ok_or_else(|| internal("register out of range"))?;
+                    let mut out = String::new();
+                    for v in parts {
+                        match v {
+                            Value::Str(t) => out.push_str(t),
+                            // RUST: `write!` into a String (Display) cannot fail.
+                            other => {
+                                use std::fmt::Write as _;
+                                let _ = write!(out, "{other}");
+                            }
+                        }
+                    }
+                    self.stack[ra] = Value::Str(out.into());
+                }
                 // Read a captured value (M6).
                 OpCode::GETUPVAL => {
                     let current = &self.frames.last().expect("running").closure;
@@ -335,6 +356,7 @@ impl<'h> Vm<'h> {
                     self.stack[ra] = match k {
                         Const::Int(n) => Value::Int(*n),
                         Const::Float(x) => Value::Float(*x),
+                        Const::Str(t) => Value::Str(Rc::clone(t)),
                     };
                 }
                 // All binary arithmetic shares one arm: R[A] = R[B] op R[C].
@@ -466,8 +488,8 @@ impl<'h> Vm<'h> {
                             RuntimeError::new(ErrorKind::AssertionFailed, "assertion failed");
                         if instr.b() == 1 {
                             err = err
-                                .note(format!("left: {}", self.stack[ra + 1]))
-                                .note(format!("right: {}", self.stack[ra + 2]));
+                                .note(format!("left: {}", self.stack[ra + 1].repr()))
+                                .note(format!("right: {}", self.stack[ra + 2].repr()));
                         }
                         return Err(err);
                     }
@@ -772,6 +794,13 @@ pub fn arith(op: OpCode, b: &Value, c: &Value) -> Result<Value, RuntimeError> {
         }
         (Value::Int(x), Value::Int(y)) => int_arith(op, *x, *y).map(Value::Int),
         (Value::Float(x), Value::Float(y)) => float_arith(op, *x, *y, b, c).map(Value::Float),
+        // `+` joins two strings (D11).
+        (Value::Str(x), Value::Str(y)) if op == OpCode::ADD => {
+            let mut out = String::with_capacity(x.len() + y.len());
+            out.push_str(x);
+            out.push_str(y);
+            Ok(Value::Str(out.into()))
+        }
         (Value::Int(x), Value::Float(y)) if op == OpCode::DIV => {
             float_arith(op, *x as f64, *y, b, c).map(Value::Float)
         }
@@ -797,6 +826,9 @@ fn mismatch(message: String, b: &Value, c: &Value) -> RuntimeError {
     match (b, c) {
         (Value::Int(_), Value::Float(_)) | (Value::Float(_), Value::Int(_)) => err.note(
             "help: int and float never mix implicitly (only `/` converts); make both operands the same type",
+        ),
+        (Value::Str(_), _) | (_, Value::Str(_)) => err.note(
+            "help: to build text from other values, use interpolation: \"{a}{b}\" (or convert with str())",
         ),
         _ => err,
     }
@@ -848,6 +880,7 @@ pub fn values_equal(b: &Value, c: &Value) -> Result<bool, RuntimeError> {
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => x == y,
         _ if b.type_name() == "function" && c.type_name() == "function" => {
             return Err(RuntimeError::new(
                 ErrorKind::NotComparable,
@@ -864,13 +897,15 @@ pub fn values_equal(b: &Value, c: &Value) -> Result<bool, RuntimeError> {
     })
 }
 
-/// `<` (or `<=` when `or_equal`): ints and floats (strings in M7). Bools and
+/// `<` (or `<=` when `or_equal`): ints, floats, strings (by code point,
+/// M7). Bools and
 /// `()` have no order (R0205); different types → R0201. Any comparison with
 /// `NaN` is false.
 pub fn less(b: &Value, c: &Value, or_equal: bool) -> Result<bool, RuntimeError> {
     match (b, c) {
         (Value::Int(x), Value::Int(y)) => Ok(if or_equal { x <= y } else { x < y }),
         (Value::Float(x), Value::Float(y)) => Ok(if or_equal { x <= y } else { x < y }),
+        (Value::Str(x), Value::Str(y)) => Ok(if or_equal { x <= y } else { x < y }),
         _ if b.type_name() == c.type_name() => Err(RuntimeError::new(
             ErrorKind::NotComparable,
             format!("values of type {} cannot be ordered", b.type_name()),
@@ -1125,6 +1160,30 @@ mod tests {
         }
     }
 
+    /// M7: CONCAT joins the Display form of its parts; `+`, `==` and `<` on
+    /// strings.
+    #[test]
+    fn strings_concat_compare_and_add() {
+        let p = ProtoBuilder::new("<main>", 4)
+            .konst(Const::Str("n=".into()))
+            .konst(Const::Str("é".into()))
+            .op(Instr::abx(OpCode::LOADK, 1, 0))
+            .op(Instr::asbx(OpCode::LOADI, 2, 7))
+            .op(Instr::abx(OpCode::LOADK, 3, 1))
+            .op(Instr::abc(OpCode::CONCAT, 0, 1, 3))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        assert_eq!(run(&p).0, Ok(Value::Str("n=7é".into())));
+        let (a, b) = (Value::Str("ab".into()), Value::Str("b".into()));
+        assert_eq!(arith(OpCode::ADD, &a, &b), Ok(Value::Str("abb".into())));
+        assert!(less(&a, &b, false).unwrap());
+        assert!(!values_equal(&a, &b).unwrap());
+        let e = arith(OpCode::ADD, &a, &Value::Int(1)).unwrap_err();
+        assert_eq!(e.kind.code(), "R0201");
+        assert!(e.notes[0].contains("interpolation"), "{:?}", e.notes);
+        assert_eq!(Value::Str("a\"{".into()).repr(), "\"a\\\"\\{\"");
+    }
+
     /// `fn add(a, b) = a + b` as a prototype.
     fn add_proto() -> Proto {
         ProtoBuilder::new("add", 3)
@@ -1175,11 +1234,12 @@ mod tests {
     #[test]
     fn native_print_and_its_arg_count() {
         let print = |nargs: u8| {
-            ProtoBuilder::new("<main>", 3)
+            ProtoBuilder::new("<main>", 4)
                 .native_global(0)
                 .op(Instr::abx(OpCode::GETGLOBAL, 0, 0))
                 .op(Instr::asbx(OpCode::LOADI, 1, 7))
                 .op(Instr::asbx(OpCode::LOADI, 2, 8))
+                .op(Instr::asbx(OpCode::LOADI, 3, 9))
                 .op(Instr::abc(OpCode::CALL, 0, nargs, 0))
                 .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
                 .program()
@@ -1187,8 +1247,11 @@ mod tests {
         let (r, host) = run(&print(1));
         assert_eq!(r, Ok(Value::Unit));
         assert_eq!(host.stdout, "7\n");
+        // `end` (M7) must be a str.
         let e = run(&print(2)).0.unwrap_err();
-        assert_eq!(e.message, "`print` takes 1 argument but 2 were given");
+        assert_eq!(e.message, "print() expects a str, got int (8)");
+        let e = run(&print(3)).0.unwrap_err();
+        assert_eq!(e.kind.code(), "R0207");
     }
 
     #[test]
@@ -1230,7 +1293,7 @@ mod tests {
         assert_eq!(f.to_string(), "<fn add/2>");
         assert_eq!(
             Value::Native(crate::chunk::NativeId(0)).to_string(),
-            "<native print/1>"
+            "<native print/2>"
         );
         assert_eq!(values_equal(&f, &f).unwrap_err().kind.code(), "R0205");
     }

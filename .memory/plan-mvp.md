@@ -524,6 +524,15 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 
 ### M7 — Str, interpolation, text I/O host functions, optional (`none`) and Result with `?`
 
+- Implementation notes, M7a (strings; branch `m6-m7`, committed separately from M7b):
+  - Lexer tokens `StrStart StrText(decoded) InterpStart … InterpEnd StrEnd`; mode stack `Lexer::interps: Vec<Interp { depth, string_start, brace }>` — the `}` whose bracket depth matches the top entry ends the interpolation; `depth` is +1 while one is open. Escapes `\n \t \r \0 \" \\ \{ \} \u{1-6 hex}`, else E0005. A string reaching end of line/file = E0004, but only E0007 when that string sits inside an unclosed `{…}` (`"a {x"`); a line break inside `{…}` = E0007; `{}` / `{ }` = E0008. A lone `}` in text is literal. Raw `r"…"`: no escapes/interpolation, ends at the first `"`. Backtick, `re"`, `=~`, `!~` stay E0009.
+  - AST `ExprKind::Str(String)` (no interpolation) / `ExprKind::Interp(Vec<StrPart::{Text, Expr}>)`; codegen `Const::Str` (deduplicated, `ConstKey::Str(Rc<str>)`), `CONCAT dst base n` over consecutive registers (> 255 parts → E0301).
+  - VM `Value::Str(Rc<str>)` (`type_name` "str"); `Value::repr()` / `value::quote` quote+escape strings for messages, assert `left:`/`right:`, R0206 messages and the debugger; Display is the plain text. `+` on str×str; str + other → R0201 with an interpolation hint; `==`, `<` by code point.
+  - Host: `read_line` (flushes stdout; strips `\n`/`\r\n`), `read_file`, `write_file` on `StdHost`, `TestHost` (scripted `stdin: VecDeque`, in-memory `files`), `DapHost` (files via std::fs, stdin = end of input until D6). The natives that use them land in M7b with `none`/Result.
+  - Natives appended: `str`, `str_len`, `trim`; `print` gained `end` (keyword, default `"\n"`, deferred from M4b) — so `print` displays as `<native print/2>` and a dynamic 2-argument call passes `end` positionally (Q27). Every global index shifted by 3 (snapshots re-accepted, only numbering changed).
+  - Golden runner: `<name>.files/` fixtures copied next to the program (and skipped when collecting tests). DAP Variables/hover show strings quoted. Grammar: `str_len`, `trim` added to the built-in list.
+  - Extra goldens: `print_end`, `str_ops`, `assert_str`.
+
 - Goal: text programs: hello world, interpolated output, stdin line processing, file read/write with `?` propagation and context chains.
 - Blocks: string literal (escapes, interpolation `{expr}`, raw strings), string concatenation via `+`, string comparison; `none` literal; Result constructors `Ok`/`Err` (builtins), postfix `?`.
 - Tasks:

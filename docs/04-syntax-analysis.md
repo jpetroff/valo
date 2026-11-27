@@ -94,6 +94,7 @@ pub enum ExprKind {
     Call { callee: Box<Expr>, args: Vec<Arg>, piped: Option<usize> }, // f(a, k=b)
     Pipe { op_span: Span, lhs: Box<Expr>, rhs: Box<Expr> },           // x |> f
     Lambda(Box<Lambda>),                                              // x => e (M6)
+    Str(String), Interp(Vec<StrPart>),                                // "text", "a {x}" (M7)
 }
 pub struct CmpLink { pub op: CmpOp, pub op_span: Span, pub rhs: Expr }
 ```
@@ -213,6 +214,16 @@ block, like `:` does. Because the lexer ignores line breaks inside
 brackets, a block-bodied lambda cannot be written directly inside a call:
 bind it with `let` first. Lambda parameters may have annotations but no
 defaults.
+
+**Strings** (M7) arrive from the lexer already split
+(`STR_START STR_TEXT INTERP_START … INTERP_END STR_END`, chapter 3).
+`Parser::string` collects the parts, parsing each interpolated expression
+with `expr(0)`; a string without `{…}` becomes `ExprKind::Str(text)`, one
+with interpolation `ExprKind::Interp(parts)`:
+
+```text
+"a {x + 1} b {f("in {y}")}"   →   (interp "a " (+ x 1) " b " (call f (interp "in " y)))
+```
 
 **Comparison chains.** When the loop meets a comparison operator it calls
 `compare_chain`, which keeps consuming `op operand` pairs (operands parsed

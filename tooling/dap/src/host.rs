@@ -13,7 +13,8 @@
 //!
 //! | I want to…                                   | Look at                                    |
 //! |----------------------------------------------|--------------------------------------------|
-//! | support a new effect (stdin, files, M7)      | a new `Host` method → implement it here too |
+//! | support a new effect                         | a new `Host` method → implement it here too |
+//! | give the program real stdin                  | `read_line` (now: end of input; D6)         |
 //! | send output to the integrated terminal       | `runInTerminal` reverse request (README, D6) |
 
 use std::io;
@@ -44,5 +45,20 @@ impl Host for DapHost {
     fn write_stderr(&mut self, s: &str) -> io::Result<()> {
         self.out.output("stderr", s);
         Ok(())
+    }
+
+    /// The adapter's stdin carries the protocol, so there is no input for
+    /// the program yet: `read_line` reports end of input. D6 runs the
+    /// program in the integrated terminal instead (`runInTerminal`).
+    fn read_line(&mut self) -> io::Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn read_file(&mut self, path: &str) -> io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+
+    fn write_file(&mut self, path: &str, content: &str) -> io::Result<()> {
+        std::fs::write(path, content)
     }
 }

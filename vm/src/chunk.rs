@@ -17,7 +17,7 @@
 //!
 //! | I want to…                                   | Look at                                      |
 //! |----------------------------------------------|----------------------------------------------|
-//! | add a new kind of constant (string, M7)      | `enum Const`, then `vm.rs` (`LOADK`), `disasm.rs` (`const_repr`, `const_entry`), `codegen.rs` |
+//! | add a new kind of constant                   | `enum Const`, then `vm.rs` (`LOADK`), `disasm.rs` (`const_repr`, `const_entry`), `codegen.rs` |
 //! | store more per-function data (params, types)  | `struct Proto` (+ `ProtoBuilder::new`, `FuncState::new` in codegen) |
 //! | change what closures capture (M6)             | `struct UpvalDesc`, `enum UpvalSrc` (+ `CLOSURE` in `vm.rs`) |
 //! | store more per-program data (types, M10)     | `struct Program` (+ `ProtoBuilder::program`, `codegen::compile`) |
@@ -63,13 +63,15 @@ impl SrcSpan {
 ///
 /// Small integers are encoded directly in the instruction (`LOADI`); values
 /// that do not fit go into the pool and are loaded with `LOADK index`.
-/// EXTEND: strings (M7) become a new variant here.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Const {
     /// Integer too large for `LOADI`'s 16-bit immediate.
     Int(i64),
     /// Float literal (there is no float immediate form).
     Float(f64),
+    /// String literal, or the text pieces of an interpolated string (M7).
+    /// `LOADK` shares the `Rc`, so loading a string never copies it.
+    Str(Rc<str>),
 }
 
 /// A compiled function.

@@ -46,7 +46,7 @@
 //! - `&mut` traversal that edits the tree in place (*Ownership and borrowing*).
 //! - `std::mem::replace` to move a value out of a `&mut` place (*Ownership and borrowing*).
 
-use crate::ast::{Arg, Binding, Expr, ExprKind, Item, Lambda, NodeId, Param, Program};
+use crate::ast::{Arg, Binding, Expr, ExprKind, Item, Lambda, NodeId, Param, Program, StrPart};
 use crate::span::Span;
 
 /// Rewrite every pipe in `program` into a call, and every `_` partial into
@@ -327,6 +327,14 @@ impl Desugar {
                 }
             }
             ExprKind::Lambda(l) => self.expr(&mut l.body),
+            ExprKind::Str(_) => {}
+            ExprKind::Interp(parts) => {
+                for p in parts {
+                    if let StrPart::Expr(x) = p {
+                        self.expr(x);
+                    }
+                }
+            }
         }
     }
 }

@@ -1,0 +1,5 @@
+error[R0201]: unsupported operand types for +: str and int
+  --> concat_mismatch.vl:2:7
+  help: to build text from other values, use interpolation: "{a}{b}" (or convert with str())
+stack trace (most recent call first):
+  0: <main> at concat_mismatch.vl:2:7

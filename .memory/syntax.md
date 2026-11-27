@@ -260,6 +260,12 @@ Global style: Python-like, indentation blocks (INDENT/DEDENT/NEWLINE), no `;`, s
 - In a pipe, the value fills the FIRST `_` of the right-hand call; further `_` keep it a partial: `x |> f(_, _)` ≡ `f(x, _)`.
 - A lambda bound by `let` is named after the binding in traces (`<fn sq/1>`); other lambdas `<lambda@line:col>`, partials `<partial f@line:col>`.
 
+## Implementation notes from M7 (PROVISIONAL, chosen while building; not yet confirmed by the user)
+- A string ends on its line (no multi-line `"…"`; triple quotes stay provisional, S12). An interpolation `{…}` must also close on its line.
+- Escapes: `\n \t \r \0 \" \\ \{ \} \u{…}` (1–6 hex digits); any other `\x` is an error. A lone `}` in string text is a literal `}` (only `{` must be escaped).
+- Raw strings `r"…"` have no escapes at all, so they cannot contain `"`.
+- `print(x, end="\n")`: keyword `end` (Python); strings print without quotes, but show quoted inside other values and in error messages (`left: "a"`).
+
 ## Composite example (rounds 1–6; builtin names provisional)
 
 ```

@@ -10,7 +10,7 @@
 //!
 //! **Textbook chapter:** `docs/04-syntax-analysis.md`.
 //!
-//! ## Structure (M6)
+//! ## Structure (M7)
 //!
 //! ```text
 //! Program { items: Vec<Item> }
@@ -35,6 +35,8 @@
 //!         ::Pipe { lhs, rhs }                        `x |> f(a)`; rewritten to a
 //!                                                    `Call` by `desugar.rs`
 //!         ::Lambda(Lambda{params, body, partial_of}) `x => e`, `(a, b) => e` (M6)
+//!         ::Str(String)                              `"text"` (M7)
+//!         ::Interp(Vec<StrPart>)                     `"a {x} b"`: Text / Expr parts (M7)
 //! Arg::Positional(Expr) | Keyword { name, value } | Placeholder (`_`, M6)
 //! TypeExpr { span, kind: TypeKind }      annotations (checked from M10)
 //! ```
@@ -273,6 +275,11 @@ pub enum ExprKind {
     },
     /// A lambda `x => e`, `(a, b: int) => e`, `() => e` (syntax.md S3; M6).
     Lambda(Box<Lambda>),
+    /// A string literal without interpolation (escapes decoded; M7).
+    Str(String),
+    /// An interpolated string `"a {x} b"` (S12, M7): text and expressions
+    /// in order; each expression is converted to text when it runs.
+    Interp(Vec<StrPart>),
     /// `lhs |> rhs` (S1). Only the parser produces it; `desugar.rs`
     /// rewrites it into a `Call` before name resolution.
     Pipe {
@@ -301,6 +308,15 @@ pub enum ExprKind {
         /// Right operand.
         rhs: Box<Expr>,
     },
+}
+
+/// A piece of an interpolated string.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrPart {
+    /// Literal text.
+    Text(String),
+    /// `{expr}`.
+    Expr(Expr),
 }
 
 /// One `op operand` step of a comparison chain.
@@ -420,6 +436,17 @@ impl fmt::Display for Expr {
                 f.write_str(")")
             }
             ExprKind::Pipe { lhs, rhs, .. } => write!(f, "(|> {lhs} {rhs})"),
+            ExprKind::Str(text) => write!(f, "{text:?}"),
+            ExprKind::Interp(parts) => {
+                f.write_str("(interp")?;
+                for p in parts {
+                    match p {
+                        StrPart::Text(t) => write!(f, " {t:?}")?,
+                        StrPart::Expr(e) => write!(f, " {e}")?,
+                    }
+                }
+                f.write_str(")")
+            }
             ExprKind::Lambda(l) => {
                 f.write_str("(lambda ")?;
                 if let Some(n) = &l.partial_of {

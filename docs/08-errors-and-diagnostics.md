@@ -21,7 +21,7 @@ it. Codes never change once a golden test uses them.
 
 | Range | Stage | Codes in use (M6) |
 |-------|-------|-------------------|
-| E00xx | lexer | E0001 unexpected character · E0002 int literal out of range · E0003 bad dedent · E0006 tab in indentation · E0009 not supported yet · E0010 malformed number |
+| E00xx | lexer | E0001 unexpected character · E0002 int literal out of range · E0003 bad dedent · E0004 unterminated string · E0005 invalid escape · E0006 tab in indentation · E0007 unterminated interpolation · E0008 empty interpolation `{}` · E0009 not supported yet · E0010 malformed number |
 | E01xx | parser | E0101 unexpected token · E0102 `if` without `else` · E0103 unclosed `(` · E0104 block ends with a `let`/`fn` · E0105 nested too deeply |
 | E02xx | resolve | E0201 undefined name (+ did-you-mean) · E0203 top-level name used before its definition · E0204 a local fn uses a later local fn (local mutual recursion) · E0205 wrong number of arguments to a known fn · E0206 `_` used as a value · E0207 defined twice (fn, parameter, type variable) |
 | E03xx | codegen | E0301 too many registers / constants / captured variables |

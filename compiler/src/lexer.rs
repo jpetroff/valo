@@ -30,14 +30,25 @@
 //! | recognise a new operator (e.g. `+=`)         | `Lexer::token`, the big `match c` (longest spelling first), plus `TokenKind` in `token.rs` |
 //! | add a keyword                                | only `token.rs` (`Keyword`); `Lexer::ident` looks it up |
 //! | change number literal rules                  | `Lexer::number`, `digits`, `bad_suffix`, `check_underscores` |
-//! | implement string literals (M7)               | replace the `'"'` arm in `Lexer::token` (currently `quoted`, which reports "not supported yet") |
+//! | change string literals (escapes, raw, `{}`)  | `Lexer::string`, `string_body`, `escape`, `raw_body`; the `'}'` arm of `Lexer::token` ends an interpolation |
 //! | change indentation rules (tabs, widths)      | `Lexer::line_start`                                  |
 //! | change line-continuation rules               | `Lexer::line_start` (pipe-continuation case) and `Lexer::run` (`'\n'` arm) |
 //! | change a lexical error message               | search for the code, e.g. `"E0010"`                  |
 //!
 //! Lexical error codes: E0001 unexpected character, E0002 integer out of
-//! range, E0003 bad dedent, E0006 tab in indentation, E0009 syntax not
-//! supported yet, E0010 malformed number.
+//! range, E0003 bad dedent, E0004 unterminated string, E0005 invalid escape,
+//! E0006 tab in indentation, E0007 unterminated interpolation, E0008 empty
+//! interpolation `{}`, E0009 syntax not supported yet, E0010 malformed
+//! number.
+//!
+//! ## Strings (M7, syntax.md S12, plan D25)
+//!
+//! `"a {x + 1} b"` becomes `STR_START STR_TEXT("a ") INTERP_START x + 1
+//! INTERP_END STR_TEXT(" b") STR_END`. Between `INTERP_START` and
+//! `INTERP_END` the lexer is in normal mode, so any expression — even
+//! another string — can appear; a stack of open interpolations
+//! (`Lexer::interps`) tells which `}` ends one. Escapes are decoded here;
+//! `r"…"` has none and no interpolation.
 //!
 //! PROVISIONAL-SYNTAX (recorded in `.memory/syntax.md`): indentation uses
 //! spaces only (a tab in indentation is E0006); `_` digit separators are
@@ -79,6 +90,7 @@ pub fn lex(src: &str) -> Lexed {
         at_line_start: true,
         line_has_tokens: false,
         pending_newline: None,
+        interps: Vec::new(),
     };
     lx.run();
     Lexed {
@@ -109,6 +121,22 @@ struct Lexer<'a> {
     line_has_tokens: bool,
     /// A NEWLINE token waiting to be emitted (see the module guide).
     pending_newline: Option<Span>,
+    /// Open `{…}` interpolations inside string literals, innermost last
+    /// (the *mode stack*, plan D25): while one is open the lexer produces
+    /// ordinary tokens, and the `}` that closes it returns to string text.
+    interps: Vec<Interp>,
+}
+
+/// An open interpolation `"…{expr}…"`.
+#[derive(Debug, Clone, Copy)]
+struct Interp {
+    /// Bracket depth outside the interpolation (`depth` is one more while
+    /// it is open, which also suppresses line layout inside it).
+    depth: u32,
+    /// Byte offset of the string's opening quote.
+    string_start: usize,
+    /// Byte offset of the `{`.
+    brace: usize,
 }
 
 // RUST: `impl Lexer<'_>` — methods for any lifetime; `'_` means "some
@@ -169,6 +197,7 @@ impl Lexer<'_> {
             let Some(c) = self.peek() else { break };
             match c {
                 '#' => self.skip_to_eol(),
+                '\n' if !self.interps.is_empty() => self.unclosed_interps(),
                 '\n' => {
                     let start = self.pos;
                     self.pos += 1;
@@ -268,6 +297,7 @@ impl Lexer<'_> {
 
     /// End of input: final NEWLINE, close all open blocks, then EOF.
     fn finish(&mut self) {
+        self.unclosed_interps();
         let end = self.src.len();
         if let Some(nl) = self.pending_newline.take() {
             self.tokens.push(Token {
@@ -332,6 +362,18 @@ impl Lexer<'_> {
             '[' => (TokenKind::LBracket, 1),
             ']' => (TokenKind::RBracket, 1),
             '{' => (TokenKind::LBrace, 1),
+            // The `}` that closes an interpolation goes back to string text.
+            '}' if self
+                .interps
+                .last()
+                .is_some_and(|i| i.depth + 1 == self.depth) =>
+            {
+                let i = self.interps.pop().expect("checked above");
+                self.depth = i.depth;
+                self.pos += 1;
+                self.push(TokenKind::InterpEnd, start);
+                return self.string_body(i.string_start);
+            }
             '}' => (TokenKind::RBrace, 1),
             ',' => (TokenKind::Comma, 1),
             '.' => (TokenKind::Dot, 1),
@@ -351,8 +393,7 @@ impl Lexer<'_> {
             '|' if two(self, "|>") => (TokenKind::PipeGt, 2),
             '|' => (TokenKind::Bar, 1),
             '?' => (TokenKind::Question, 1),
-            // EXTEND (M7): real string literals replace this arm.
-            '"' => return self.quoted(0, '"', "string literals"),
+            '"' => return self.string(1, false),
             '`' => return self.quoted(0, '`', "command literals"),
             other => {
                 // RUST: `len_utf8()` — a char may take 1–4 bytes in UTF-8.
@@ -423,6 +464,209 @@ impl Lexer<'_> {
         self.line_has_tokens = true;
     }
 
+    // ---- strings (M7, syntax.md S12, plan D25) ---------------------------
+
+    /// A string literal whose opening (`"` or `r"`) is `open_len` bytes at
+    /// `pos`. A raw string has no escapes and no interpolation.
+    fn string(&mut self, open_len: usize, raw: bool) {
+        let start = self.pos;
+        self.pos += open_len;
+        self.push(TokenKind::StrStart, start);
+        if raw {
+            self.raw_body(start)
+        } else {
+            self.string_body(start)
+        }
+    }
+
+    /// Text of a normal string, from `pos` up to the closing `"` (emits
+    /// `StrText`, `StrEnd`) or to a `{` (emits `InterpStart` and returns:
+    /// the expression is lexed as ordinary tokens, see `interps`).
+    fn string_body(&mut self, string_start: usize) {
+        let mut text = String::new();
+        let mut text_start = self.pos;
+        loop {
+            let Some(c) = self.peek() else {
+                return self.unterminated(string_start, text, text_start);
+            };
+            match c {
+                '"' => {
+                    self.flush_text(&mut text, text_start);
+                    let q = self.pos;
+                    self.pos += 1;
+                    self.push(TokenKind::StrEnd, q);
+                    return;
+                }
+                '\n' => return self.unterminated(string_start, text, text_start),
+                '\\' => self.escape(&mut text),
+                '{' => {
+                    self.flush_text(&mut text, text_start);
+                    let brace = self.pos;
+                    // `{}` or `{  }`: nothing to interpolate (E0008).
+                    let inner = &self.src[brace + 1..];
+                    let blank = inner.len() - inner.trim_start_matches([' ', '\t']).len();
+                    if inner[blank..].starts_with('}') {
+                        self.pos = brace + 1 + blank + 1;
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0008",
+                                "empty interpolation `{}` in a string",
+                                Span::new(brace, self.pos),
+                            )
+                            .label("expected an expression between the braces")
+                            .help("write `\\{` and `\\}` for literal braces"),
+                        );
+                        text_start = self.pos;
+                        continue;
+                    }
+                    self.pos += 1;
+                    self.push(TokenKind::InterpStart, brace);
+                    self.interps.push(Interp {
+                        depth: self.depth,
+                        string_start,
+                        brace,
+                    });
+                    self.depth += 1;
+                    return;
+                }
+                _ => {
+                    text.push(c);
+                    self.pos += c.len_utf8();
+                }
+            }
+        }
+    }
+
+    /// Text of a raw string `r"…"` up to the closing `"`: no escapes, no
+    /// interpolation (so it cannot contain `"`).
+    fn raw_body(&mut self, string_start: usize) {
+        let text_start = self.pos;
+        let rest = &self.src[self.pos..];
+        let end = rest.find(['"', '\n']).unwrap_or(rest.len());
+        let mut text = rest[..end].to_string();
+        self.pos += end;
+        if self.peek() != Some('"') {
+            return self.unterminated(string_start, std::mem::take(&mut text), text_start);
+        }
+        self.flush_text(&mut text, text_start);
+        let q = self.pos;
+        self.pos += 1;
+        self.push(TokenKind::StrEnd, q);
+    }
+
+    /// Emit the text collected so far (if any) as one `StrText`.
+    fn flush_text(&mut self, text: &mut String, text_start: usize) {
+        if !text.is_empty() {
+            self.push(TokenKind::StrText(std::mem::take(text)), text_start);
+        }
+    }
+
+    /// E0004: the string reaches the end of the line or file. The token
+    /// stream is closed with `StrEnd` so the line still looks complete.
+    fn unterminated(&mut self, string_start: usize, mut text: String, text_start: usize) {
+        self.flush_text(&mut text, text_start);
+        self.push(TokenKind::StrEnd, self.pos);
+        // Inside an unclosed `{…}`, the `"` that started this string was
+        // most likely meant to close the outer one (`"a {x"`): only the
+        // interpolation is reported (E0007, at the end of the line).
+        if !self.interps.is_empty() {
+            return;
+        }
+        self.diags.push(
+            Diagnostic::new(
+                "E0004",
+                "unterminated string",
+                Span::new(string_start, self.pos),
+            )
+            .label("this string has no closing `\"` on its line")
+            .help("strings end on the line where they start; write `\\n` for a line break"),
+        );
+    }
+
+    /// One escape sequence after `\\` (at `pos`), decoded into `text`:
+    /// `\\n \\t \\r \\0 \\" \\\\ \\{ \\} \\u{1F600}`; anything else is E0005.
+    fn escape(&mut self, text: &mut String) {
+        let start = self.pos;
+        self.pos += 1;
+        let Some(c) = self.peek().filter(|c| *c != '\n') else {
+            return self.bad_escape(start, "a `\\` at the end of the line");
+        };
+        self.pos += c.len_utf8();
+        let decoded = match c {
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            '0' => '\0',
+            '"' => '"',
+            '\\' => '\\',
+            '{' => '{',
+            '}' => '}',
+            'u' => match self.unicode_escape() {
+                Some(ch) => ch,
+                None => {
+                    return self.bad_escape(
+                        start,
+                        "a malformed unicode escape; write it as `\\u{1F600}` (1–6 hex digits)",
+                    );
+                }
+            },
+            other => {
+                return self.bad_escape(start, &format!("an unknown escape `\\{other}`"));
+            }
+        };
+        text.push(decoded);
+    }
+
+    /// The `{hex}` part of `\\u{…}` (after the `u`): a Unicode scalar value.
+    fn unicode_escape(&mut self) -> Option<char> {
+        let rest = &self.src[self.pos..];
+        let body = rest.strip_prefix('{')?;
+        let close = body.find(['}', '"', '\n'])?;
+        if !body[close..].starts_with('}') {
+            return None;
+        }
+        let hex = &body[..close];
+        self.pos += 1 + close + 1;
+        if hex.is_empty() || hex.len() > 6 {
+            return None;
+        }
+        char::from_u32(u32::from_str_radix(hex, 16).ok()?)
+    }
+
+    /// E0005 for the escape starting at `start` (up to `pos`).
+    fn bad_escape(&mut self, start: usize, what: &str) {
+        self.diags.push(
+            Diagnostic::new(
+                "E0005",
+                "invalid escape sequence in a string",
+                Span::new(start, self.pos),
+            )
+            .label(what.to_string())
+            .help("valid escapes: \\n \\t \\r \\0 \\\" \\\\ \\{ \\} \\u{…}; use a raw string r\"…\" for backslashes"),
+        );
+    }
+
+    /// E0007 for every interpolation still open at the end of a line or of
+    /// the file: an interpolated expression must end on its line.
+    fn unclosed_interps(&mut self) {
+        while let Some(i) = self.interps.pop() {
+            self.depth = i.depth;
+            self.diags.push(
+                Diagnostic::new(
+                    "E0007",
+                    "unterminated interpolation in a string",
+                    Span::new(i.brace, i.brace + 1),
+                )
+                .label("this `{` is never closed")
+                .with(
+                    Span::new(i.string_start, i.string_start + 1),
+                    "in the string starting here",
+                )
+                .help("close it with `}` on the same line, or write `\\{` for a literal brace"),
+            );
+        }
+    }
+
     /// Identifier or keyword: a letter or `_`, then letters, digits, `_`.
     fn ident(&mut self) {
         let start = self.pos;
@@ -435,14 +679,13 @@ impl Lexer<'_> {
         }
         let text = &self.src[start..self.pos];
         // `r"..."` and `re"..."` are string-like literals, not names.
-        if self.peek() == Some('"') && (text == "r" || text == "re") {
+        if self.peek() == Some('"') && text == "r" {
             self.pos = start;
-            let what = if text == "r" {
-                "raw string literals"
-            } else {
-                "regex literals"
-            };
-            return self.quoted(text.len(), '"', what);
+            return self.string(2, true);
+        }
+        if self.peek() == Some('"') && text == "re" {
+            self.pos = start;
+            return self.quoted(text.len(), '"', "regex literals");
         }
         let kind = match Keyword::lookup(text) {
             Some(k) => TokenKind::Kw(k),
@@ -718,8 +961,25 @@ mod tests {
         assert_eq!(codes("9223372036854775807"), Vec::<&str>::new());
         assert_eq!(codes("a:\n    b\n  c"), ["E0003"]);
         assert_eq!(codes("a:\n\tb"), ["E0006"]);
-        assert_eq!(codes("\"hi\" `ls` r\"x\" re\"y\" a =~ b"), ["E0009"; 5]);
+        assert_eq!(codes("`ls` re\"y\" a =~ b !~ c"), ["E0009"; 4]);
+        assert!(codes("\"hi {x}\" r\"\\d{2}\"").is_empty());
+        assert_eq!(codes("\"abc"), ["E0004"]);
+        assert_eq!(codes("r\"abc\nx"), ["E0004"]);
+        assert_eq!(codes("\"a\\qb\" \"\\u{110000}\" \"\\u{}\""), ["E0005"; 3]);
+        assert_eq!(codes("\"a {x\nb"), ["E0007"]);
+        assert_eq!(codes("\"a {x"), ["E0007"]);
+        assert_eq!(codes("\"a {} b { } c\""), ["E0008"; 2]);
         assert_eq!(codes("007 1__0 12ab 0x"), ["E0010"; 4]);
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__lexer__tests__strings.snap
+    #[test]
+    fn strings() {
+        // Escapes, a raw string, an interpolation holding a nested string
+        // with its own interpolation, and a dict-like `{…}` inside one.
+        insta::assert_snapshot!(lex_dump(
+            "\"a\\t\\\"b\\u{e9} \\{x\\}\"\nr\"\\d{2}\"\n\"{n + 1} and {\"in{m}\"}!\"\n\"{ f({1: 2}) }\""
+        ));
     }
 
     // Property tests: random inputs must never crash the lexer.

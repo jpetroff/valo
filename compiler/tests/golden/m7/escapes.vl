@@ -1,0 +1,5 @@
+print("tab:\there")
+print("two\nlines")
+print("quote: \" backslash: \\")
+print("unicode: \u{e9}\u{1F600}")
+print("cr-free: a\rb" == "cr-free: a\u{d}b")
