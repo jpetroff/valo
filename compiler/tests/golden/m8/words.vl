@@ -1,0 +1,7 @@
+# Count the words of a file: lines, then split on spaces.
+let text = read_file("text.txt")?
+let counts = lines(text)
+    |> filter(l => l != "")
+    |> map(l => len(split(l, " ")))
+print(counts)
+print(reduce(counts, 0, (a, b) => a + b))

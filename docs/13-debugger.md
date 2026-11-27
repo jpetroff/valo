@@ -288,6 +288,13 @@ Values are shown as they would appear inside other values: strings quoted
 stops at an unhandled `Err` (R0601), the exception text adds the `Err`'s
 context messages and origin.
 
+Lists (M8) can be expanded: a non-empty list gets a `variablesReference`
+of its own (`LIST_REF_BASE + k`, valid until the program resumes), whose
+children are its elements `[0]`, `[1]`, …. When a callback of `map` (or
+another built-in) is running, the Call Stack shows a grey `<native map>`
+label between the callback and its caller (`VmView::natives_called_by`),
+like the `<native map>` line of a `valo run` stack trace.
+
 *Closure* (M6) lists what a lambda or local fn captured: the values in
 `Closure::captures`, named by `Proto::upvals` (the compiler stores each
 captured binding's name next to where `CLOSURE` takes it from). The scope

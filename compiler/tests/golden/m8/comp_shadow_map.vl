@@ -1,0 +1,7 @@
+# Rebinding map, filter and contains does not change comprehensions or `in`.
+let map = (xs, f) => "my map"
+let filter = 0
+let contains = none
+print(map([1], x => x))
+print([x * 10 for x in [1, 2, 3] if x != 2])
+print(2 in [1, 2])

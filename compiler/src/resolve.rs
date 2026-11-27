@@ -58,8 +58,8 @@
 //!   as a value, E0207 defined twice, E0402/E0403 bad type, E0421 defaulted
 //!   parameter passed by position, E0422 keyword arguments to an unknown
 //!   callee, E0424 unknown keyword / required parameter passed by name,
-//!   E0425 keyword given twice, E0204 local fn uses a later local fn, E0301
-//!   more than 255 captures.
+//!   E0425 keyword given twice, E0204 local fn uses a later local fn, E0208
+//!   `?` inside a comprehension (M8), E0301 more than 255 captures.
 //! - **Keyword arguments** (S19, plan D28): for a call to a known signature,
 //!   `plan_call` records which argument fills each parameter
 //!   (`Resolved::calls`, a `CallPlan`); omitted defaulted parameters become
@@ -94,8 +94,8 @@ use std::fmt::Write as _;
 use valo_vm::builtins::NATIVES;
 
 use crate::ast::{
-    Arg, Binding, Expr, ExprKind, FnDef, Item, Lambda, NodeId, Param, Program, StrPart, TypeExpr,
-    TypeKind,
+    Arg, Binding, Expr, ExprKind, FnDef, Item, Lambda, LambdaOrigin, NodeId, Param, Program,
+    StrPart, TypeExpr, TypeKind,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceMap, Span};
@@ -319,6 +319,9 @@ struct FnScope {
     captures: Vec<Capture>,
     /// For a local fn: its own name and binding (`Res::SelfRef`).
     self_name: Option<(String, BindingId)>,
+    /// A step of a list comprehension (M8): a `?` directly inside would
+    /// only leave this hidden lambda, so it is E0208.
+    comprehension: bool,
 }
 
 /// Key of a known signature: a global slot or a local binding.
@@ -639,7 +642,10 @@ impl Resolver {
             top_len: self.visible_lets(),
             type_params,
         });
-        self.funcs.push(FnScope::default());
+        self.funcs.push(FnScope {
+            comprehension: l.origin == LambdaOrigin::Comprehension,
+            ..FnScope::default()
+        });
         self.func().scopes.push(Scope::default());
         self.params(&l.params, "lambda");
         self.expr(&l.body);
@@ -707,7 +713,21 @@ impl Resolver {
             ExprKind::Call { callee, args, .. } => self.call(e, callee, args),
             ExprKind::Lambda(l) => self.lambda(e, l),
             ExprKind::Str(_) | ExprKind::None => {}
-            ExprKind::Try(x) => self.expr(x),
+            ExprKind::Try(x) => {
+                if self.func().comprehension {
+                    // The `?` is the last character of the node.
+                    let q = Span {
+                        start: e.span.end.saturating_sub(1),
+                        end: e.span.end,
+                    };
+                    self.diags.push(
+                        Diagnostic::new("E0208", "`?` inside a comprehension", q)
+                            .label("this would only leave the comprehension's hidden function, not the enclosing fn")
+                            .help("build the list of results first and check it afterwards (e.g. filter(rs, is_err)), or loop with a recursive fn, where `?` returns from that fn"),
+                    );
+                }
+                self.expr(x)
+            }
             ExprKind::Interp(parts) => {
                 for p in parts {
                     if let StrPart::Expr(x) = p {
@@ -715,7 +735,20 @@ impl Resolver {
                     }
                 }
             }
+            ExprKind::List(items) => {
+                for x in items {
+                    self.expr(x);
+                }
+            }
+            ExprKind::Index { base, index } => {
+                self.expr(base);
+                self.expr(index);
+            }
+            ExprKind::Builtin(_) => {}
             ExprKind::Pipe { .. } => unreachable!("pipes are removed by desugar.rs"),
+            ExprKind::In { .. } | ExprKind::Comprehension { .. } => {
+                unreachable!("removed by desugar.rs")
+            }
         }
     }
 
@@ -1436,6 +1469,38 @@ mod tests {
         assert_eq!(resolve_src("let count = 1\ncuont"), Err(vec!["E0201"]));
         assert_eq!(resolve_src("let _ = 1\n_ + 1"), Err(vec!["E0206"]));
         assert!(resolve_src("let _ = 1\nlet _ = 2").is_ok());
+    }
+
+    #[test]
+    fn comprehensions() {
+        // A `?` directly inside would only leave the hidden lambda.
+        assert_eq!(
+            resolve_src("[f(x)? for x in xs]")
+                .map(|_| ())
+                .unwrap_err()
+                .len(),
+            3
+        );
+        let codes = |src: &str| resolve_src(src).err().unwrap_or_default();
+        let pre = "fn f(x: int) -> int ! error = Ok(x)\nlet xs = [1]\n";
+        assert_eq!(codes(&format!("{pre}[f(x)? for x in xs]")), ["E0208"]);
+        assert_eq!(
+            codes(&format!("{pre}[x for x in xs if f(x)? > 0]")),
+            ["E0208"]
+        );
+        assert_eq!(
+            codes(&format!("{pre}[y for x in xs for y in [f(x)?]]")),
+            ["E0208"]
+        );
+        // The first list is evaluated outside the comprehension; a lambda
+        // written inside one has its own `?`.
+        assert!(codes(&format!("{pre}[x for x in Ok(xs)?]")).is_empty());
+        assert!(codes(&format!("{pre}[(y => f(y)?) for x in xs]")).is_empty());
+        // Loop variables are visible in later clauses and the element only.
+        assert_eq!(codes("[x for x in [1]]\nx"), ["E0201"]);
+        assert!(codes("[x + y for x in [1] for y in [x] if y > x]").is_empty());
+        // A user `map` does not change what a comprehension calls.
+        assert!(codes("let map = 1\n[x for x in [1]]").is_empty());
     }
 
     #[test]

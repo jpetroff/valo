@@ -1,0 +1,9 @@
+[E0208] Error: `?` inside a comprehension
+   ╭─[ comp_try.vl:5:58 ]
+   │
+ 5 │ fn all(xs: list[str]) -> list[int] ! error = Ok([parse(s)? for s in xs])
+   │                                                          ┬  
+   │                                                          ╰── this would only leave the comprehension's hidden function, not the enclosing fn
+   │ 
+   │ Help: build the list of results first and check it afterwards (e.g. filter(rs, is_err)), or loop with a recursive fn, where `?` returns from that fn
+───╯

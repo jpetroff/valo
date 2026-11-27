@@ -1,0 +1,6 @@
+# An error inside a callback: the trace shows the lambda, the built-in
+# that called it, and the caller.
+fn halve_all(xs: list[int]) -> list[int] =
+    map(xs, x => 10 // x)
+print(halve_all([1, 2]))
+print(halve_all([5, 0]))

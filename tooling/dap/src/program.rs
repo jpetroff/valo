@@ -30,7 +30,7 @@
 //! | I want to…                               | Look at                                        |
 //! |------------------------------------------|------------------------------------------------|
 //! | a new thing to ask a paused program       | a `Command` variant + an arm in `DapHook::wait` |
-//! | how values look in the Variables view     | `variable_json`                                 |
+//! | how values look in the Variables view     | `DapHook::variable_json` (lists expand: `list_items`) |
 //! | a new reason to stop                      | `DapHook::on_line`, `DapHook::on_error`         |
 //! | what the exception widget says            | `DapHook::exception`                            |
 //! | how stepping decides where to stop        | `Step`, `DapHook::step_done`                    |
@@ -112,6 +112,14 @@ pub fn locals_ref(frame: usize) -> i64 {
 pub fn captures_ref(frame: usize) -> i64 {
     3 + 2 * frame as i64
 }
+
+/// First `variablesReference` of an expandable list (M8); far above the
+/// scope references (`locals_ref` of frame 200 000 is about 400 000).
+pub const LIST_REF_BASE: i64 = 1 << 30;
+
+/// First stack-frame id of the `<native map>` label frames (M8); odd, so
+/// `scopes` treats them like the other label frames (no scopes).
+const NATIVE_FRAME_ID_BASE: i64 = (1 << 30) + 1;
 
 /// The three DAP steps. All of them stop at a *line start*
 /// (`valo_vm::debug`); they differ in which call depths count.
@@ -215,6 +223,7 @@ pub fn run_program(
         cmds,
         first_line: true,
         step: None,
+        expandable: Vec::new(),
     };
     let mut host = DapHost::new(Arc::clone(out));
     let mut vm = Vm::new(&mut host, VmOptions::default());
@@ -249,6 +258,9 @@ struct DapHook<'a> {
     first_line: bool,
     /// The step in progress, if any.
     step: Option<Step>,
+    /// Lists shown in the Variables view during this stop (M8): list `k`
+    /// has `variablesReference` `LIST_REF_BASE + k`. Cleared on resume.
+    expandable: Vec<VmValue>,
 }
 
 impl DebugHook for DapHook<'_> {
@@ -373,6 +385,14 @@ impl DapHook<'_> {
 
     /// Stopped: serve the session until it lets the program go on.
     fn wait(&mut self, vm: &VmView<'_>) -> Resume {
+        let resume = self.serve(vm);
+        // Variable references are only valid while stopped.
+        self.expandable.clear();
+        resume
+    }
+
+    /// The command loop of `wait`.
+    fn serve(&mut self, vm: &VmView<'_>) -> Resume {
         loop {
             match self.cmds.recv() {
                 Ok(Command::Continue) => return Resume::Continue,
@@ -386,11 +406,12 @@ impl DapHook<'_> {
                 Ok(Command::Variables { reference, reply }) => {
                     let vars = match usize::try_from(reference - locals_ref(0)) {
                         _ if reference == GLOBALS_REF => vm.globals(),
+                        _ if reference >= LIST_REF_BASE => self.list_items(reference),
                         Ok(k) if k % 2 == 0 => vm.locals(k / 2),
                         Ok(k) => vm.captures(k / 2),
                         Err(_) => Vec::new(),
                     };
-                    let vars: Vec<Value> = vars.iter().map(variable_json).collect();
+                    let vars: Vec<Value> = vars.iter().map(|v| self.variable_json(v)).collect();
                     let _ = reply.send(json!({ "variables": vars }));
                 }
                 Ok(Command::Evaluate { frame, name, reply }) => {
@@ -402,8 +423,8 @@ impl DapHook<'_> {
                         .chain(vm.globals())
                         .find(|v| *v.name == *name)
                         .map(|v| {
-                            let j = variable_json(&v);
-                            json!({ "result": j["value"], "type": j["type"], "variablesReference": 0 })
+                            let j = self.variable_json(&v);
+                            json!({ "result": j["value"], "type": j["type"], "variablesReference": j["variablesReference"] })
                         });
                     let _ = reply.send(found);
                 }
@@ -432,8 +453,24 @@ impl DapHook<'_> {
         };
         let mut shown = Vec::new();
         let mut total = 0;
+        let mut natives = 0;
         for i in 0..vm.depth() {
             let Some(f) = vm.frame(i) else { break };
+            // Built-ins between a callback and its caller (M8), as grey
+            // labels like `valo run`'s `<native map>` trace lines.
+            for name in vm.natives_called_by(i) {
+                total += 1;
+                if shown.len() < want {
+                    shown.push(json!({
+                        "id": NATIVE_FRAME_ID_BASE + 2 * natives,
+                        "name": &*name,
+                        "line": 0,
+                        "column": 0,
+                        "presentationHint": "label",
+                    }));
+                }
+                natives += 1;
+            }
             total += 1 + usize::from(f.tail_calls > 0);
             if shown.len() >= want {
                 continue; // only counting now (deep recursion: 200 000 frames)
@@ -462,22 +499,47 @@ impl DapHook<'_> {
     }
 }
 
-/// A DAP `Variable`: name, value as `print` shows it, type name. Values
-/// have no children yet; lists and dicts (M8) will get a
-/// `variablesReference` so the UI can expand them.
-fn variable_json(v: &Variable) -> Value {
-    let value = match &v.value {
-        // An omitted parameter whose default the prologue has not computed.
-        VmValue::Missing => "(default not computed yet)".to_string(),
-        // Strings quoted (`"hi"`), as inside other values (M7).
-        other => other.repr(),
-    };
-    json!({
-        "name": &*v.name,
-        "value": value,
-        "type": v.value.type_name(),
-        "variablesReference": 0,
-    })
+impl DapHook<'_> {
+    /// A DAP `Variable`: name, value as `print` shows it, type name. A
+    /// non-empty list gets a `variablesReference`, so the UI can expand it
+    /// into its elements (M8).
+    fn variable_json(&mut self, v: &Variable) -> Value {
+        let value = match &v.value {
+            // An omitted parameter whose default the prologue has not computed.
+            VmValue::Missing => "(default not computed yet)".to_string(),
+            // Strings quoted (`"hi"`), as inside other values (M7).
+            other => other.repr(),
+        };
+        let reference = match &v.value {
+            VmValue::List(xs) if !xs.is_empty() => {
+                self.expandable.push(v.value.clone());
+                LIST_REF_BASE + self.expandable.len() as i64 - 1
+            }
+            _ => 0,
+        };
+        json!({
+            "name": &*v.name,
+            "value": value,
+            "type": v.value.type_name(),
+            "variablesReference": reference,
+        })
+    }
+
+    /// The elements of an expandable list, named `[0]`, `[1]`, …
+    fn list_items(&self, reference: i64) -> Vec<Variable> {
+        let k = usize::try_from(reference - LIST_REF_BASE).unwrap_or(usize::MAX);
+        match self.expandable.get(k) {
+            Some(VmValue::List(xs)) => xs
+                .iter()
+                .enumerate()
+                .map(|(i, x)| Variable {
+                    name: format!("[{i}]").into(),
+                    value: x.clone(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

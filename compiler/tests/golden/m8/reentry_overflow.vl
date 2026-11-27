@@ -1,0 +1,3 @@
+# A callback that calls map on itself recurses through the built-in.
+fn deep(x: int) -> list[int] = flat_map([x], deep)
+print(deep(1))

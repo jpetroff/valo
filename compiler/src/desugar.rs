@@ -2,8 +2,8 @@
 //!
 //! **What this file is:** a small pass that rewrites convenience syntax into
 //! the core forms the later passes understand, so name resolution and code
-//! generation never see it: the pipe (plan D24) and `_` partial application
-//! (plan D6, M6).
+//! generation never see it: the pipe (plan D24), `_` partial application
+//! (plan D6, M6), membership `x in xs` and list comprehensions (D27, M8).
 //!
 //! ```text
 //! x |> f(a, b)   →   f(x, a, b)     the value becomes the FIRST argument
@@ -14,7 +14,15 @@
 //!                      let $a0 = a                arguments are evaluated
 //!                      let $a1 = b                once, in source order,
 //!                      ($p0) => f($a0, $p0, k=$a1)   when the partial is built
+//!
+//! x in xs        →   contains(xs, x)    x evaluated first; `not in` → not(…)
+//! [e for x in xs if c]  →  map(filter(xs, x => c), x => e)
+//! [e for x in xs for y in ys]  →  flat_map(xs, x => map(ys, y => e))
 //! ```
+//!
+//! `contains`, `map`, `filter` and `flat_map` are referenced as built-ins by
+//! id (`ExprKind::Builtin`), not by name, so a user `let map = …` cannot
+//! change what a comprehension does.
 //!
 //! A piped `Call` records the index of the piped argument (`piped`), which
 //! tells code generation to evaluate it before the callee (Q17), and keeps
@@ -36,7 +44,8 @@
 //!
 //! | I want to…                                   | Look at                     |
 //! |----------------------------------------------|-----------------------------|
-//! | rewrite another construct (comprehensions, M8) | `Desugar::expr`, after the children are rewritten |
+//! | rewrite another construct                    | `Desugar::expr`, after the children are rewritten |
+//! | change the comprehension / `in` rewrite      | `Desugar::comprehension`, `Desugar::membership` |
 //! | change the pipe rewrite                      | `Desugar::pipe`             |
 //! | change the partial rewrite                   | `Desugar::partial`          |
 //! | visit a new expression kind                  | `Desugar::children`         |
@@ -46,7 +55,12 @@
 //! - `&mut` traversal that edits the tree in place (*Ownership and borrowing*).
 //! - `std::mem::replace` to move a value out of a `&mut` place (*Ownership and borrowing*).
 
-use crate::ast::{Arg, Binding, Expr, ExprKind, Item, Lambda, NodeId, Param, Program, StrPart};
+use valo_vm::builtins::native_id;
+
+use crate::ast::{
+    Arg, Binding, Clause, Expr, ExprKind, Item, Lambda, LambdaOrigin, NodeId, Param, Program,
+    StrPart,
+};
 use crate::span::Span;
 
 /// Rewrite every pipe in `program` into a call, and every `_` partial into
@@ -110,11 +124,116 @@ impl Desugar {
             return self.pipe(e);
         }
         self.children(e);
-        if let ExprKind::Call { args, .. } = &e.kind {
-            if has_placeholder(args) {
-                self.partial(e);
+        match &e.kind {
+            ExprKind::Call { args, .. } if has_placeholder(args) => self.partial(e),
+            ExprKind::In { .. } => self.membership(e),
+            ExprKind::Comprehension { .. } => self.comprehension(e),
+            _ => {}
+        }
+    }
+
+    /// A call of the built-in `name` (by id, D14) with positional `args`.
+    fn builtin_call(
+        &mut self,
+        span: Span,
+        name: &str,
+        args: Vec<Expr>,
+        piped: Option<usize>,
+    ) -> ExprKind {
+        let id = native_id(name).unwrap_or_else(|| panic!("built-in `{name}` exists"));
+        ExprKind::Call {
+            callee: Box::new(self.node(span, ExprKind::Builtin(id.0))),
+            args: args.into_iter().map(Arg::Positional).collect(),
+            piped,
+        }
+    }
+
+    /// `x in xs` → `contains(xs, x)`, with `x` evaluated first (Python
+    /// order; the `piped` mechanism of Q17); `not in` → `not contains(…)`.
+    fn membership(&mut self, e: &mut Expr) {
+        let ExprKind::In {
+            item,
+            coll,
+            negated,
+            ..
+        } = std::mem::replace(&mut e.kind, ExprKind::Unit)
+        else {
+            unreachable!("checked by the caller");
+        };
+        let call = self.builtin_call(e.span, "contains", vec![*coll, *item], Some(1));
+        e.kind = if negated {
+            ExprKind::Not(Box::new(self.node(e.span, call)))
+        } else {
+            call
+        };
+    }
+
+    /// A list comprehension (S15, D27), built from the innermost clause out:
+    ///
+    /// ```text
+    /// [e for x in xs]                 →  map(xs, x => e)
+    /// [e for x in xs if c]            →  map(filter(xs, x => c), x => e)
+    /// [e for x in xs for y in ys]     →  flat_map(xs, x => map(ys, y => e))
+    /// ```
+    ///
+    /// Every loop variable is a lambda parameter (a fresh binding per
+    /// element); the lambdas are named `<comprehension@l:c>`.
+    fn comprehension(&mut self, e: &mut Expr) {
+        let span = e.span;
+        let ExprKind::Comprehension { elem, clauses } =
+            std::mem::replace(&mut e.kind, ExprKind::Unit)
+        else {
+            unreachable!("checked by the caller");
+        };
+        // One group per `for`: (variable, its span, list, `if` conditions).
+        let mut groups: Vec<(String, Span, Expr, Vec<Expr>)> = Vec::new();
+        for c in clauses {
+            match c {
+                Clause::For {
+                    var,
+                    var_span,
+                    iter,
+                } => groups.push((var, var_span, iter, Vec::new())),
+                Clause::If(cond) => match groups.last_mut() {
+                    Some(g) => g.3.push(cond),
+                    None => unreachable!("the parser starts with a `for` clause"),
+                },
             }
         }
+        let mut body = *elem;
+        let last = groups.len().saturating_sub(1);
+        for (i, (var, var_span, iter, conds)) in groups.into_iter().enumerate().rev() {
+            let mut list = iter;
+            for cond in conds {
+                let pred = self.comp_lambda(span, &var, var_span, cond);
+                let kind = self.builtin_call(span, "filter", vec![list, pred], None);
+                list = self.node(span, kind);
+            }
+            let f = self.comp_lambda(span, &var, var_span, body);
+            let name = if i == last { "map" } else { "flat_map" };
+            let kind = self.builtin_call(span, name, vec![list, f], None);
+            body = self.node(span, kind);
+        }
+        e.kind = body.kind;
+    }
+
+    /// `var => body`, a comprehension step.
+    fn comp_lambda(&mut self, span: Span, var: &str, var_span: Span, body: Expr) -> Expr {
+        let param = Param {
+            id: self.id(),
+            name: var.to_string(),
+            span: var_span,
+            ann: None,
+            default: None,
+        };
+        self.node(
+            span,
+            ExprKind::Lambda(Box::new(Lambda {
+                params: vec![param],
+                body,
+                origin: LambdaOrigin::Comprehension,
+            })),
+        )
     }
 
     /// `lhs |> rhs` → a call (D24).
@@ -285,7 +404,7 @@ impl Desugar {
         let lambda = ExprKind::Lambda(Box::new(Lambda {
             params,
             body: call,
-            partial_of: Some(partial_of),
+            origin: LambdaOrigin::Partial(partial_of),
         }));
         if lets.is_empty() {
             e.kind = lambda;
@@ -349,6 +468,29 @@ impl Desugar {
             ExprKind::Lambda(l) => self.expr(&mut l.body),
             ExprKind::Str(_) | ExprKind::None => {}
             ExprKind::Try(x) => self.expr(x),
+            ExprKind::List(items) => {
+                for x in items {
+                    self.expr(x);
+                }
+            }
+            ExprKind::Index { base, index } => {
+                self.expr(base);
+                self.expr(index);
+            }
+            ExprKind::In { item, coll, .. } => {
+                self.expr(item);
+                self.expr(coll);
+            }
+            ExprKind::Comprehension { elem, clauses } => {
+                self.expr(elem);
+                for c in clauses {
+                    match c {
+                        Clause::For { iter, .. } => self.expr(iter),
+                        Clause::If(cond) => self.expr(cond),
+                    }
+                }
+            }
+            ExprKind::Builtin(_) => {}
             ExprKind::Interp(parts) => {
                 for p in parts {
                     if let StrPart::Expr(x) = p {
@@ -402,6 +544,34 @@ mod tests {
         assert_eq!(
             desugared("h(f(_, 1))"),
             "(expr (call h (block (let $a0 1) (expr (lambda partial:f (($p0)) (call f $p0 $a0))))))\n"
+        );
+    }
+
+    #[test]
+    fn membership_and_comprehensions() {
+        // `x` is evaluated first (the piped slot), as in Python.
+        assert_eq!(
+            desugared("x in xs"),
+            "(expr (pcall (builtin contains) xs x))\n"
+        );
+        assert_eq!(
+            desugared("x not in xs"),
+            "(expr (not (pcall (builtin contains) xs x)))\n"
+        );
+        assert_eq!(
+            desugared("[x * 2 for x in xs if x > 0]"),
+            "(expr (call (builtin map) (call (builtin filter) xs (lambda comp ((x)) (> x 0))) \
+             (lambda comp ((x)) (* x 2))))\n"
+        );
+        assert_eq!(
+            desugared("[x + y for x in a for y in b if y != x]"),
+            "(expr (call (builtin flat_map) a (lambda comp ((x)) (call (builtin map) \
+             (call (builtin filter) b (lambda comp ((y)) (!= y x))) (lambda comp ((y)) (+ x y))))))\n"
+        );
+        // Pipes inside are rewritten too.
+        assert_eq!(
+            desugared("[x |> f for x in xs |> g]"),
+            "(expr (call (builtin map) (pcall g xs) (lambda comp ((x)) (pcall f x))))\n"
         );
     }
 

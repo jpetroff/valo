@@ -53,7 +53,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use crate::chunk::{Program, Proto, SrcSpan};
+use crate::builtins::NATIVES;
+use crate::chunk::{NativeId, Program, Proto, SrcSpan};
 use crate::error::RuntimeError;
 use crate::value::Value;
 use crate::vm::Frame;
@@ -93,6 +94,8 @@ pub struct VmView<'a> {
     pub(crate) globals: &'a [Option<Value>],
     pub(crate) global_names: &'a [Rc<str>],
     pub(crate) global_builtin: &'a [bool],
+    /// Built-ins running right now (`Vm::native_marks`, M8).
+    pub(crate) native_marks: &'a [(NativeId, usize)],
     /// Called from `on_error`: the innermost frame's `pc` is already past
     /// the failing instruction.
     pub(crate) at_error: bool,
@@ -199,6 +202,29 @@ impl VmView<'_> {
             .map(|(u, v)| Variable {
                 name: Rc::clone(&u.name),
                 value: v.clone(),
+            })
+            .collect()
+    }
+
+    /// The built-ins that frame `i` (innermost first) called and that are
+    /// running a callback in the frames above it, innermost first, named
+    /// as in stack traces: `<native map>` (M8). A debugger shows them
+    /// between the callback's frames and frame `i`.
+    pub fn natives_called_by(&self, i: usize) -> Vec<Rc<str>> {
+        let n = self.frames.len();
+        if i == 0 || i >= n {
+            return Vec::new();
+        }
+        // Frame i innermost-first is frames[n-1-i]; it called the built-ins
+        // marked with depth n-i.
+        let depth = n - i;
+        self.native_marks
+            .iter()
+            .rev()
+            .filter(|m| m.1 == depth)
+            .map(|m| {
+                let name = NATIVES.get(m.0.0 as usize).map_or("?", |d| d.name);
+                Rc::from(format!("<native {name}>"))
             })
             .collect()
     }

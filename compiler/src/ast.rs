@@ -10,7 +10,7 @@
 //!
 //! **Textbook chapter:** `docs/04-syntax-analysis.md`.
 //!
-//! ## Structure (M7)
+//! ## Structure (M8)
 //!
 //! ```text
 //! Program { items: Vec<Item> }
@@ -34,10 +34,14 @@
 //!         ::Call { callee, args: Vec<Arg>, piped }   `f(a, k=b)`
 //!         ::Pipe { lhs, rhs }                        `x |> f(a)`; rewritten to a
 //!                                                    `Call` by `desugar.rs`
-//!         ::Lambda(Lambda{params, body, partial_of}) `x => e`, `(a, b) => e` (M6)
+//!         ::Lambda(Lambda{params, body, origin})     `x => e`, `(a, b) => e` (M6)
 //!         ::Str(String)                              `"text"` (M7)
 //!         ::Interp(Vec<StrPart>)                     `"a {x} b"`: Text / Expr parts (M7)
 //!         ::None | Try(expr)                         `none`, postfix `e?` (M7)
+//!         ::List(Vec<Expr>) | Index { base, index }  `[a, b]`, `xs[i]` (M8)
+//!         ::In { item, coll, negated }               `x in xs`, `x not in xs` (M8)
+//!         ::Comprehension { elem, clauses }          `[e for x in xs if c]` (M8)
+//!         ::Builtin(id)                              a built-in by id (desugar only)
 //! Arg::Positional(Expr) | Keyword { name, value } | Placeholder (`_`, M6)
 //! TypeExpr { span, kind: TypeKind }      annotations (checked from M10)
 //! ```
@@ -154,10 +158,37 @@ pub struct Lambda {
     pub params: Vec<Param>,
     /// Body; its value is the result.
     pub body: Expr,
-    /// Set by `desugar.rs` when the lambda is a `_` partial of the named
-    /// function (or `<expr>`); code generation names it `<partial f@l:c>`
-    /// (plan D23). `None` for lambdas written in the source.
-    pub partial_of: Option<String>,
+    /// Written in the source, or made by `desugar.rs` (decides its display
+    /// name, plan D23).
+    pub origin: LambdaOrigin,
+}
+
+/// Where a lambda comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LambdaOrigin {
+    /// Written in the source: named after its `let`, else `<lambda@l:c>`.
+    Source,
+    /// A `_` partial of the named function (or `<expr>`): `<partial f@l:c>`.
+    Partial(String),
+    /// A step of a list comprehension (M8): `<comprehension@l:c>`. A `?`
+    /// directly inside one is E0208.
+    Comprehension,
+}
+
+/// One clause of a list comprehension (S15).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Clause {
+    /// `for var in iter`.
+    For {
+        /// Loop variable (`_` allowed).
+        var: String,
+        /// Its span.
+        var_span: Span,
+        /// The list iterated over.
+        iter: Expr,
+    },
+    /// `if cond`: keep only elements for which `cond` is true.
+    If(Expr),
 }
 
 /// `let name (: type)? = init`.
@@ -296,6 +327,39 @@ pub enum ExprKind {
         /// A call (the value becomes its first argument) or any function.
         rhs: Box<Expr>,
     },
+    /// A list literal `[a, b, c]` (S14, M8).
+    List(Vec<Expr>),
+    /// `base[index]` (S14, M8).
+    Index {
+        /// The indexed value.
+        base: Box<Expr>,
+        /// The index.
+        index: Box<Expr>,
+    },
+    /// `item in coll` / `item not in coll` (S14, M8); `desugar.rs` turns it
+    /// into a call of the `contains` built-in.
+    In {
+        /// Span of `in` (or `not in`).
+        op_span: Span,
+        /// The value looked for (evaluated first).
+        item: Box<Expr>,
+        /// The list or str searched.
+        coll: Box<Expr>,
+        /// `not in`.
+        negated: bool,
+    },
+    /// `[elem for x in xs if c …]` (S15, M8); `desugar.rs` turns it into
+    /// `map`/`filter`/`flat_map` calls. The first clause is a `For`.
+    Comprehension {
+        /// The element expression.
+        elem: Box<Expr>,
+        /// Clauses in source order.
+        clauses: Vec<Clause>,
+    },
+    /// The built-in `NATIVES[id]`, whatever its name is bound to (only made
+    /// by `desugar.rs`, so user code that shadows `map` cannot break a
+    /// comprehension; plan D14).
+    Builtin(u16),
     /// Prefix operator.
     Unary {
         /// Operator.
@@ -457,8 +521,10 @@ impl fmt::Display for Expr {
             }
             ExprKind::Lambda(l) => {
                 f.write_str("(lambda ")?;
-                if let Some(n) = &l.partial_of {
-                    write!(f, "partial:{n} ")?;
+                match &l.origin {
+                    LambdaOrigin::Source => {}
+                    LambdaOrigin::Partial(n) => write!(f, "partial:{n} ")?,
+                    LambdaOrigin::Comprehension => f.write_str("comp ")?,
                 }
                 f.write_str("(")?;
                 for (i, p) in l.params.iter().enumerate() {
@@ -507,6 +573,40 @@ impl fmt::Display for Expr {
                 operand,
             } => write!(f, "(neg {operand})"),
             ExprKind::Binary { op, lhs, rhs, .. } => write!(f, "({} {lhs} {rhs})", op.as_str()),
+            ExprKind::List(items) => {
+                f.write_str("(list")?;
+                for i in items {
+                    write!(f, " {i}")?;
+                }
+                f.write_str(")")
+            }
+            ExprKind::Index { base, index } => write!(f, "(index {base} {index})"),
+            ExprKind::In {
+                item,
+                coll,
+                negated,
+                ..
+            } => write!(
+                f,
+                "({} {item} {coll})",
+                if *negated { "not-in" } else { "in" }
+            ),
+            ExprKind::Comprehension { elem, clauses } => {
+                write!(f, "(comp {elem}")?;
+                for c in clauses {
+                    match c {
+                        Clause::For { var, iter, .. } => write!(f, " (for {var} {iter})")?,
+                        Clause::If(cond) => write!(f, " (if {cond})")?,
+                    }
+                }
+                f.write_str(")")
+            }
+            ExprKind::Builtin(id) => {
+                let name = valo_vm::builtins::NATIVES
+                    .get(*id as usize)
+                    .map_or("?", |n| n.name);
+                write!(f, "(builtin {name})")
+            }
         }
     }
 }

@@ -33,6 +33,7 @@
 use std::fmt::Write as _;
 
 use ariadne::{Config, IndexType, Label, Report, ReportKind, Source};
+use valo_vm::chunk::SrcSpan;
 use valo_vm::error::{ErrorKind, RuntimeError};
 
 use crate::span::{SourceMap, Span};
@@ -147,6 +148,41 @@ fn clamp(sm: &SourceMap, s: Span) -> Span {
     }
 }
 
+/// The source text of the indexed value of the index expression at `span`
+/// (`rows[1]` for `rows[1][i + 1]`): the text without its final `[…]`,
+/// found by scanning back to the matching `[`. A base written over several
+/// lines is joined with single spaces. `None` if the text does not have that shape.
+fn access_base(sm: &SourceMap, span: SrcSpan) -> Option<String> {
+    let text = sm.text.get(span.start as usize..span.end as usize)?;
+    let bytes = text.as_bytes();
+    if bytes.last() != Some(&b']') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut open = None;
+    for (i, &b) in bytes.iter().enumerate().rev() {
+        match b {
+            b']' => depth += 1,
+            b'[' => {
+                depth -= 1;
+                if depth == 0 {
+                    open = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let base = text[..open?].trim_end();
+    if base.is_empty() {
+        return None;
+    }
+    if base.contains('\n') {
+        return Some(base.split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+    Some(base.to_string())
+}
+
 /// Innermost stack-trace entries shown for a long trace.
 const TRACE_HEAD: usize = 10;
 /// Outermost stack-trace entries shown for a long trace.
@@ -169,7 +205,15 @@ const TRACE_TAIL: usize = 5;
 /// A failed `assert` quotes its source text: the VM has no source, but the
 /// span of the `ASSERT` instruction is the asserted expression.
 pub fn render_runtime(sm: &SourceMap, err: &RuntimeError) -> String {
-    let mut out = format!("error[{}]: {}", err.kind.code(), err.message);
+    let message = match (&err.access, err.primary_span()) {
+        // R0401 (M8): name the access path, `rows[1][3]: …`.
+        (Some(a), Some(span)) => match access_base(sm, span) {
+            Some(base) => format!("{base}[{}]: index out of range (len {})", a.index, a.len),
+            None => err.message.clone(),
+        },
+        _ => err.message.clone(),
+    };
+    let mut out = format!("error[{}]: {message}", err.kind.code());
     if let (ErrorKind::AssertionFailed, Some(span)) = (err.kind, err.primary_span()) {
         let s = clamp(sm, Span::new(span.start as usize, span.end as usize));
         let _ = write!(out, ": {}", &sm.text[s.range()]);
@@ -226,6 +270,12 @@ pub fn render_runtime(sm: &SourceMap, err: &RuntimeError) -> String {
                 let _ = writeln!(out, "  {:iw$}  ... {omitted} frames omitted ...", "");
             }
             let t = &err.trace[i];
+            // A built-in running a callback (`<native map>`, M8) has no
+            // source position.
+            if t.native {
+                let _ = writeln!(out, "  {i:>iw$}: {}", t.fn_name);
+                continue;
+            }
             let (l, c) = sm.line_col(t.span.start);
             let _ = writeln!(
                 out,

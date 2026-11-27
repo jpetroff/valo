@@ -61,8 +61,10 @@ stack never copies it. Any value may be compared with `none` (`x == none`
 is how an optional is tested); results compare by content.
 Functions are values: `Closure` (compiled code plus captured values,
 M6) and `Native` (a built-in), both of type
-`function`, printed `<fn fact/1>` / `<native print/1>`. Later variants:
-strings, `none`, `Ok`/`Err` (M7), lists (M8). Heap values will be shared with
+`function`, printed `<fn fact/1>` / `<native print/1>`.
+`List(Rc<Vec<Value>>)` (M8) is printed `[1, "a"]` (elements in `repr`
+form); `+` joins two lists into a new one, `==` compares element by
+element. Heap values are shared with
 `Rc` — safe because valo values are immutable, and enough for memory
 management because immutable values in a strict language cannot form cycles
 (plan D3, feasibility report "reference counting, not a tracing GC").
@@ -291,6 +293,26 @@ R0208, unless `C = 1` (the lenient form after a top-level line), which
 lets it through. The `Err` built-in takes its origin from
 `Vm::current_site` — natives have no frame, so the innermost frame is the
 one that called `Err(…)`.
+
+**`NEWLIST A B C`** (M8) moves `R[B..B+C]` into a new list in `R[A]`;
+**`INDEX A B C`** reads `R[B][R[C]]` — a list and an int in `0..len`
+(no negative indices). Out of range is R0401, and the error carries the
+index and length in `RuntimeError::access` so the CLI can print
+`rows[1][3]: index out of range (len 2)`.
+
+**Built-ins that call back into valo** (M8, plan D7). `map(xs, f)` must
+run `f`, a closure, from inside Rust code. `Vm::call_value(f, args)` puts
+`f` and its arguments on top of the stack like a `CALL` window, pushes the
+frame with `reentry = true` and runs `execute` *again* — a nested dispatch
+loop — which returns when that frame's `RETURN` runs (`do_return` sees the
+flag). Tail calls inside the callback work as usual (the reused frame keeps
+the flag). Every running built-in is remembered in `Vm::native_marks`
+(its id and the frame depth when it was called), so `unwind` can put a
+`<native map>` line between the callback's frames and its caller. Each
+nesting level is a Rust recursion, so it is capped at `MAX_REENTRY` (200)
+→ R0301, and the CLI and the debugger run the VM on a thread with a 64 MiB
+stack (`VM_STACK_BYTES`). Arguments are owned: a list nothing else holds
+is consumed in place (`append` pushes onto it without copying).
 
 Globals start empty except the built-in slots: `run` fills them with
 `Value::Native(id)` from `GlobalDesc::kind` before `<main>` starts.

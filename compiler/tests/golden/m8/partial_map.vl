@@ -1,0 +1,6 @@
+# A `_` partial as the callback, and a partial of map itself.
+fn add(a: int, b: int) -> int = a + b
+print(map([1, 2, 3], add(10, _)))
+let double_all = map(_, x => x * 2)
+print(double_all([4, 5]))
+print([7, 8] |> double_all)

@@ -19,18 +19,18 @@ where a debugger is rarely available, so the error message *is* the debugger.
 Every error has a stable code, so tests, documentation and users can refer to
 it. Codes never change once a golden test uses them.
 
-| Range | Stage | Codes in use (M6) |
+| Range | Stage | Codes in use (M8) |
 |-------|-------|-------------------|
 | E00xx | lexer | E0001 unexpected character · E0002 int literal out of range · E0003 bad dedent · E0004 unterminated string · E0005 invalid escape · E0006 tab in indentation · E0007 unterminated interpolation · E0008 empty interpolation `{}` · E0009 not supported yet · E0010 malformed number |
 | E01xx | parser | E0101 unexpected token · E0102 `if` without `else` · E0103 unclosed `(` · E0104 block ends with a `let`/`fn` · E0105 nested too deeply |
-| E02xx | resolve | E0201 undefined name (+ did-you-mean) · E0203 top-level name used before its definition · E0204 a local fn uses a later local fn (local mutual recursion) · E0205 wrong number of arguments to a known fn · E0206 `_` used as a value · E0207 defined twice (fn, parameter, type variable) |
+| E02xx | resolve | E0201 undefined name (+ did-you-mean) · E0203 top-level name used before its definition · E0204 a local fn uses a later local fn (local mutual recursion) · E0205 wrong number of arguments to a known fn · E0206 `_` used as a value · E0207 defined twice (fn, parameter, type variable) · E0208 `?` inside a comprehension |
 | E03xx | codegen | E0301 too many registers / constants / captured variables |
 | E04xx | types | E0402 unknown type name · E0403 wrong number of type arguments · E0410 missing parameter or return annotation |
 | E042x | arguments | E0421 defaulted parameter passed by position · E0422 keyword arguments to a callee unknown at compile time · E0423 required parameter after a defaulted one · E0424 unknown keyword (+ did-you-mean), or a required parameter passed by name · E0425 keyword given twice |
 | R01xx | arithmetic | R0101 integer overflow · R0102 division/modulo by zero · R0103 float → int out of range · R0104 negative exponent |
 | R02xx | types | R0201 operand type mismatch (incl. int/float mixing, str + int) · R0202 not callable · R0203 condition not a bool · R0205 values cannot be ordered / functions compared · R0206 wrong argument type to a built-in · R0207 wrong number of arguments (callee unknown at compile time) · R0208 `?` on a value that is not a result (incl. `none`) |
-| R03xx | resources | R0301 stack overflow (more than 200 000 nested calls) · R0302 global read before it was set (a fn body may refer to a later top-level `let`) |
-| R04xx | data | R0402 `unwrap` of `none` · R0403 `unwrap` of an `Err` |
+| R03xx | resources | R0301 stack overflow (more than 200 000 nested calls, or 200 built-ins such as `map` calling back into each other) · R0302 global read before it was set (a fn body may refer to a later top-level `let`) |
+| R04xx | data | R0401 list index out of range · R0402 `unwrap` of `none` · R0403 `unwrap` of an `Err` |
 | R06xx | results | R0601 unhandled `Err` at the top level (context chain, origin, `?` sites) |
 | R07xx | assertions | R0701 assertion failed |
 | R08xx | interruption | R0801 run stopped from outside (the debugger's Stop; see chapter 13) |
@@ -105,7 +105,8 @@ File: [`vm/src/error.rs`](../vm/src/error.rs)
 ```rust
 pub enum ErrorKind { IntOverflow, DivisionByZero, FloatToInt, NegativeExponent,
                      TypeMismatch, NotCallable, ConditionNotBool, NotComparable,
-                     NativeArgType, WrongArgCount, NotResult, UnwrapNone, UnwrapErr,
+                     NativeArgType, WrongArgCount, NotResult, IndexOutOfRange,
+                     UnwrapNone, UnwrapErr,
                      StackOverflow, GlobalUninit, UnhandledErr, AssertionFailed,
                      Interrupted, HostIo, Internal } // .code() → "R0101", ...
 
@@ -115,8 +116,10 @@ pub struct RuntimeError {
     pub notes: Vec<String>,           // extra lines: "left: 4", "help: …"
     pub trace: Vec<TraceEntry>,       // innermost frame first
     pub trail: Option<Box<ErrTrail>>, // R0601: context chain, origin, `?` sites
+    pub access: Option<Box<Access>>,  // R0401: index and length (M8)
 }
-pub struct TraceEntry { pub fn_name: Rc<str>, pub span: SrcSpan, pub tail_calls: u32 }
+pub struct TraceEntry { pub fn_name: Rc<str>, pub span: SrcSpan, pub tail_calls: u32,
+                        pub native: bool }  // `<native map>`: no source position
 ```
 
 The VM creates the error at the failing instruction (`RuntimeError::new`);
@@ -204,6 +207,26 @@ only `<main>`, because the frames that produced the error have returned,
 but the `Err` carries its own path. `?` on something that is not a result
 (including `none`) is R0208; `unwrap` of `none` / of an `Err` is R0402 /
 R0403.
+
+**Callbacks and indices** (M8). When a built-in such as `map` runs your
+function and that function fails, the trace shows the built-in between the
+callback and its caller (it has no source position). An index error names
+the access path: `render_runtime` takes the source text of the failing
+`INDEX` (the whole `rows[r][c]`), drops its last `[…]` and appends the
+actual index from `RuntimeError::access`:
+
+```text
+error[R0102]: division by zero: 10 // 0
+  --> err_in_callback.vl:4:18
+stack trace (most recent call first):
+  0: <lambda@4:13> at err_in_callback.vl:4:18
+  1: <native map>
+  2: halve_all     at err_in_callback.vl:4:5
+  3: <main>        at err_in_callback.vl:6:7
+
+error[R0401]: rows[r][3]: index out of range (len 2)
+  --> index_oob.vl:3:34
+```
 
 M9 adds the source snippet (like compile errors) and unifies both header
 styles: compile errors currently use ariadne's `[E0101] Error:` header,

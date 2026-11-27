@@ -777,3 +777,45 @@ fn stack_overflow_stops_and_pages_its_frames() {
     assert_eq!(c.event("exited")["body"]["exitCode"], 1);
     c.disconnect();
 }
+
+/// M8: a callback run by `map` shows `<native map>` between it and its
+/// caller, and lists expand into their elements.
+#[test]
+fn callbacks_and_lists() {
+    let file = program(
+        "dap_lists.vl",
+        "let xs = [[1, 2], [3]]\nlet f = x =>\n    len(x)\nprint(map(xs, f))\n",
+    );
+    let mut c = Client::start();
+    assert_eq!(c.launch(&file)["success"], true);
+    c.breakpoints(&file, &[3]);
+    c.request("configurationDone", json!({}));
+    assert_eq!(
+        names(&c.stopped("breakpoint")),
+        [("f", 3), ("<native map>", 0), ("<main>", 4)]
+    );
+    // Globals: `xs` can be expanded, its elements too.
+    c.request("variables", json!({ "variablesReference": 1 }));
+    let globals = c.response("variables")["body"]["variables"].clone();
+    let xs = &globals[0];
+    assert_eq!(
+        (xs["name"].as_str(), xs["value"].as_str()),
+        (Some("xs"), Some("[[1, 2], [3]]"))
+    );
+    let xs_ref = xs["variablesReference"].as_i64().unwrap();
+    assert!(xs_ref > 0);
+    assert_eq!(
+        vars(&c.variables(xs_ref)),
+        [("[0]", "[1, 2]", "list"), ("[1]", "[3]", "list")]
+    );
+    // The lambda's parameter is the first element.
+    assert_eq!(c.evaluate("x", 0), Ok("[1, 2]".to_string()));
+    c.request("continue", json!({ "threadId": 1 }));
+    c.response("continue");
+    c.stopped("breakpoint");
+    c.breakpoints(&file, &[]);
+    c.resume();
+    assert_eq!(c.event("exited")["body"]["exitCode"], 0);
+    assert_eq!(c.output("stdout"), "[2, 1]\n");
+    c.disconnect();
+}

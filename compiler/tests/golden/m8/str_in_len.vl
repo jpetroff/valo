@@ -1,0 +1,7 @@
+# `in` on strings is a substring test; len counts characters.
+let line = "error: disk full"
+print("disk" in line)
+print("cpu" in line)
+print("" in line)
+print(len("héllo"))
+print(len([1, 2]))

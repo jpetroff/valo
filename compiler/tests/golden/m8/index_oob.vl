@@ -1,0 +1,5 @@
+# Index 3 of a 2-element list reached through a nested expression.
+let rows = [[1, 2, 3], [4, 5]]
+fn cell(r: int, c: int) -> int = rows[r][c]
+print(cell(0, 2))
+print(cell(1, 3))

@@ -97,8 +97,8 @@ use valo_vm::chunk::{
 use valo_vm::opcode::{Instr, MAX_SJ, MIN_SJ, OpCode};
 
 use crate::ast::{
-    self, Arg, BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, Item, Lambda, LogicOp, NodeId,
-    Param, StrPart, UnaryOp,
+    self, Arg, BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, Item, Lambda, LambdaOrigin, LogicOp,
+    NodeId, Param, StrPart, UnaryOp,
 };
 use crate::diagnostic::Diagnostic;
 use crate::resolve::{BindingId, CaptureFrom, GlobalId, GlobalSlot, Res, Resolved, Slot};
@@ -635,7 +635,52 @@ impl<'r> FuncState<'r> {
                 self.emit(Instr::abc(OpCode::TRY, dst, dst, 0), e.span);
             }
             ExprKind::Interp(parts) => self.interp(parts, dst, e.span),
+            ExprKind::List(items) => self.list(items, dst, e.span),
+            // `xs[i]` (M8): the base into dst, the index into a temporary.
+            // The span is the whole expression: an index error (R0401)
+            // names the access path from its source text.
+            ExprKind::Index { base, index } => {
+                self.expr(base, dst);
+                let tmp = self.alloc(index.span);
+                self.expr(index, tmp);
+                self.emit(Instr::abc(OpCode::INDEX, dst, dst, tmp), e.span);
+                self.free_to(tmp);
+            }
+            // A built-in by id (desugared comprehensions and `in`, D14):
+            // built-in slots are never written, so GETGLOBAL always finds it.
+            ExprKind::Builtin(id) => self.emit(Instr::abx(OpCode::GETGLOBAL, dst, *id), e.span),
+            ExprKind::In { .. } | ExprKind::Comprehension { .. } => {
+                unreachable!("removed by desugar.rs")
+            }
         }
+    }
+
+    /// A list literal (M8): the elements into consecutive registers, then
+    /// one `NEWLIST dst base n` (at most 255 elements, E0301).
+    fn list(&mut self, items: &[Expr], dst: u8, span: Span) {
+        if items.len() > MAX_REGS as usize {
+            if !self.diags.iter().any(|d| d.code == "E0301") {
+                self.diags.push(
+                    Diagnostic::new(
+                        "E0301",
+                        "list literal has too many elements (max 255)",
+                        span,
+                    )
+                    .help("join several shorter lists with `+`"),
+                );
+            }
+            return;
+        }
+        let base = self.free_reg as u8;
+        for x in items {
+            let r = self.alloc(x.span);
+            self.expr(x, r);
+        }
+        self.emit(
+            Instr::abc(OpCode::NEWLIST, dst, base, items.len() as u8),
+            span,
+        );
+        self.free_to(base);
     }
 
     /// `LOADK dst k` for a string constant.
@@ -680,7 +725,7 @@ impl<'r> FuncState<'r> {
     /// the binding (plan D23).
     fn let_init(&mut self, b: &Binding, dst: u8) {
         match &b.init.kind {
-            ExprKind::Lambda(l) if l.partial_of.is_none() => {
+            ExprKind::Lambda(l) if l.origin == LambdaOrigin::Source => {
                 self.lambda(&b.init, l, Some(&b.name), dst)
             }
             _ => self.expr(&b.init, dst),
@@ -692,10 +737,11 @@ impl<'r> FuncState<'r> {
     /// for a `_` partial, else `<lambda@l:c>`.
     fn lambda(&mut self, e: &Expr, l: &Lambda, binding: Option<&str>, dst: u8) {
         let (line, col) = self.sm.line_col(e.span.start);
-        let name = match (&l.partial_of, binding) {
-            (Some(f), _) => format!("<partial {f}@{line}:{col}>"),
-            (None, Some(b)) => b.to_string(),
-            (None, None) => format!("<lambda@{line}:{col}>"),
+        let name = match (&l.origin, binding) {
+            (LambdaOrigin::Partial(f), _) => format!("<partial {f}@{line}:{col}>"),
+            (LambdaOrigin::Comprehension, _) => format!("<comprehension@{line}:{col}>"),
+            (LambdaOrigin::Source, Some(b)) => b.to_string(),
+            (LambdaOrigin::Source, None) => format!("<lambda@{line}:{col}>"),
         };
         match compile_function(&name, e.span, &l.params, &l.body, self.resolved, self.sm) {
             Ok(p) => self.closure(e.id, p, e.span, dst),
@@ -1163,6 +1209,17 @@ mod tests {
         // consecutive registers, then one CONCAT.
         insta::assert_snapshot!(disasm(
             "let n = 2\nprint(\"a\")\nprint(\"n = {n}, next {n + 1}, a\")"
+        ));
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__codegen__tests__lists.snap
+    #[test]
+    fn lists() {
+        // Elements into consecutive registers, one NEWLIST; INDEX; a
+        // comprehension calls the built-ins by slot (GETGLOBAL of `map`
+        // even though `map` is rebound) with `<comprehension@…>` lambdas.
+        insta::assert_snapshot!(disasm(
+            "let xs = [1, 2, 3]\nlet map = 0\nlet y = xs[1]\n[x * y for x in xs if x in [1, 3]]"
         ));
     }
 

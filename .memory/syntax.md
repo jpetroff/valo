@@ -270,6 +270,16 @@ Global style: Python-like, indentation blocks (INDENT/DEDENT/NEWLINE), no `;`, s
 - `or_else(x, default)`: `default` when `x` is `none` or an `Err`, the inner value of an `Ok`, else `x`. `unwrap(x)`: inner value of `Ok`, error for `Err`/`none`, else `x`.
 - `parse_int(s)` / `parse_float(s)` ignore surrounding whitespace and return `none` when `s` is not a number. `read_file`/`write_file` errors are `Err("cannot read \"path\": file not found")`-style messages (str payload until the `error` record exists).
 
+## Implementation notes from M8 (PROVISIONAL unless marked user-confirmed)
+- Lists: `[1, 2,]` trailing comma allowed; literals and comprehensions may span lines (brackets). `xs[i]` only with `0 <= i < len` (no negative indexing; Q-S22 still open); out of range = runtime error naming the path (`rows[r][3]: index out of range (len 2)`).
+- `+` on lists makes a new list; `==` compares element by element (elements of different types are an error, as outside lists); lists cannot be ordered with `<`.
+- USER-CONFIRMED: `x not in xs` (Python); `in` on strings is a substring test (`"err" in line`); `len(s)` counts characters like `str_len`.
+- `in` / `not in` do not chain with comparisons or each other (`a < b in c`, `a in b == c` are errors asking for parentheses); Python's chaining could be added later.
+- Comprehension loop target is a single name (or `_`); `for (a, b) in …` waits for tuples/patterns.
+- USER-CONFIRMED: `?` directly inside a comprehension (element, `if`, or a later `for`'s list) is a compile error (E0208): it would only leave the comprehension's hidden function. The first `for`'s list is evaluated outside and may use `?`.
+- Comprehensions and `in` call the built-ins `map`/`filter`/`flat_map`/`contains` even if the program rebinds those names.
+- Built-ins (provisional names, data first): `len get range map filter reduce flat_map each contains append reverse lines split join`. `range(n)` / `range(a, b)` (end-exclusive). `get(xs, i)` → element or `none`. `split(s, sep)` like Python's `s.split(sep)` (empty sep = error); `join(xs, sep)` needs a list of str; `lines(s)` drops `\n` / `\r\n` endings.
+
 ## Composite example (rounds 1–6; builtin names provisional)
 
 ```

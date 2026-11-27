@@ -1,0 +1,6 @@
+# Sum of the squares of the even numbers in 1..=10, as one pipe chain.
+let total = range(1, 11)
+    |> filter(x => x % 2 == 0)
+    |> map(x => x ** 2)
+    |> reduce(0, (acc, x) => acc + x)
+print(total)

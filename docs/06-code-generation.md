@@ -379,7 +379,28 @@ and a `RETURN`, because it also records the `?`'s position on the `Err`
 that nobody looked at must not vanish silently (Q23). `?` inside a lambda
 returns from the lambda — `TRY` acts on whatever frame runs it.
 
-## 6.11 What codegen does *not* do
+## 6.11 Lists (M8)
+
+A list literal works like an interpolated string: every element is
+compiled into the next free register, then one `NEWLIST dst base n` moves
+them into a new list (so at most 255 elements per literal, E0301). An index
+`xs[i]` compiles the base into `dst`, the index into a temporary, and emits
+`INDEX dst dst tmp` with the span of the *whole* expression — the CLI reads
+that span's source text to name the access path in R0401. Comprehensions
+and `in` never reach codegen (they are calls after `desugar.rs`); the
+built-in they call is `ExprKind::Builtin(id)`, compiled to
+`GETGLOBAL dst id`, because built-in slots are numbered `0..N` and never
+written:
+
+```text
+let map = 0                                GETGLOBAL 0 21   ; map  (the built-in)
+[x * y for x in xs if x in [1, 3]]         GETGLOBAL 3 22   ; filter
+                                           GETGLOBAL 4 32   ; xs
+                                           CLOSURE   5 0    ; <fn <comprehension@4:1>/1>
+                                           CALL      3 2
+```
+
+## 6.12 What codegen does *not* do
 
 - It does not check types: `1 + 2.0` compiles, and the VM reports R0201
   (`arith`, chapter 7). Type errors are found at runtime until static checks

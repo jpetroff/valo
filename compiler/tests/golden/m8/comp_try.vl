@@ -1,0 +1,6 @@
+# `?` inside a comprehension would only leave its hidden lambda.
+fn parse(s: str) -> int ! error:
+    let n = parse_int(s)
+    if n == none then Err("bad: {s}") else Ok(n)
+fn all(xs: list[str]) -> list[int] ! error = Ok([parse(s)? for s in xs])
+print(all(["1"]))

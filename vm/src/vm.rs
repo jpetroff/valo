@@ -631,6 +631,7 @@ impl<'h> Vm<'h> {
             globals: &self.globals,
             global_names: &self.global_names,
             global_builtin: &self.global_builtin,
+            native_marks: &self.native_marks,
             at_error: false,
         };
         match hook.on_line(&view, line) {
@@ -658,6 +659,7 @@ impl<'h> Vm<'h> {
             globals: &self.globals,
             global_names: &self.global_names,
             global_builtin: &self.global_builtin,
+            native_marks: &self.native_marks,
             at_error: true,
         };
         hook.on_error(&view, err);

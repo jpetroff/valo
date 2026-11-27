@@ -578,6 +578,19 @@ fn owned_items(xs: Rc<Vec<Value>>) -> Vec<Value> {
     Rc::try_unwrap(xs).unwrap_or_else(|rc| (*rc).clone())
 }
 
+/// Call `f` with each element of a list argument, owned: moved out when
+/// nothing else holds the list, else cloned one at a time (no copy of the
+/// whole list up front).
+fn for_each_item(
+    xs: Rc<Vec<Value>>,
+    mut f: impl FnMut(Value) -> Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    match Rc::try_unwrap(xs) {
+        Ok(items) => items.into_iter().try_for_each(f),
+        Err(shared) => shared.iter().try_for_each(|x| f(x.clone())),
+    }
+}
+
 /// The two-argument split of `args` (no allocation).
 fn two(mut args: Vec<Value>) -> (Value, Value) {
     let b = args.pop().expect("two arguments");
@@ -622,11 +635,12 @@ fn native_range(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeErro
 /// `map(xs, f)`: `[f(x) for each x]`.
 fn native_map(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
     let (xs, f) = two(args);
-    let xs = owned_items(list_arg("map", xs)?);
+    let xs = list_arg("map", xs)?;
     let mut out = Vec::with_capacity(xs.len());
-    for x in xs {
+    for_each_item(xs, |x| {
         out.push(vm.call_value(f.clone(), vec![x])?);
-    }
+        Ok(())
+    })?;
     Ok(Value::List(Rc::new(out)))
 }
 
@@ -634,21 +648,20 @@ fn native_map(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> 
 /// return a bool, R0206).
 fn native_filter(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
     let (xs, p) = two(args);
-    let xs = owned_items(list_arg("filter", xs)?);
+    let xs = list_arg("filter", xs)?;
     let mut out = Vec::new();
-    for x in xs {
-        match vm.call_value(p.clone(), vec![x.clone()])? {
-            Value::Bool(true) => out.push(x),
-            Value::Bool(false) => {}
-            other => {
-                return Err(arg_type_error(
-                    "filter",
-                    "a predicate that returns a bool",
-                    &other,
-                ));
-            }
+    for_each_item(xs, |x| match vm.call_value(p.clone(), vec![x.clone()])? {
+        Value::Bool(true) => {
+            out.push(x);
+            Ok(())
         }
-    }
+        Value::Bool(false) => Ok(()),
+        other => Err(arg_type_error(
+            "filter",
+            "a predicate that returns a bool",
+            &other,
+        )),
+    })?;
     Ok(Value::List(Rc::new(out)))
 }
 
@@ -656,40 +669,39 @@ fn native_filter(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeErro
 fn native_reduce(vm: &mut Vm<'_>, mut args: Vec<Value>) -> Result<Value, RuntimeError> {
     let f = args.pop().expect("three arguments");
     let mut acc = args.pop().expect("three arguments");
-    let xs = owned_items(list_arg("reduce", args.pop().expect("three arguments"))?);
-    for x in xs {
-        acc = vm.call_value(f.clone(), vec![acc, x])?;
-    }
+    let xs = list_arg("reduce", args.pop().expect("three arguments"))?;
+    for_each_item(xs, |x| {
+        let a = std::mem::replace(&mut acc, Value::Unit);
+        acc = vm.call_value(f.clone(), vec![a, x])?;
+        Ok(())
+    })?;
     Ok(acc)
 }
 
 /// `flat_map(xs, f)`: the lists `f(x)` joined (`f` must return a list).
 fn native_flat_map(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
     let (xs, f) = two(args);
-    let xs = owned_items(list_arg("flat_map", xs)?);
+    let xs = list_arg("flat_map", xs)?;
     let mut out = Vec::new();
-    for x in xs {
-        match vm.call_value(f.clone(), vec![x])? {
-            Value::List(ys) => out.extend(owned_items(ys)),
-            other => {
-                return Err(arg_type_error(
-                    "flat_map",
-                    "a function that returns a list",
-                    &other,
-                ));
-            }
+    for_each_item(xs, |x| match vm.call_value(f.clone(), vec![x])? {
+        Value::List(ys) => {
+            out.extend(owned_items(ys));
+            Ok(())
         }
-    }
+        other => Err(arg_type_error(
+            "flat_map",
+            "a function that returns a list",
+            &other,
+        )),
+    })?;
     Ok(Value::List(Rc::new(out)))
 }
 
 /// `each(xs, f)`: call `f(x)` for every element (for its effects); `()`.
 fn native_each(vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError> {
     let (xs, f) = two(args);
-    let xs = owned_items(list_arg("each", xs)?);
-    for x in xs {
-        vm.call_value(f.clone(), vec![x])?;
-    }
+    let xs = list_arg("each", xs)?;
+    for_each_item(xs, |x| vm.call_value(f.clone(), vec![x]).map(drop))?;
     Ok(Value::Unit)
 }
 

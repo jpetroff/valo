@@ -96,6 +96,10 @@ pub enum ExprKind {
     Lambda(Box<Lambda>),                                              // x => e (M6)
     Str(String), Interp(Vec<StrPart>),                                // "text", "a {x}" (M7)
     None, Try(Box<Expr>),                                             // none, e? (M7)
+    List(Vec<Expr>), Index { base: Box<Expr>, index: Box<Expr> },     // [a, b], xs[i] (M8)
+    In { op_span: Span, item: Box<Expr>, coll: Box<Expr>, negated: bool }, // x (not) in xs
+    Comprehension { elem: Box<Expr>, clauses: Vec<Clause> },          // [e for x in xs if c]
+    Builtin(u16),                                                     // made by desugar.rs only
 }
 pub struct CmpLink { pub op: CmpOp, pub op_span: Span, pub rhs: Expr }
 ```
@@ -200,6 +204,18 @@ a block that binds `a` and `b` to temporaries once, ending with a lambda
 is `<partial f@line:col>`). Names starting with `$` cannot be written in
 source, so they never clash with yours.
 
+**Comprehensions and `in`** (M8) are rewritten there too, into calls of
+built-ins: `[e for x in xs if c]` → `map(filter(xs, x => c), x => e)`, and
+every further `for` nests the chain inside `flat_map`
+(`[e for x in a for y in b]` → `flat_map(a, x => map(b, y => e))`), so a
+later clause sees the earlier variables. `x in xs` → `contains(xs, x)`
+(with `x` evaluated first, like a piped value), `x not in xs` →
+`not contains(xs, x)`. The built-ins are referenced as
+`ExprKind::Builtin(id)` — a slot number, not a name — so `let map = …` in
+your program cannot change what a comprehension does. The generated lambdas
+are named `<comprehension@line:col>` in stack traces; a `?` directly inside
+one would only leave that hidden lambda, so the resolver rejects it (E0208).
+
 `Parser::prefix` handles what can *start* an expression: a literal (`Int`,
 `Float`, `true`, `false`, `()`), a name, prefix `-` (parses its operand with
 `expr(30)`), `not` (with `expr(7)`), `(` (parses an expression with `expr(0)`
@@ -231,6 +247,24 @@ with interpolation `ExprKind::Interp(parts)`:
 `1 + f(x)?` is `1 + (f(x)?)`. In a pipe, `x |> f(a)?` parses as
 `x |> (f(a)?)`, but S10 says `?` ends the whole stage; `desugar.rs` moves
 it out: `(? (pcall f x a))`.
+
+**Lists, indexing and `in`** (M8). `[` at the start of an expression is a
+list literal (`Parser::list`): elements separated by commas, a trailing comma
+allowed, and — because the lexer drops line breaks inside brackets — free
+to span lines. If the first element is followed by `for`, the brackets hold a
+comprehension instead: `for NAME in expr` and `if expr` clauses until `]`.
+No lookahead is needed, because every expression stops by itself at `for`,
+`if` or `]` (none of them is an operator). After an expression, `[` is a
+postfix index with the binding power of a call (`f(x)[0]?` indexes the call
+and applies `?` to the element). `in` and `not in` are rows of the operator
+table at comparison level (`x + 1 in xs` is `(x + 1) in xs`; `not x in xs` is
+`not (x in xs)`), but unlike Python they do not chain: `a < b in c` and
+`a in b == c` are E0101 asking for parentheses.
+
+```text
+[x * 2 for x in xs if x > 0]   →   (comp (* x 2) (for x xs) (if (> x 0)))
+rows[i][j + 1]                 →   (index (index rows i) (+ j 1))
+```
 
 **Comparison chains.** When the loop meets a comparison operator it calls
 `compare_chain`, which keeps consuming `op operand` pairs (operands parsed
@@ -315,7 +349,7 @@ pass overflow the stack.
 ### Constructs of later milestones
 
 The parser recognises tokens that are valid valo but not implemented yet —
-`[`, `.`, `in`, `match`, `def`, `import` — and reports
+`.`, `{`, `match`, `def`, `import` — and reports
 `E0009 … is not supported yet` instead of a confusing "unexpected token".
 These checks are in `Parser::prefix` (things that start an expression) and in
 the operator table of `Parser::expr` (things that follow one).
