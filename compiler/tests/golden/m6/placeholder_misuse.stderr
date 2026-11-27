@@ -1,4 +1,4 @@
-[E0206] Error: `_` is not a value
+error[E0206]: `_` is not a value
    ╭─[ placeholder_misuse.vl:1:9 ]
    │
  1 │ let x = _ + 1

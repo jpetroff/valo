@@ -1,4 +1,4 @@
-[E0104] Error: block ends with a `let` binding
+error[E0104]: block ends with a `let` binding
    ╭─[ block_ends_with_let.vl:2:9 ]
    │
  2 │     let t = 1

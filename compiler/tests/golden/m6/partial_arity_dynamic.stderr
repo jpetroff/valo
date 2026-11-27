@@ -1,5 +1,10 @@
 error[R0207]: `<partial add@3:13>` takes 1 argument but 2 were given
-  --> partial_arity_dynamic.vl:2:41
+   ╭─[ partial_arity_dynamic.vl:2:41 ]
+   │
+ 2 │ fn call2(h: (int, int) -> int) -> int = h(1, 2)
+   │                                         ───┬───  
+   │                                            ╰───── here
+───╯
 stack trace (most recent call first):
   0: call2  at partial_arity_dynamic.vl:2:41
   1: <main> at partial_arity_dynamic.vl:3:7

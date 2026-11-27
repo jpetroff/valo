@@ -1,5 +1,10 @@
 error[R0401]: rows[r][3]: index out of range (len 2)
-  --> index_oob.vl:3:34
+   ╭─[ index_oob.vl:3:34 ]
+   │
+ 3 │ fn cell(r: int, c: int) -> int = rows[r][c]
+   │                                  ─────┬────  
+   │                                       ╰────── here
+───╯
 stack trace (most recent call first):
   0: cell   at index_oob.vl:3:34
   1: <main> at index_oob.vl:5:7

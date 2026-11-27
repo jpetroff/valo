@@ -1,5 +1,10 @@
 error[R0101]: integer overflow: 21 * 2432902008176640000
-  --> fact_overflow.vl:3:11
+   ╭─[ fact_overflow.vl:3:11 ]
+   │
+ 3 │     else: n * fact(n - 1)
+   │           ───────┬───────  
+   │                  ╰───────── here
+───╯
 stack trace (most recent call first):
   0: fact   at fact_overflow.vl:3:11
   1: <main> at fact_overflow.vl:5:7

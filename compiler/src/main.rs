@@ -18,6 +18,9 @@
 //! valo build <file> [-o out]          (not implemented yet)
 //! ```
 //!
+//! Every command takes `--color auto|always|never` (default `auto`: colour
+//! when stderr is a terminal and `NO_COLOR` is unset).
+//!
 //! Exit codes (plan D16): 0 ok, 1 runtime error, 2 compile error,
 //! 64 usage error or unreadable source file.
 //!
@@ -44,7 +47,7 @@ use std::process::ExitCode;
 
 use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
-use valo_compiler::diagnostic::{self, Diagnostic};
+use valo_compiler::diagnostic::{self, ColorChoice, Diagnostic};
 use valo_compiler::span::SourceMap;
 use valo_compiler::{
     CompileOptions, ast, compile_source, lexer, parse_source, resolve, resolve_source,
@@ -64,6 +67,20 @@ const EXIT_USAGE: u8 = 64;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// When to colour error messages.
+    #[arg(long, value_enum, global = true, default_value = "auto")]
+    color: Color,
+}
+
+/// `--color` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Color {
+    /// Colour when stderr is a terminal and `NO_COLOR` is unset.
+    Auto,
+    /// Always colour.
+    Always,
+    /// Never colour.
+    Never,
 }
 
 /// Subcommands. EXTEND: a new subcommand is a new variant here.
@@ -146,14 +163,20 @@ fn main() -> ExitCode {
 
 /// Run one CLI command.
 fn command(cli: Cli) -> ExitCode {
+    let color = match cli.color {
+        Color::Auto => ColorChoice::Auto,
+        Color::Always => ColorChoice::Always,
+        Color::Never => ColorChoice::Never,
+    }
+    .stderr();
     match cli.command {
         Command::Run {
             file,
             echo,
             trace_exec,
             dump,
-        } => run(&file, echo, trace_exec, dump),
-        Command::Check { file, dump } => check(&file, dump),
+        } => run(&file, echo, trace_exec, dump, color),
+        Command::Check { file, dump } => check(&file, dump, color),
         Command::Build { .. } => {
             eprintln!(
                 "error: `valo build` is not implemented yet (bytecode files are planned after the MVP)"
@@ -175,44 +198,41 @@ fn load(path: &Path) -> Result<SourceMap, ExitCode> {
 }
 
 /// Print compile errors and return exit code 2.
-fn report(sm: &SourceMap, diags: &[Diagnostic]) -> ExitCode {
-    eprint!(
-        "{}",
-        diagnostic::render(sm, diags, diagnostic::stderr_color())
-    );
+fn report(sm: &SourceMap, diags: &[Diagnostic], color: bool) -> ExitCode {
+    eprint!("{}", diagnostic::render(sm, diags, color));
     ExitCode::from(EXIT_COMPILE)
 }
 
 /// Render a dump; `Err` carries the exit code for compile errors.
-fn dump_text(sm: &SourceMap, dump: Dump, echo: bool) -> Result<String, ExitCode> {
+fn dump_text(sm: &SourceMap, dump: Dump, echo: bool, color: bool) -> Result<String, ExitCode> {
     match dump {
         Dump::Tokens => {
             let lexed = lexer::lex(&sm.text);
             if !lexed.diags.is_empty() {
-                return Err(report(sm, &lexed.diags));
+                return Err(report(sm, &lexed.diags, color));
             }
             Ok(lexer::dump(&lexed.tokens))
         }
         Dump::Ast => parse_source(sm)
             .map(|p| ast::dump(&p))
-            .map_err(|d| report(sm, &d)),
+            .map_err(|d| report(sm, &d, color)),
         Dump::Resolved => resolve_source(sm)
             .map(|(_, r)| resolve::dump(&r, sm))
-            .map_err(|d| report(sm, &d)),
+            .map_err(|d| report(sm, &d, color)),
         Dump::Bytecode => compile_source(sm, CompileOptions { echo })
             .map(|p| valo_vm::disasm::disassemble(&p))
-            .map_err(|d| report(sm, &d)),
+            .map_err(|d| report(sm, &d, color)),
     }
 }
 
 /// `valo check`: compile only (or print a dump to stdout).
-fn check(path: &Path, dump: Option<Dump>) -> ExitCode {
+fn check(path: &Path, dump: Option<Dump>, color: bool) -> ExitCode {
     let sm = match load(path) {
         Ok(sm) => sm,
         Err(code) => return code,
     };
     if let Some(d) = dump {
-        return match dump_text(&sm, d, false) {
+        return match dump_text(&sm, d, false, color) {
             Ok(text) => {
                 print!("{text}");
                 ExitCode::SUCCESS
@@ -222,26 +242,26 @@ fn check(path: &Path, dump: Option<Dump>) -> ExitCode {
     }
     match compile_source(&sm, CompileOptions::default()) {
         Ok(_) => ExitCode::SUCCESS,
-        Err(diags) => report(&sm, &diags),
+        Err(diags) => report(&sm, &diags, color),
     }
 }
 
 /// `valo run`: compile, then execute on the VM. Dumps go to stderr so that
 /// stdout contains only the program's own output.
-fn run(path: &Path, echo: bool, trace_exec: bool, dump: Option<Dump>) -> ExitCode {
+fn run(path: &Path, echo: bool, trace_exec: bool, dump: Option<Dump>, color: bool) -> ExitCode {
     let sm = match load(path) {
         Ok(sm) => sm,
         Err(code) => return code,
     };
     if let Some(d) = dump {
-        match dump_text(&sm, d, echo) {
+        match dump_text(&sm, d, echo, color) {
             Ok(text) => eprint!("{text}"),
             Err(code) => return code,
         }
     }
     let program = match compile_source(&sm, CompileOptions { echo }) {
         Ok(p) => p,
-        Err(diags) => return report(&sm, &diags),
+        Err(diags) => return report(&sm, &diags, color),
     };
     // The real host: the program's output goes to this process's stdout.
     let mut host = StdHost::new();
@@ -257,7 +277,7 @@ fn run(path: &Path, echo: bool, trace_exec: bool, dump: Option<Dump>) -> ExitCod
             }
         },
         Err(err) => {
-            eprint!("{}", diagnostic::render_runtime(&sm, &err));
+            eprint!("{}", diagnostic::render_runtime(&sm, &err, color));
             ExitCode::from(EXIT_RUNTIME)
         }
     }

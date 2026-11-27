@@ -1,4 +1,4 @@
-[E0208] Error: `?` inside a comprehension
+error[E0208]: `?` inside a comprehension
    ╭─[ comp_try.vl:5:58 ]
    │
  5 │ fn all(xs: list[str]) -> list[int] ! error = Ok([parse(s)? for s in xs])

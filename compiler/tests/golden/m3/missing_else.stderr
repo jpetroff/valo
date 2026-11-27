@@ -1,4 +1,4 @@
-[E0102] Error: `if` without `else`
+error[E0102]: `if` without `else`
    ╭─[ missing_else.vl:2:1 ]
    │
  2 │ if x > 0: 1

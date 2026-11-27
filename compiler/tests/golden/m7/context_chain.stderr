@@ -1,5 +1,10 @@
 error[R0601]: unhandled Err: "bad port"
-  --> context_chain.vl:9:1
+   ╭─[ context_chain.vl:9:1 ]
+   │
+ 9 │ outer()?
+   │ ────┬───  
+   │     ╰───── here
+───╯
   context (outermost first):
     loading config
     parsing port

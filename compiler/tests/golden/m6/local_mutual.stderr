@@ -1,4 +1,4 @@
-[E0204] Error: `is_odd` is a local fn defined later in this block
+error[E0204]: `is_odd` is a local fn defined later in this block
    ╭─[ local_mutual.vl:2:59 ]
    │
  2 │     fn is_even(k: int) -> bool = if k == 0 then true else is_odd(k - 1)

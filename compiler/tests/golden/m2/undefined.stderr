@@ -1,4 +1,4 @@
-[E0201] Error: undefined name `cuont`
+error[E0201]: undefined name `cuont`
    ╭─[ undefined.vl:2:1 ]
    │
  2 │ cuont + 1

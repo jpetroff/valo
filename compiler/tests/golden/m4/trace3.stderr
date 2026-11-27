@@ -1,5 +1,10 @@
 error[R0102]: division by zero: 10 // 0
-  --> trace3.vl:1:27
+   ╭─[ trace3.vl:1:27 ]
+   │
+ 1 │ fn inner(x: int) -> int = 10 // x
+   │                           ───┬───  
+   │                              ╰───── here
+───╯
 stack trace (most recent call first):
   0: inner  at trace3.vl:1:27
   1: middle at trace3.vl:2:28

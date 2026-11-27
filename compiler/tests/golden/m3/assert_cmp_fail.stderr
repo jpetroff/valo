@@ -1,5 +1,10 @@
 error[R0701]: assertion failed: a + a == 5
-  --> assert_cmp_fail.vl:2:8
+   ╭─[ assert_cmp_fail.vl:2:8 ]
+   │
+ 2 │ assert a + a == 5
+   │        ─────┬────  
+   │             ╰────── here
+───╯
   left: 4
   right: 5
 stack trace (most recent call first):

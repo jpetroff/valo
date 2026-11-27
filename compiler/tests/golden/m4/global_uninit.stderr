@@ -1,5 +1,10 @@
 error[R0302]: global `limit` used before initialisation
-  --> global_uninit.vl:1:32
+   ╭─[ global_uninit.vl:1:32 ]
+   │
+ 1 │ fn scaled(x: int) -> int = x * limit
+   │                                ──┬──  
+   │                                  ╰──── here
+───╯
 stack trace (most recent call first):
   0: scaled at global_uninit.vl:1:32
   1: <main> at global_uninit.vl:2:7

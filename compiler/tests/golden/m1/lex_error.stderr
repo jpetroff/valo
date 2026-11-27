@@ -1,4 +1,4 @@
-[E0001] Error: unexpected character `$`
+error[E0001]: unexpected character `$`
    ╭─[ lex_error.vl:2:3 ]
    │
  2 │ 3 $ 4

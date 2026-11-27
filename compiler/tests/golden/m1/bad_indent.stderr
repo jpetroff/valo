@@ -1,4 +1,4 @@
-[E0101] Error: unexpected indentation
+error[E0101]: unexpected indentation
    ╭─[ bad_indent.vl:2:1 ]
    │
  2 │   3

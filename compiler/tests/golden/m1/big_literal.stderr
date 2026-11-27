@@ -1,4 +1,4 @@
-[E0002] Error: integer literal is out of range for int (64-bit)
+error[E0002]: integer literal is out of range for int (64-bit)
    ╭─[ big_literal.vl:1:1 ]
    │
  1 │ 9223372036854775808

@@ -1,5 +1,10 @@
 error[R0701]: assertion failed: name == "vala"
-  --> assert_str.vl:2:8
+   ╭─[ assert_str.vl:2:8 ]
+   │
+ 2 │ assert name == "vala"
+   │        ───────┬──────  
+   │               ╰──────── here
+───╯
   left: "valo"
   right: "vala"
 stack trace (most recent call first):

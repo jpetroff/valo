@@ -1,4 +1,9 @@
 error[R0104]: negative exponent: 2 ** -1 (int powers need an exponent >= 0)
-  --> neg_pow.vl:1:1
+   ╭─[ neg_pow.vl:1:1 ]
+   │
+ 1 │ 2 ** -1
+   │ ───┬───  
+   │    ╰───── here
+───╯
 stack trace (most recent call first):
   0: <main> at neg_pow.vl:1:1
