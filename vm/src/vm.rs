@@ -65,7 +65,7 @@
 use std::rc::Rc;
 
 use crate::builtins::NATIVES;
-use crate::chunk::{Const, GlobalKind, NativeId, Program, Proto, SrcSpan, UpvalSrc};
+use crate::chunk::{Const, GlobalKind, NativeId, Program, Proto, SrcSpan, Type, UpvalSrc};
 use crate::debug::{DebugHook, LineTable, Resume, VmView};
 use crate::error::{ErrorKind, RuntimeError, Site, TraceEntry};
 use crate::host::Host;
@@ -109,6 +109,64 @@ pub(crate) struct Frame {
     /// Entered from a built-in through `Vm::call_value` (M8): its `RETURN`
     /// ends the nested dispatch loop instead of resuming a caller frame.
     pub(crate) reentry: bool,
+    /// Functions whose declared return type the result of this frame must
+    /// match (M10): the called function, plus every different annotated
+    /// function it tail-called (TAILCALL keeps the frame, so the caller's
+    /// promise still holds). Deduplicated, so self-recursion stays O(1).
+    pub(crate) ret_checks: Vec<Rc<Proto>>,
+}
+
+/// The return checks of a new frame for `proto`: empty (no allocation) when
+/// it has no return annotation.
+fn ret_checks_for(proto: &Rc<Proto>) -> Vec<Rc<Proto>> {
+    if proto.ret_type.is_some() {
+        vec![Rc::clone(proto)]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether `v` matches `ty`. On a mismatch, returns the offending value
+/// (the whole `v`, or a list element) and fills `path` with the list
+/// indices that lead to it.
+pub fn find_mismatch<'v>(v: &'v Value, ty: &Type, path: &mut Vec<usize>) -> Option<&'v Value> {
+    let ok = match (ty, v) {
+        (Type::Any | Type::Var(_), _) => true,
+        (Type::Unit, Value::Unit)
+        | (Type::Int, Value::Int(_))
+        | (Type::Float, Value::Float(_))
+        | (Type::Bool, Value::Bool(_))
+        | (Type::Str, Value::Str(_))
+        | (Type::None, Value::None) => true,
+        (Type::List(t), Value::List(xs)) => {
+            if t.accepts_all() {
+                return None;
+            }
+            for (i, x) in xs.iter().enumerate() {
+                path.push(i);
+                if let Some(bad) = find_mismatch(x, t, path) {
+                    return Some(bad);
+                }
+                path.pop();
+            }
+            true
+        }
+        (Type::Union(ts), _) => ts
+            .iter()
+            .any(|t| find_mismatch(v, t, &mut Vec::new()).is_none()),
+        (Type::Result(_, _), Value::Err(_)) => true,
+        (Type::Result(t, _), Value::Ok(inner)) => {
+            find_mismatch(inner, t, &mut Vec::new()).is_none()
+        }
+        (Type::Fn(params, _), Value::Closure(c)) => {
+            (c.proto.required as usize..=c.proto.arity as usize).contains(&params.len())
+        }
+        (Type::Fn(params, _), Value::Native(id)) => NATIVES
+            .get(id.0 as usize)
+            .is_some_and(|d| (d.required()..=d.params.len()).contains(&params.len())),
+        _ => false,
+    };
+    if ok { None } else { Some(v) }
 }
 
 /// The virtual machine.
@@ -203,6 +261,7 @@ impl<'h> Vm<'h> {
             pc: 0,
             tail_calls: 0,
             reentry: false,
+            ret_checks: Vec::new(),
         });
         // RUST: `map_err` transforms only the error case; here it attaches
         // the stack trace before the error leaves the VM.
@@ -291,7 +350,7 @@ impl<'h> Vm<'h> {
                 OpCode::RETURN => {
                     // `mem::replace` moves the value out and leaves `Unit` behind.
                     let v = std::mem::replace(&mut self.stack[ra], Value::Unit);
-                    if let Some(result) = self.do_return(v) {
+                    if let Some(result) = self.do_return(v)? {
                         return Ok(result);
                     }
                     // Not traced: `ra` belongs to the finished frame.
@@ -317,7 +376,7 @@ impl<'h> Vm<'h> {
                             if self.frames.len() == 1 {
                                 return Err(RuntimeError::unhandled(&e));
                             }
-                            if let Some(result) = self.do_return(Value::Err(e)) {
+                            if let Some(result) = self.do_return(Value::Err(e))? {
                                 return Ok(result);
                             }
                             // Not traced: the frame is gone.
@@ -328,6 +387,22 @@ impl<'h> Vm<'h> {
                     }
                 }
                 OpCode::LOADNONE => self.stack[ra] = Value::None,
+                // Annotation check (M10): `R[A]` against `checks[Bx]`.
+                OpCode::CHECKTYPE => {
+                    let check = proto
+                        .checks
+                        .get(instr.bx() as usize)
+                        .ok_or_else(|| internal("type check index out of range"))?;
+                    let mut path = Vec::new();
+                    if let Some(bad) = find_mismatch(&self.stack[ra], &check.ty, &mut path) {
+                        return Err(RuntimeError::annotation_mismatch(
+                            &check.what,
+                            &check.ty,
+                            bad,
+                            &path,
+                        ));
+                    }
+                }
                 OpCode::TAILCALL => {
                     if let Some(result) = self.tail_call(ra, instr.b() as usize)? {
                         return Ok(result);
@@ -655,15 +730,31 @@ impl<'h> Vm<'h> {
     /// A frame entered through `call_value` also returns `Some(v)`: that
     /// ends the nested dispatch loop, and `call_value` hands `v` to the
     /// built-in that asked for it.
-    fn do_return(&mut self, v: Value) -> Option<Value> {
+    ///
+    /// The result is checked against the return type of every function in
+    /// `ret_checks` first (M10), while the frame still exists, so an R0204
+    /// trace points at the `RETURN` in the callee.
+    fn do_return(&mut self, v: Value) -> Result<Option<Value>, RuntimeError> {
+        let frame = self.frames.last().expect("RETURN without a frame");
+        for p in &frame.ret_checks {
+            let ty = p
+                .ret_type
+                .as_ref()
+                .expect("ret_checks only holds annotated fns");
+            let mut path = Vec::new();
+            if let Some(bad) = find_mismatch(&v, ty, &mut path) {
+                let what = format!("return value of {}", p.name);
+                return Err(RuntimeError::annotation_mismatch(&what, ty, bad, &path));
+            }
+        }
         let done = self.frames.pop().expect("RETURN without a frame");
         if done.reentry {
             // Drop the callee slot and the frame's registers.
             self.stack.truncate(done.base - 1);
-            return Some(v);
+            return Ok(Some(v));
         }
         let Some(caller) = self.frames.last() else {
-            return Some(v);
+            return Ok(Some(v));
         };
         // The result replaces the callee in its function slot, which is the
         // caller's `R[A]` of the CALL.
@@ -671,7 +762,7 @@ impl<'h> Vm<'h> {
         // Drop the callee's registers (and the values they hold).
         let end = caller.base + caller.closure.proto.num_regs as usize;
         self.stack.truncate(end);
-        None
+        Ok(None)
     }
 
     /// `TAILCALL A B` (M5): call `R[A]` and return its result, reusing the
@@ -691,7 +782,7 @@ impl<'h> Vm<'h> {
             Value::Native(_) => {
                 self.call(ra, nargs)?;
                 let v = std::mem::replace(&mut self.stack[ra], Value::Unit);
-                return Ok(self.do_return(v));
+                return self.do_return(v);
             }
             other => return Err(RuntimeError::not_callable(other)),
         };
@@ -715,6 +806,9 @@ impl<'h> Vm<'h> {
             *slot = Value::Missing;
         }
         let frame = self.frame_mut();
+        if c.proto.ret_type.is_some() && !frame.ret_checks.iter().any(|p| Rc::ptr_eq(p, &c.proto)) {
+            frame.ret_checks.push(Rc::clone(&c.proto));
+        }
         frame.closure = c;
         frame.pc = 0;
         frame.tail_calls = frame.tail_calls.saturating_add(1);
@@ -750,6 +844,7 @@ impl<'h> Vm<'h> {
                     *slot = Value::Missing;
                 }
                 self.frames.push(Frame {
+                    ret_checks: ret_checks_for(&c.proto),
                     closure: c,
                     base,
                     pc: 0,
@@ -849,6 +944,7 @@ impl<'h> Vm<'h> {
                         | OpCode::TEST
                         | OpCode::ASSERT
                         | OpCode::JMPIFSET
+                        | OpCode::CHECKTYPE
                 )
         });
         if writes_a {
@@ -1119,6 +1215,7 @@ mod tests {
     use crate::chunk::{Const, ProtoBuilder, UpvalSrc};
     use crate::host::TestHost;
     use crate::opcode::Instr;
+    use crate::value::ErrVal;
     use proptest::prelude::*;
 
     fn run(p: &Program) -> (Result<Value, RuntimeError>, TestHost) {
@@ -2013,6 +2110,203 @@ mod tests {
             .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
             .program();
         run(&p).0
+    }
+
+    // ---- M10: annotation checks ----------------------------------------
+
+    fn list(xs: Vec<Value>) -> Value {
+        Value::List(Rc::new(xs))
+    }
+
+    fn list_of(t: Type) -> Type {
+        Type::List(Box::new(t))
+    }
+
+    fn mismatch(v: &Value, t: &Type) -> Option<(Value, Vec<usize>)> {
+        let mut path = Vec::new();
+        find_mismatch(v, t, &mut path).map(|bad| (bad.clone(), path))
+    }
+
+    #[test]
+    fn type_display_uses_user_spelling() {
+        let opt = Type::Union(vec![Type::Int, Type::None]);
+        let res = Type::Result(Box::new(opt.clone()), Box::new(Type::Var("error".into())));
+        assert_eq!(opt.to_string(), "int | none");
+        assert_eq!(res.to_string(), "int | none ! error");
+        assert_eq!(list_of(opt.clone()).to_string(), "list[int | none]");
+        let f1 = Type::Fn(vec![Type::Int], Box::new(Type::Bool));
+        assert_eq!(f1.to_string(), "int -> bool");
+        let f2 = Type::Fn(vec![Type::Int, Type::Str], Box::new(res.clone()));
+        assert_eq!(f2.to_string(), "(int, str) -> int | none ! error");
+        let higher = Type::Fn(vec![f1.clone()], Box::new(Type::Unit));
+        assert_eq!(higher.to_string(), "(int -> bool) -> ()");
+        assert_eq!(
+            Type::Union(vec![f1, Type::None]).to_string(),
+            "(int -> bool) | none"
+        );
+    }
+
+    #[test]
+    fn scalars_are_strict() {
+        assert_eq!(mismatch(&Value::Int(3), &Type::Int), None);
+        assert_eq!(
+            mismatch(&Value::Int(3), &Type::Float),
+            Some((Value::Int(3), vec![]))
+        );
+        assert!(mismatch(&Value::Float(1.0), &Type::Int).is_some());
+        assert!(mismatch(&Value::None, &Type::Int).is_some());
+        assert_eq!(mismatch(&Value::Unit, &Type::Unit), None);
+        assert_eq!(mismatch(&Value::Str("a".into()), &Type::Any), None);
+        assert_eq!(mismatch(&Value::Bool(true), &Type::Var("T".into())), None);
+    }
+
+    #[test]
+    fn optional_union_and_result() {
+        let opt = Type::Union(vec![Type::Int, Type::None]);
+        assert_eq!(mismatch(&Value::None, &opt), None);
+        assert_eq!(mismatch(&Value::Int(5), &opt), None);
+        assert!(mismatch(&Value::Str("x".into()), &opt).is_some());
+        let res = Type::Result(Box::new(Type::Int), Box::new(Type::Var("error".into())));
+        let ok = |v| Value::Ok(Rc::new(v));
+        assert_eq!(mismatch(&ok(Value::Int(1)), &res), None);
+        let err = Value::Err(Rc::new(ErrVal {
+            payload: Value::Str("x".into()),
+            context: Vec::new(),
+            origin: Site {
+                fn_name: "f".into(),
+                span: SrcSpan::default(),
+            },
+            propagated: Vec::new(),
+        }));
+        assert_eq!(mismatch(&err, &res), None);
+        assert!(mismatch(&ok(Value::Str("s".into())), &res).is_some());
+        // No auto-wrap (Q29).
+        assert!(mismatch(&Value::Int(3), &res).is_some());
+    }
+
+    #[test]
+    fn lists_are_checked_deeply_with_a_path() {
+        let xs = list(vec![Value::Int(1), Value::Int(2), Value::Str("a".into())]);
+        assert_eq!(
+            mismatch(&xs, &list_of(Type::Int)),
+            Some((Value::Str("a".into()), vec![2]))
+        );
+        assert_eq!(mismatch(&xs, &list_of(Type::Any)), None);
+        let nested = list(vec![
+            list(vec![]),
+            list(vec![Value::Int(1), Value::Bool(true)]),
+        ]);
+        assert_eq!(
+            mismatch(&nested, &list_of(list_of(Type::Int))),
+            Some((Value::Bool(true), vec![1, 1]))
+        );
+        assert!(mismatch(&Value::Int(1), &list_of(Type::Int)).is_some());
+    }
+
+    #[test]
+    fn function_types_check_the_arity() {
+        let add = Value::Closure(Rc::new(Closure::new(Rc::new(add_proto()))));
+        let two = Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Int));
+        let one = Type::Fn(vec![Type::Int], Box::new(Type::Int));
+        assert_eq!(mismatch(&add, &two), None);
+        assert!(mismatch(&add, &one).is_some());
+        // `range` takes 1 to 2 arguments.
+        let range = Value::Native(NativeId(native("range")));
+        assert_eq!(mismatch(&range, &one), None);
+        assert_eq!(mismatch(&range, &two), None);
+        assert!(mismatch(&Value::Int(1), &one).is_some());
+    }
+
+    #[test]
+    fn checktype_reports_r0204_with_the_subject() {
+        let p = ProtoBuilder::new("<main>", 2)
+            .check("binding xs", list_of(Type::Int))
+            .op(Instr::asbx(OpCode::LOADI, 0, 1))
+            .op(Instr::abc(OpCode::LOADBOOL, 1, 1, 0))
+            .op(Instr::abc(OpCode::NEWLIST, 0, 0, 2))
+            .op(Instr::abx(OpCode::CHECKTYPE, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        let e = run(&p).0.unwrap_err();
+        assert_eq!(e.kind.code(), "R0204");
+        assert_eq!(
+            e.message,
+            "binding xs: expected list[int], but element [1] is bool (true)"
+        );
+    }
+
+    #[test]
+    fn checktype_passes_matching_values() {
+        let p = ProtoBuilder::new("<main>", 1)
+            .check("binding x", Type::Union(vec![Type::Int, Type::None]))
+            .op(Instr::abc(OpCode::LOADNONE, 0, 0, 0))
+            .op(Instr::abx(OpCode::CHECKTYPE, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        assert_eq!(run(&p).0, Ok(Value::None));
+    }
+
+    /// `half(n) -> int` tail-calls `div(n)` (no annotation), which returns
+    /// a float: the frame still owes `half`'s promise.
+    #[test]
+    fn return_check_survives_a_tail_call() {
+        let div = ProtoBuilder::new("div", 2)
+            .arity(1)
+            .op(Instr::asbx(OpCode::LOADI, 1, 2))
+            .op(Instr::abc(OpCode::DIV, 1, 0, 1))
+            .op(Instr::abc(OpCode::RETURN, 1, 0, 0))
+            .build();
+        let half = ProtoBuilder::new("half", 3)
+            .arity(1)
+            .ret(Type::Int)
+            .upval("div", UpvalSrc::Reg(1))
+            .op(Instr::abc(OpCode::GETUPVAL, 1, 0, 0))
+            .op(Instr::abc(OpCode::MOVE, 2, 0, 0))
+            .op(Instr::abc(OpCode::TAILCALL, 1, 1, 0))
+            .op(Instr::abc(OpCode::RETURN, 1, 0, 0))
+            .build();
+        let p = ProtoBuilder::new("<main>", 4)
+            .proto(div)
+            .proto(half)
+            .op(Instr::abx(OpCode::CLOSURE, 1, 0))
+            .op(Instr::abx(OpCode::CLOSURE, 2, 1))
+            .op(Instr::asbx(OpCode::LOADI, 3, 7))
+            .op(Instr::abc(OpCode::CALL, 2, 1, 0))
+            .op(Instr::abc(OpCode::RETURN, 2, 0, 0))
+            .program();
+        let e = run(&p).0.unwrap_err();
+        assert_eq!(e.kind.code(), "R0204");
+        assert_eq!(
+            e.message,
+            "return value of half: expected int, got float (3.5)"
+        );
+        // The failing frame now runs `div`; `half` was replaced by the tail call.
+        assert_eq!(&*e.trace[0].fn_name, "div");
+        assert_eq!(e.trace[0].tail_calls, 1);
+    }
+
+    #[test]
+    fn return_check_hints_at_ok() {
+        let f = ProtoBuilder::new("f", 1)
+            .ret(Type::Result(
+                Box::new(Type::Int),
+                Box::new(Type::Var("error".into())),
+            ))
+            .op(Instr::asbx(OpCode::LOADI, 0, 3))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        let p = ProtoBuilder::new("<main>", 1)
+            .proto(f)
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+            .op(Instr::abc(OpCode::CALL, 0, 0, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program();
+        let e = run(&p).0.unwrap_err();
+        assert_eq!(
+            e.message,
+            "return value of f: expected int ! error, got int (3)"
+        );
+        assert_eq!(e.notes, ["help: wrap the value in Ok(...)"]);
     }
 
     proptest! {

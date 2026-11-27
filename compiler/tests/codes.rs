@@ -19,8 +19,8 @@ use valo_vm::error::ErrorKind;
 const NOT_IN_GOLDENS: &[&str] = &["R0501", "R0801", "R0901"];
 
 /// Codes whose goldens arrive with the milestone that produces them.
-// M10: E0401 literal annotation mismatch.
-const PENDING: &[&str] = &["E0401"];
+// M10: E0401 literal annotation mismatch, R0204 annotation mismatch at run time.
+const PENDING: &[&str] = &["E0401", "R0204"];
 
 fn stderr_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("read golden dir").flatten() {

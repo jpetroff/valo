@@ -15,7 +15,9 @@
 //! ```
 //!
 //! A function with parameters or `let`s also lists its debug table:
-//! `locals:` with one `R<reg> <name> pc <start>..<end>` line each.
+//! `locals:` with one `R<reg> <name> pc <start>..<end>` line each. A
+//! declared return type is shown in the header (`-> int`, M10), and each
+//! `CHECKTYPE` names what it checks (`; parameter n of fact: int`).
 //!
 //! Columns: instruction index (`pc`), `[line:col]` of the source that produced
 //! it, mnemonic, operands (`A B C`, `A Bx`, …), and an optional `; comment`
@@ -75,9 +77,14 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
     } else {
         format!(" upvals={}", p.upvals.len())
     };
+    // `-> T` for a declared return type (M10).
+    let ret = match &p.ret_type {
+        Some(t) => format!(" -> {t}"),
+        None => String::new(),
+    };
     let _ = writeln!(
         out,
-        "{pad}function {} arity={}{required} regs={} consts={}{upvals} protos={}   ; {}:{dl}:{dc}",
+        "{pad}function {} arity={}{required} regs={} consts={}{upvals} protos={}{ret}   ; {}:{dl}:{dc}",
         p.name,
         p.arity,
         p.num_regs,
@@ -123,6 +130,10 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
                 .map(|c| format!("<fn {}/{}>", c.name, c.arity)),
             OpCode::GETUPVAL => p.upvals.get(instr.b() as usize).map(|u| u.name.to_string()),
             OpCode::GETSELF => Some(p.name.to_string()),
+            OpCode::CHECKTYPE => p
+                .checks
+                .get(instr.bx() as usize)
+                .map(|c| format!("{}: {}", c.what, c.ty)),
             _ => None,
         };
         let line = format!("{pad}  {pc:04}  {pos:<7} {:<9} {operands:<8}", op.name());

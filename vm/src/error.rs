@@ -31,7 +31,7 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
-use crate::chunk::SrcSpan;
+use crate::chunk::{SrcSpan, Type};
 use crate::value::{ErrVal, Value};
 
 /// Category of a runtime error; each maps to a stable code (plan §5).
@@ -54,6 +54,8 @@ pub enum ErrorKind {
     NotCallable,
     /// R0203 a condition (`if`, `and`/`or` operand, `assert`) is not a bool.
     ConditionNotBool,
+    /// R0204 a value does not match its type annotation (M10).
+    AnnotationMismatch,
     /// R0205 values of this type have no order (`<` on bools), or cannot be
     /// compared at all (functions).
     NotComparable,
@@ -96,6 +98,7 @@ impl ErrorKind {
         ErrorKind::TypeMismatch,
         ErrorKind::NotCallable,
         ErrorKind::ConditionNotBool,
+        ErrorKind::AnnotationMismatch,
         ErrorKind::NotComparable,
         ErrorKind::NativeArgType,
         ErrorKind::WrongArgCount,
@@ -122,6 +125,7 @@ impl ErrorKind {
             ErrorKind::TypeMismatch => "wrong operand type",
             ErrorKind::NotCallable => "not a function",
             ErrorKind::ConditionNotBool => "not a bool",
+            ErrorKind::AnnotationMismatch => "does not match the annotation",
             ErrorKind::NotComparable => "cannot be compared",
             ErrorKind::NativeArgType => "wrong argument type",
             ErrorKind::WrongArgCount => "wrong number of arguments",
@@ -149,6 +153,7 @@ impl ErrorKind {
             ErrorKind::TypeMismatch => "R0201",
             ErrorKind::NotCallable => "R0202",
             ErrorKind::ConditionNotBool => "R0203",
+            ErrorKind::AnnotationMismatch => "R0204",
             ErrorKind::NotComparable => "R0205",
             ErrorKind::NativeArgType => "R0206",
             ErrorKind::WrongArgCount => "R0207",
@@ -381,6 +386,45 @@ impl RuntimeError {
             None => format!("expected a bool, found {}", v.describe()),
         };
         RuntimeError::new(ErrorKind::ConditionNotBool, message)
+    }
+
+    /// R0204 `what` (`binding x`, `parameter n of f`, `return value of f`)
+    /// should be `ty` but is `got`; `path` = list indices from the checked
+    /// value down to `got` (empty when the whole value is wrong).
+    pub fn annotation_mismatch(what: &str, ty: &Type, got: &Value, path: &[usize]) -> RuntimeError {
+        let message = if path.is_empty() {
+            format!("{what}: expected {ty}, got {}", got.describe())
+        } else {
+            let at: String = path.iter().map(|i| format!("[{i}]")).collect();
+            format!(
+                "{what}: expected {ty}, but element {at} is {}",
+                got.describe()
+            )
+        };
+        let err = RuntimeError::new(ErrorKind::AnnotationMismatch, message);
+        let is_result = |t: &Type| match t {
+            Type::Result(..) => true,
+            Type::Union(ts) => ts.iter().any(|t| matches!(t, Type::Result(..))),
+            _ => false,
+        };
+        match got {
+            // Q29: no auto-wrap in Ok.
+            _ if path.is_empty()
+                && is_result(ty)
+                && !matches!(got, Value::Ok(_) | Value::Err(_)) =>
+            {
+                err.help("wrap the value in Ok(...)")
+            }
+            Value::Ok(_) | Value::Err(_) if path.is_empty() && !is_result(ty) => {
+                err.help(&format!(
+                    "this is a result; declare the type as `{ty} ! error`, or handle it with `?`"
+                ))
+            }
+            Value::Int(_) if path.is_empty() && *ty == Type::Float => {
+                err.help("annotations never convert; use float(x)")
+            }
+            _ => err,
+        }
     }
 
     /// R0205 `==` between two functions.

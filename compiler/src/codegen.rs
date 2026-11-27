@@ -306,6 +306,8 @@ impl<'r> FuncState<'r> {
                 protos: Vec::new(),
                 locals: Vec::new(),
                 upvals: Vec::new(),
+                checks: Vec::new(),
+                ret_type: None,
             },
             free_reg: 0,
             max_reg: 0,
