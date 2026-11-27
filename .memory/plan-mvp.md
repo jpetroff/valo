@@ -104,7 +104,7 @@ isJ  |                 sJ (i24, 2's complement)      |    opcode     |
 | ASSERT A B | ABC | R[A] must be Bool (R0203); if false → R0701; B=1: R[A+1], R[A+2] hold lhs/rhs of a top-level comparison for the message | M3 |
 | LOADMISSING A | ABC | R[A] = Missing (internal sentinel: omitted defaulted arg) | M4b |
 | JMPIFSET A sBx | AsBx | if R[A] != Missing then pc += sBx (skips the param's default-expr code in the callee prologue) | M4b |
-| CHECKTYPE A Bx | ABx | assert R[A] : types[Bx] else R0204 | M10 |
+| CHECKTYPE A Bx | ABx | assert R[A] : proto.checks[Bx].ty else R0204 (deviation: per-proto `TypeCheck { ty: Type, what }`, not `Program.types`) | M10 |
 
 No CALLHOST opcode: natives are `Value::Native` in globals, invoked by CALL (D14). No CLOSE (D5). No fused compare-jump, no ADDK/ADDI (post-MVP perf).
 
@@ -121,14 +121,15 @@ struct Proto {
     consts: Vec<Const>,          // Const::{Int(i64), Float(f64), Str(Rc<str>)}
     protos: Vec<Rc<Proto>>,      // nested functions (CLOSURE Bx indexes here)
     upvals: Vec<UpvalDesc>,      // UpvalDesc { from_parent_reg: bool, index: u8 }
-    ret_type: Option<TypeId>,    // M10; param checks are CHECKTYPE in the prologue
+    ret_type: Option<Type>,      // M10 (as built: chunk::Type tree); param checks are CHECKTYPE in the prologue
+    checks: Vec<TypeCheck>,      // M10: CHECKTYPE Bx operand; TypeCheck { ty: Type, what: "parameter n of f" }
     spans: Vec<SrcSpan>,         // parallel to code; SrcSpan{start:u32,end:u32}
     def_span: SrcSpan,
 }
 struct Program {
     main: Rc<Proto>,
     globals: Vec<GlobalDesc>,    // { name: Rc<str>, kind: Native(NativeId) | User }
-    types: Vec<TypeDesc>,        // M10
+    // (planned `types: Vec<TypeDesc>` dropped in M10: the VM keeps no Program while running)
     source_name: Rc<str>,
     line_starts: Vec<u32>,       // byte offset of each line; VM computes line/col without compiler
 }
@@ -182,7 +183,7 @@ value stack: Vec<Value> (one per Vm)
 struct Frame {
     closure: Rc<Closure>,            // natives get no Frame; see NativeMark
     base: usize, pc: usize,
-    ret_checks: Vec<TypeId>,            // deduped return-type checks, usually len ≤ 1 (M10)
+    ret_checks: Vec<Rc<Proto>>,         // M10: annotated fns this frame replaced by TAILCALL (running fn's ret_type checked directly); deduped; empty = no alloc
     tail_calls: u32,                    // frames elided by TAILCALL, for traces (M5)
     reentry: bool,                      // entered via Vm::call_value; run-loop exits on its RETURN (M8)
 }
@@ -637,7 +638,17 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 - Out of scope: `--error-format json`, LSP, warnings/lints (unused binding etc.).
 - Note: M9 is cross-cutting; prefer landing each piece in the milestone that introduces the error and keep M9 as the sweep.
 
-### M10 — Type annotations with runtime checks
+### M10 — Type annotations with runtime checks — DONE 2026-11-27
+
+- Implementation notes (branch `m9-m10`, commits M10a VM + M10b front end):
+  - Deviation from §2.2/§2.3 (`Program.types` + `TypeId`): `chunk::Type` is a small tree (`Any, Var(name), Unit, Int, Float, Bool, Str, None, List, Union(Vec), Result(T, E), Fn(params, ret)`), stored per check in `Proto::checks: Vec<TypeCheck { ty, what }>` and in `Proto::ret_type`, because `Vm::run` does not keep the `Program`. `Display` gives the user spelling with `->` < `!` < `|` precedence and parentheses where needed. Optional = `Union([T, None])` (flattened, deduped); `error` and type vars lower to `Var` (accept all, name kept for messages: `int ! error`). `Type::accepts_all` → no CHECKTYPE / no list walk.
+  - VM: `vm::find_mismatch(v, ty, &mut path) -> Option<&Value>` (pub; codegen reuses it for E0401). Fn types: Closure with `required ≤ n ≤ arity`, Native via its params. `Frame::ret_checks: Vec<Rc<Proto>>` holds only the annotated fns a TAILCALL replaced with a *different* fn (ptr-dedupe → self/mutual recursion O(1)); the running fn's own `ret_type` is checked directly, so a plain CALL allocates nothing; `do_return` (now `Result`) checks all before popping, so the trace's innermost frame is the returning fn (after tail calls: the last callee, with "N tail calls elided"). Re-entry frames go through the same path. Release RSS for an annotated tail loop: 10^3 → 9.6 MB, 10^7 → 10.6 MB.
+  - R0204 = `ErrorKind::AnnotationMismatch`; messages `binding n: expected float, got int (3)`, `parameter x of scale: …`, `return value of f: …`, lists `expected list[list[int]], but element [2][2] is str ("5")` (path syntax instead of the planned `at element 2`). Helps: `wrap the value in Ok(...)` (Q29), `this is a result; declare the type as `T ! error`…`, `annotations never convert; use float(x)`.
+  - Codegen: `lower_type`; prologue CHECKTYPE per annotated param *after* the JMPIFSET defaults (span = param name … annotation end; `what` = `parameter p of f`); `let` → CHECKTYPE after the initialiser (span = initialiser). E0401 (`check_literal`): literal initialiser / literal param default (int, float, bool, str, none, (), negated number) checked at compile time with `find_mismatch`; a matching literal `let` emits no CHECKTYPE, a param always keeps its runtime check. Lambdas have no return annotation (S3), so `ret_type` = None for them.
+  - User decision: `dict[…]`, `tuple[…]` and `(A, B)` annotations → E0009 in the resolver until M8b (M8b follow-up: lower them + CHECKTYPE).
+  - Debugger: `LineTable` skips CHECKTYPE, so *step in* still lands on the body's first line (two DAP smoke tests caught it).
+  - Earlier goldens: only `m6/partial_arity_dynamic` changed — its `(int, int) -> int` param now rejects the 1-ary partial on entry (R0204) instead of R0207 at the inner call; R0207 stays covered by `m4/arity_dynamic`. Disasm snapshots gained `-> T` headers and CHECKTYPE lines.
+  - Goldens `m10/`: `ok`, `binding_mismatch`, `literal_mismatch` (3× E0401 incl. a param default), `optional`, `result`, `result_no_autowrap`, `result_declared_plain` (Err from a plain `-> int` fn), `param_mismatch` (via `_` partial), `list_deep`, `ret_tail` (100 000 tail calls into an unannotated `-> any` fn), `fn_type`, `dict_ann` (E0009). `codes.rs` PENDING emptied.
 
 - Goal: Pydantic-strict annotations on bindings, params, returns enforced at runtime.
 - Blocks: runtime checking of the annotations parsed since M4 (fn params/returns required, `let`/lambda optional); type expressions per S4 (+ `any`, type vars): `int float bool str`, unit `()`, `list[T]`, `T | none` (optional, no wrapper), `T ! error` (Result; `!` binds looser than `|`), function types `A -> B`, `(A, B) -> C`, `() -> A` (right-assoc).

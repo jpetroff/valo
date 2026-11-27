@@ -32,22 +32,25 @@ function <main> arity=0 regs=6 consts=0 protos=2   ; t.vl:1:1
   0026  [7:11]  LOADUNIT  0
   0027  [7:11]  RETURN    0
 constants: (none)
-  function sq arity=1 regs=3 consts=0 protos=0   ; t.vl:2:4
-    0000  [2:24]  MOVE      1 0
-    0001  [2:28]  MOVE      2 0
-    0002  [2:24]  MUL       1 1 2
-    0003  [2:24]  RETURN    1
+  function sq arity=1 regs=3 consts=0 protos=0 -> int   ; t.vl:2:4
+    0000  [2:7]   CHECKTYPE 0 0      ; parameter x of sq: int
+    0001  [2:24]  MOVE      1 0
+    0002  [2:28]  MOVE      2 0
+    0003  [2:24]  MUL       1 1 2
+    0004  [2:24]  RETURN    1
   constants: (none)
   locals:
-    R0   x          pc 0000..0004
-  function add arity=2 regs=5 consts=0 protos=0   ; t.vl:3:4
-    0000  [4:13]  MOVE      3 0
-    0001  [4:17]  MOVE      4 1
-    0002  [4:13]  ADD       3 3 4
-    0003  [5:5]   MOVE      2 3
-    0004  [4:9]   RETURN    2
+    R0   x          pc 0000..0005
+  function add arity=2 regs=5 consts=0 protos=0 -> int   ; t.vl:3:4
+    0000  [3:8]   CHECKTYPE 0 0      ; parameter a of add: int
+    0001  [3:16]  CHECKTYPE 1 1      ; parameter b of add: int
+    0002  [4:13]  MOVE      3 0
+    0003  [4:17]  MOVE      4 1
+    0004  [4:13]  ADD       3 3 4
+    0005  [5:5]   MOVE      2 3
+    0006  [4:9]   RETURN    2
   constants: (none)
   locals:
-    R0   a          pc 0000..0005
-    R1   b          pc 0000..0005
-    R3   s          pc 0003..0004
+    R0   a          pc 0000..0007
+    R1   b          pc 0000..0007
+    R3   s          pc 0005..0006

@@ -269,6 +269,20 @@ RETURN X (in g):  stack[base'-1] = R'[X]   → the caller finds the result in R[
   finished calls are freed at once (with `Rc`, a value lives as long as a
   stack slot still points to it).
 
+**Type annotations** (M10). `CHECKTYPE A Bx` checks `R[A]` against
+`proto.checks[Bx]` with `find_mismatch`: scalars by tag (strictly: an
+`int` is not a `float`), `list[T]` element by element (the error names the
+path, `element [2][2]`), `T | none`, `T ! E` (any `Err`; `Ok(v)` needs
+`v: T`), function types by arity; type variables and `any` accept
+everything. Return types work differently, because of tail calls: a frame
+keeps `ret_checks`, the annotated functions it replaced by `TAILCALL`
+with a *different* function — the frame now returns on behalf of them too.
+`do_return` checks the running function's own return type and every entry
+before it pops the frame, so an R0204 trace still shows the function that
+returned. A plain call leaves the list empty (no allocation), and entries
+are deduplicated by prototype, so self- and mutual recursion stay flat
+(`m10/ret_tail`: 100 000 tail calls).
+
 **Closures** (M6). `CLOSURE A Bx` builds `Closure { proto, captures }` for
 child prototype `Bx`, copying one value per entry of the child's
 `Proto::upvals` from where the *running* function has it: a register
@@ -368,6 +382,7 @@ crash.
 | float arithmetic | `float_arith`; type dispatch in `arith` |
 | what `==` / `<` accept | `values_equal`, `less` |
 | how calls work | `Vm::call` (CALL), `Vm::tail_call` (TAILCALL), `Vm::do_return` (RETURN), `Frame` |
+| what an annotation accepts | `find_mismatch` (`vm.rs`), `chunk::Type` |
 | add a built-in | `builtins.rs`: a function + an entry appended to `NATIVES` |
 | recursion limits | `MAX_FRAMES`, `MAX_STACK` |
 | a new effect | method on `Host` + both implementations |

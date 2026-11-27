@@ -1171,6 +1171,18 @@ impl Resolver {
                 }
                 self.unknown_type(t.span, n);
             }
+            // Tuples and dicts are values of M8b; their annotations
+            // cannot be checked before they exist (user decision, M10).
+            TypeKind::Generic(n, _) if n == "dict" || n == "tuple" => {
+                self.diags.push(
+                    Diagnostic::new(
+                        "E0009",
+                        format!("`{n}` types are not supported yet"),
+                        t.span,
+                    )
+                    .label("tuples and dicts come in a later version"),
+                );
+            }
             TypeKind::Generic(n, args) => {
                 match GENERIC_TYPES.iter().find(|(g, _)| g == n) {
                     Some((_, Some(want))) if *want != args.len() => {
@@ -1204,10 +1216,11 @@ impl Resolver {
                     self.check_type(a);
                 }
             }
-            TypeKind::Tuple(ts) => {
-                for x in ts {
-                    self.check_type(x);
-                }
+            TypeKind::Tuple(_) => {
+                self.diags.push(
+                    Diagnostic::new("E0009", "tuple types are not supported yet", t.span)
+                        .label("tuples come in a later version"),
+                );
             }
             TypeKind::Union(a, b) | TypeKind::Result(a, b) => {
                 self.check_type(a);
@@ -1616,7 +1629,9 @@ mod tests {
         );
         assert_eq!(codes("let x: list = 1"), ["E0403"]);
         assert_eq!(codes("let x: int[str] = 1"), ["E0403"]);
-        assert_eq!(codes("let x: dict[str] = 1"), ["E0403"]);
+        // dict/tuple annotations wait for M8b values (M10).
+        assert_eq!(codes("let x: dict[str, int] = 1"), ["E0009"]);
+        assert_eq!(codes("let x: (int, str) = 1"), ["E0009"]);
         // Local fns (M6): visible from their line on; no mutual recursion.
         assert!(resolve_src("let v = if true:\n    fn g() -> int = 1\n    g()\nelse: 0").is_ok());
         assert_eq!(
@@ -1643,8 +1658,10 @@ mod tests {
         assert!(
             resolve_src("fn f(x: int) -> int = x\nlet h = if true then f else f\nh(1, 2)").is_ok()
         );
-        assert!(
-            resolve_src("fn f[T](x: T, d: dict[str, list[T]]) -> (T, any) ! error = x").is_ok()
+        assert!(resolve_src("fn f[T](x: T, d: list[list[T]]) -> T | any ! error = x").is_ok());
+        assert_eq!(
+            codes("fn f[T](x: T, d: dict[str, list[T]]) -> (T, any) ! error = x"),
+            ["E0009", "E0009"]
         );
     }
 }

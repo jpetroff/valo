@@ -1,0 +1,11 @@
+error[R0204]: return value of read_port: expected int, got result (Err("bad port"))
+   ╭─[ result_declared_plain.vl:3:23 ]
+   │
+ 3 │     if n == none then Err("bad port") else n
+   │                       ───────┬───────  
+   │                              ╰───────── does not match the annotation
+───╯
+  help: this is a result; declare the type as `int ! error`, or handle it with `?`
+stack trace (most recent call first):
+  0: read_port at result_declared_plain.vl:3:23
+  1: <main>    at result_declared_plain.vl:5:7

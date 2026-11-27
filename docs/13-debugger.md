@@ -246,7 +246,10 @@ line start is where breakpoints can go: a breakpoint on a blank line or a
 comment moves to the next one (the editor shows the dot jump). Native
 debuggers solve the same problem with DWARF's `is_stmt` flag, which the
 compiler sets on the instructions where a statement begins; valo can add
-such a flag later if stepping stops mid-expression too often.
+such a flag later if stepping stops mid-expression too often. One such case
+is handled already: the parameter checks of a function's prologue
+(`CHECKTYPE`, M10) carry the `fn` header's position but are never a line
+start, so *step in* lands on the first line of the body.
 
 **Breakpoints in an interpreter** need no patched instructions (unlike
 `int3` in native code). The hook runs at every line start and looks the

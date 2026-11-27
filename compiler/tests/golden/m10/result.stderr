@@ -1,0 +1,10 @@
+error[R0204]: return value of broken: expected int ! error, got result (Ok("1"))
+   ╭─[ result.vl:5:36 ]
+   │
+ 5 │ fn broken(n: int) -> int ! error = Ok(str(n))
+   │                                    ─────┬────  
+   │                                         ╰────── does not match the annotation
+───╯
+stack trace (most recent call first):
+  0: broken at result.vl:5:36
+  1: <main> at result.vl:6:7

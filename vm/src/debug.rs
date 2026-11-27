@@ -56,6 +56,7 @@ use std::rc::Rc;
 use crate::builtins::NATIVES;
 use crate::chunk::{NativeId, Program, Proto, SrcSpan};
 use crate::error::RuntimeError;
+use crate::opcode::OpCode;
 use crate::value::Value;
 use crate::vm::Frame;
 
@@ -269,10 +270,17 @@ impl LineTable {
         let mut todo: Vec<&Rc<Proto>> = vec![&program.main];
         while let Some(proto) = todo.pop() {
             let mut seen = BTreeSet::new();
+            // A parameter check (`CHECKTYPE` in the prologue, M10) carries
+            // the span of the `fn` header; it is not a place to stop, so
+            // stepping into a function still lands on its first body line.
             let starts = proto
                 .spans
                 .iter()
-                .map(|span| {
+                .zip(&proto.code)
+                .map(|(span, instr)| {
+                    if instr.op() == Ok(OpCode::CHECKTYPE) {
+                        return 0;
+                    }
                     let (line, _) = program.line_col(span.start);
                     if seen.insert(line) {
                         table.lines.insert(line);

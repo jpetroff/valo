@@ -1,0 +1,9 @@
+error[R0204]: binding rows: expected list[list[int]], but element [2][2] is str ("5")
+   ╭─[ list_deep.vl:2:29 ]
+   │
+ 2 │ let rows: list[list[int]] = [[1, 2], [3], [4, len(words), "5"]]
+   │                             ─────────────────┬─────────────────  
+   │                                              ╰─────────────────── does not match the annotation
+───╯
+stack trace (most recent call first):
+  0: <main> at list_deep.vl:2:29

@@ -1,0 +1,2 @@
+fn three() -> int ! error = 3
+print(three())

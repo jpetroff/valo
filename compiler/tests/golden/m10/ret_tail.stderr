@@ -1,0 +1,11 @@
+error[R0204]: return value of countdown: expected int, got float (0.5)
+   ╭─[ ret_tail.vl:3:22 ]
+   │
+ 3 │ fn finish() -> any = 0.5
+   │                      ─┬─  
+   │                       ╰─── does not match the annotation
+───╯
+stack trace (most recent call first):
+  0: finish at ret_tail.vl:3:22
+     (... 100001 tail calls elided ...)
+  1: <main> at ret_tail.vl:4:7

@@ -400,15 +400,41 @@ let map = 0                                GETGLOBAL 0 21   ; map  (the built-in
                                            CALL      3 2
 ```
 
-## 6.12 What codegen does *not* do
+## 6.12 Type annotations (M10)
 
-- It does not check types: `1 + 2.0` compiles, and the VM reports R0201
-  (`arith`, chapter 7). Type errors are found at runtime until static checks
-  arrive (post-MVP).
+`lower_type` turns an annotation (`TypeExpr`) into the VM's `chunk::Type`:
+`int` → `Type::Int`, `list[T]` → `List`, `A | B | none` → one flattened
+`Union`, `T ! E` → `Result`, any other name → `Var` (a type variable, or
+`error`; both accept everything). Then:
+
+- **parameters**: after the defaults prologue, one `CHECKTYPE i k` per
+  annotated parameter, so a computed default is checked too, and so is a
+  call through a function value (the check is in the callee);
+- **`let x: T = e`**: `CHECKTYPE` right after the initialiser;
+- **return type**: `Proto::ret_type`, checked by the VM at `RETURN`;
+- **literals**: if `e` (or a parameter default) is a literal, the check runs
+  *now*, with the VM's own `find_mismatch`; a mismatch is E0401
+  (`let ratio: float = 1` → "write it as a float: 1.0"), a match needs no
+  instruction;
+- `any` and type variables emit nothing.
+
+```text
+fn sq(x: int) -> int = x * x
+  function sq arity=1 regs=3 consts=0 protos=0 -> int
+    0000  [1:7]   CHECKTYPE 0 0      ; parameter x of sq: int
+    0001  [1:24]  MOVE      1 0
+    …
+```
+
+## 6.13 What codegen does *not* do
+
+- It does not infer types: `1 + 2.0` compiles, and the VM reports R0201
+  (`arith`, chapter 7). Annotations are checked when the program runs
+  (above); static checking arrives post-MVP.
 - It does not decide *meaning* of operators: `IDIV` is emitted for `//`; what
   `//` does with negative numbers is defined once, in the VM.
 
-## 6.12 Where to change things
+## 6.14 Where to change things
 
 | Task | Where |
 |------|-------|
@@ -422,8 +448,9 @@ let map = 0                                GETGLOBAL 0 21   ; map  (the built-in
 | how `_` partials are rewritten | `desugar.rs` (`Desugar::partial`) |
 | how calls are compiled | `FuncState::call` (the argument window) |
 | point runtime errors at the operator | pass `*op_span` instead of `e.span` to the arithmetic `emit` |
+| annotation checks | `lower_type`, `FuncState::check_annotation`, `check_literal` |
 
-## 6.13 Exercises
+## 6.15 Exercises
 
 1. Compile `1 + (2 + (3 + 4))` and `((1 + 2) + 3) + 4` with
    `valo check f.vl --dump bytecode`. Compare `regs=`. Why do they differ?
@@ -435,7 +462,7 @@ let map = 0                                GETGLOBAL 0 21   ; map  (the built-in
    `Binary` arm so that an operand which is a local is used from its own
    register (`ADD 0 1 2`). Which snapshot changes?
 
-## 6.14 Further reading
+## 6.16 Further reading
 
 - *The Implementation of Lua 5.0*, §6 (register allocation in the compiler).
 - Lua 5.4 source: `lcode.c` — `luaK_exp2nextreg`, `freereg`, `luaK_code`.

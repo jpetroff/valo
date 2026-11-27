@@ -649,10 +649,16 @@ partial. Calls to known signatures are checked statically; others at runtime.
 
 | Code  | Rule |
 |-------|------|
+| E0401 | A literal initialiser or default that cannot match its annotation (`let x: int = none`). |
 | E0402 | Unknown type name (not built-in and not a declared type variable). |
 | E0403 | Wrong number of type arguments (`list[int, int]`). |
+| E0009 | `dict[…]`, `tuple[…]` and `(A, B)` types (until dicts and tuples exist). |
 
-Values are not yet checked against annotations.
+Every other value is checked against its annotation at run time (R0204):
+`let` values after their initialiser, parameters on function entry, results
+on return (also through tail calls). `list[T]` is checked element by element;
+function types by arity only; type variables, `any` and the `error` of
+`T ! error` accept every value.
 
 ### 7.5 Lexical errors
 

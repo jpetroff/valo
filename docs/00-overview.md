@@ -40,8 +40,8 @@ prints `108` and `true`. Supported:
   (chained like Python: `0 < x <= 10`), `and`, `or`, `not`, with Python's
   precedence and Python's rounding for `//` and `%`; `/` always gives a float,
   otherwise ints and floats never mix;
-- immutable `let` bindings with optional type annotations (parsed, checked
-  from M10), shadowing, indented blocks whose value is their last line;
+- immutable `let` bindings with optional type annotations (checked when the
+  program runs, M10), shadowing, indented blocks whose value is their last line;
 - `if c: … elif c: … else: …` (block or inline branches) and
   `if c then a else b`; `assert`;
 - parentheses, `#` comments, blank lines, line joining inside brackets;

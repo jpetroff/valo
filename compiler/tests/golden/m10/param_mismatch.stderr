@@ -1,0 +1,12 @@
+error[R0204]: parameter x of scale: expected float, got int (3)
+   ╭─[ param_mismatch.vl:1:10 ]
+   │
+ 1 │ fn scale(x: float, factor: float) -> float = x * factor
+   │          ────┬───  
+   │              ╰───── does not match the annotation
+───╯
+  help: annotations never convert; use float(x)
+stack trace (most recent call first):
+  0: scale  at param_mismatch.vl:1:10
+     (... 1 tail call elided ...)
+  1: <main> at param_mismatch.vl:4:7

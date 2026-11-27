@@ -131,7 +131,8 @@ pub struct Proto {
 pub enum Type {
     /// `any`.
     Any,
-    /// A type variable of a generic fn (`T` in `fn first[T](…)`).
+    /// A type variable of a generic fn (`T` in `fn first[T](…)`), or the
+    /// unchecked error type `error` of `T ! error`: accepts every value.
     Var(Rc<str>),
     /// `()`.
     Unit,

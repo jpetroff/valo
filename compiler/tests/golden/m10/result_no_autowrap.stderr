@@ -1,0 +1,11 @@
+error[R0204]: return value of three: expected int ! error, got int (3)
+   ╭─[ result_no_autowrap.vl:1:29 ]
+   │
+ 1 │ fn three() -> int ! error = 3
+   │                             ┬  
+   │                             ╰── does not match the annotation
+───╯
+  help: wrap the value in Ok(...)
+stack trace (most recent call first):
+  0: three  at result_no_autowrap.vl:1:29
+  1: <main> at result_no_autowrap.vl:2:7

@@ -1,0 +1,9 @@
+error[R0204]: binding c: expected int | none, got str ("x")
+   ╭─[ optional.vl:6:21 ]
+   │
+ 6 │ let c: int | none = trim(" x ")
+   │                     ─────┬─────  
+   │                          ╰─────── does not match the annotation
+───╯
+stack trace (most recent call first):
+  0: <main> at optional.vl:6:21

@@ -8,28 +8,30 @@ function <main> arity=0 regs=1 consts=0 protos=1   ; t.vl:1:1
   0002  [5:12]  LOADUNIT  0
   0003  [5:12]  RETURN    0
 constants: (none)
-  function outer arity=1 regs=5 consts=0 protos=1   ; t.vl:1:4
-    0000  [2:8]   CLOSURE   2 0      ; <fn mid/1>
-    0001  [5:5]   MOVE      3 2
-    0002  [5:9]   LOADI     4 10
-    0003  [5:5]   TAILCALL  3 1
-    0004  [2:5]   RETURN    1
+  function outer arity=1 regs=5 consts=0 protos=1 -> int   ; t.vl:1:4
+    0000  [1:10]  CHECKTYPE 0 0      ; parameter a of outer: int
+    0001  [2:8]   CLOSURE   2 0      ; <fn mid/1>
+    0002  [5:5]   MOVE      3 2
+    0003  [5:9]   LOADI     4 10
+    0004  [5:5]   TAILCALL  3 1
+    0005  [2:5]   RETURN    1
   constants: (none)
   locals:
-    R0   a          pc 0000..0005
-    R2   mid        pc 0001..0004
-    function mid arity=1 regs=5 consts=0 upvals=1 protos=1   ; t.vl:2:8
-      0000  [3:17]  CLOSURE   2 0      ; <fn f/1>
-      0001  [4:9]   MOVE      3 2
-      0002  [4:11]  LOADI     4 1
-      0003  [4:9]   TAILCALL  3 1
-      0004  [3:13]  RETURN    1
+    R0   a          pc 0000..0006
+    R2   mid        pc 0002..0005
+    function mid arity=1 regs=5 consts=0 upvals=1 protos=1 -> int   ; t.vl:2:8
+      0000  [2:12]  CHECKTYPE 0 0      ; parameter b of mid: int
+      0001  [3:17]  CLOSURE   2 0      ; <fn f/1>
+      0002  [4:9]   MOVE      3 2
+      0003  [4:11]  LOADI     4 1
+      0004  [4:9]   TAILCALL  3 1
+      0005  [3:13]  RETURN    1
     constants: (none)
     upvals:
       0   a          <- R0
     locals:
-      R0   b          pc 0000..0005
-      R2   f          pc 0001..0004
+      R0   b          pc 0000..0006
+      R2   f          pc 0002..0005
       function f arity=1 regs=4 consts=0 upvals=3 protos=0   ; t.vl:3:17
         0000  [3:22]  GETUPVAL  1 0      ; a
         0001  [3:26]  GETUPVAL  2 1      ; b

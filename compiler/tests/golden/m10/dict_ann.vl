@@ -1,0 +1,1 @@
+fn load(path: str) -> dict[str, int] = none

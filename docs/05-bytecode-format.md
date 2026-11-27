@@ -103,6 +103,17 @@ Declared for later: `CALL`,
 `GETFIELD` (M8b); `LOADMISSING`, `JMPIFSET` (M4b); `CHECKTYPE` (M10). The
 full table with semantics is in `.memory/plan-mvp.md` §2.2.
 
+`CHECKTYPE A Bx` (M10) checks `R[A]` against `proto.checks[Bx]`, a
+`TypeCheck { ty: Type, what }` (`what` names the subject in the error:
+`parameter n of fact`, `binding x`). A declared return type is
+`proto.ret_type`, checked by `RETURN`; the disassembly shows it in the
+function header (`-> int`) and names each check in a comment:
+
+```text
+  function sq arity=1 regs=3 consts=0 protos=0 -> int   ; t.vl:2:4
+    0000  [2:7]   CHECKTYPE 0 0      ; parameter x of sq: int
+```
+
 Note the "three-address" shape `ADD A B C`: destination and both sources are
 named, and they may coincide (`ADD 0 0 1` = `R0 = R0 + R1`).
 

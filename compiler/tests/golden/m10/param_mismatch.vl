@@ -1,0 +1,4 @@
+fn scale(x: float, factor: float) -> float = x * factor
+let double = scale(_, 2.0)
+print(double(1.5))
+print(double(3))

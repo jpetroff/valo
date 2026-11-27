@@ -1,0 +1,10 @@
+error[R0204]: parameter f of twice: expected int -> int, got function (<fn add/2>)
+   ╭─[ fn_type.vl:1:10 ]
+   │
+ 1 │ fn twice(f: int -> int, x: int) -> int = f(f(x))
+   │          ──────┬──────  
+   │                ╰──────── does not match the annotation
+───╯
+stack trace (most recent call first):
+  0: twice  at fn_type.vl:1:10
+  1: <main> at fn_type.vl:4:7

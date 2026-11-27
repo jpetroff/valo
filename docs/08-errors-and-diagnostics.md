@@ -19,16 +19,16 @@ where a debugger is rarely available, so the error message *is* the debugger.
 Every error has a stable code, so tests, documentation and users can refer to
 it. Codes never change once a golden test uses them.
 
-| Range | Stage | Codes in use (M8) |
+| Range | Stage | Codes in use (M10) |
 |-------|-------|-------------------|
 | E00xx | lexer | E0001 unexpected character · E0002 int literal out of range · E0003 bad dedent · E0004 unterminated string · E0005 invalid escape · E0006 tab in indentation · E0007 unterminated interpolation · E0008 empty interpolation `{}` · E0009 not supported yet · E0010 malformed number |
 | E01xx | parser | E0101 unexpected token · E0102 `if` without `else` · E0103 unclosed `(` · E0104 block ends with a `let`/`fn` · E0105 nested too deeply |
 | E02xx | resolve | E0201 undefined name (+ did-you-mean) · E0203 top-level name used before its definition · E0204 a local fn uses a later local fn (local mutual recursion) · E0205 wrong number of arguments to a known fn · E0206 `_` used as a value · E0207 defined twice (fn, parameter, type variable) · E0208 `?` inside a comprehension |
 | E03xx | codegen | E0301 too many registers / constants / captured variables |
-| E04xx | types | E0402 unknown type name · E0403 wrong number of type arguments · E0410 missing parameter or return annotation |
+| E04xx | types | E0401 literal does not match its annotation · E0402 unknown type name · E0403 wrong number of type arguments · E0410 missing parameter or return annotation |
 | E042x | arguments | E0421 defaulted parameter passed by position · E0422 keyword arguments to a callee unknown at compile time · E0423 required parameter after a defaulted one · E0424 unknown keyword (+ did-you-mean), or a required parameter passed by name · E0425 keyword given twice |
 | R01xx | arithmetic | R0101 integer overflow · R0102 division/modulo by zero · R0103 float → int out of range · R0104 negative exponent |
-| R02xx | types | R0201 operand type mismatch (incl. int/float mixing, str + int) · R0202 not callable · R0203 condition not a bool · R0205 values cannot be ordered / functions compared · R0206 wrong argument type to a built-in · R0207 wrong number of arguments (callee unknown at compile time) · R0208 `?` on a value that is not a result (incl. `none`) |
+| R02xx | types | R0201 operand type mismatch (incl. int/float mixing, str + int) · R0202 not callable · R0203 condition not a bool · R0204 value does not match its annotation (M10) · R0205 values cannot be ordered / functions compared · R0206 wrong argument type to a built-in · R0207 wrong number of arguments (callee unknown at compile time) · R0208 `?` on a value that is not a result (incl. `none`) |
 | R03xx | resources | R0301 stack overflow (more than 200 000 nested calls, or 200 built-ins such as `map` calling back into each other) · R0302 global read before it was set (a fn body may refer to a later top-level `let`) |
 | R04xx | data | R0401 list index out of range · R0402 `unwrap` of `none` · R0403 `unwrap` of an `Err` |
 | R06xx | results | R0601 unhandled `Err` at the top level (context chain, origin, `?` sites) |

@@ -109,21 +109,12 @@ pub(crate) struct Frame {
     /// Entered from a built-in through `Vm::call_value` (M8): its `RETURN`
     /// ends the nested dispatch loop instead of resuming a caller frame.
     pub(crate) reentry: bool,
-    /// Functions whose declared return type the result of this frame must
-    /// match (M10): the called function, plus every different annotated
-    /// function it tail-called (TAILCALL keeps the frame, so the caller's
-    /// promise still holds). Deduplicated, so self-recursion stays O(1).
+    /// Annotated functions this frame replaced by tail calls (M10): the
+    /// result must still match their declared return types, besides that
+    /// of the running function (`closure.proto.ret_type`). Empty — no
+    /// allocation — unless a tail call went to a *different* function;
+    /// deduplicated, so recursion keeps it bounded.
     pub(crate) ret_checks: Vec<Rc<Proto>>,
-}
-
-/// The return checks of a new frame for `proto`: empty (no allocation) when
-/// it has no return annotation.
-fn ret_checks_for(proto: &Rc<Proto>) -> Vec<Rc<Proto>> {
-    if proto.ret_type.is_some() {
-        vec![Rc::clone(proto)]
-    } else {
-        Vec::new()
-    }
 }
 
 /// Whether `v` matches `ty`. On a mismatch, returns the offending value
@@ -731,16 +722,13 @@ impl<'h> Vm<'h> {
     /// ends the nested dispatch loop, and `call_value` hands `v` to the
     /// built-in that asked for it.
     ///
-    /// The result is checked against the return type of every function in
-    /// `ret_checks` first (M10), while the frame still exists, so an R0204
-    /// trace points at the `RETURN` in the callee.
+    /// The result is checked first (M10) against the return type of the
+    /// running function and of every function in `ret_checks`, while the
+    /// frame still exists, so an R0204 trace points at the returning code.
     fn do_return(&mut self, v: Value) -> Result<Option<Value>, RuntimeError> {
         let frame = self.frames.last().expect("RETURN without a frame");
-        for p in &frame.ret_checks {
-            let ty = p
-                .ret_type
-                .as_ref()
-                .expect("ret_checks only holds annotated fns");
+        for p in std::iter::once(&frame.closure.proto).chain(&frame.ret_checks) {
+            let Some(ty) = &p.ret_type else { continue };
             let mut path = Vec::new();
             if let Some(bad) = find_mismatch(&v, ty, &mut path) {
                 let what = format!("return value of {}", p.name);
@@ -806,8 +794,14 @@ impl<'h> Vm<'h> {
             *slot = Value::Missing;
         }
         let frame = self.frame_mut();
-        if c.proto.ret_type.is_some() && !frame.ret_checks.iter().any(|p| Rc::ptr_eq(p, &c.proto)) {
-            frame.ret_checks.push(Rc::clone(&c.proto));
+        // The replaced function's return type still applies (M10).
+        let old = &frame.closure.proto;
+        if old.ret_type.is_some()
+            && !Rc::ptr_eq(old, &c.proto)
+            && !frame.ret_checks.iter().any(|p| Rc::ptr_eq(p, old))
+        {
+            let old = Rc::clone(old);
+            frame.ret_checks.push(old);
         }
         frame.closure = c;
         frame.pc = 0;
@@ -844,7 +838,7 @@ impl<'h> Vm<'h> {
                     *slot = Value::Missing;
                 }
                 self.frames.push(Frame {
-                    ret_checks: ret_checks_for(&c.proto),
+                    ret_checks: Vec::new(),
                     closure: c,
                     base,
                     pc: 0,

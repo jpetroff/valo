@@ -1,10 +1,10 @@
-error[R0207]: `<partial add@3:13>` takes 1 argument but 2 were given
-   ╭─[ partial_arity_dynamic.vl:2:41 ]
+error[R0204]: parameter h of call2: expected (int, int) -> int, got function (<fn <partial add@3:13>/1>)
+   ╭─[ partial_arity_dynamic.vl:2:10 ]
    │
  2 │ fn call2(h: (int, int) -> int) -> int = h(1, 2)
-   │                                         ───┬───  
-   │                                            ╰───── wrong number of arguments
+   │          ──────────┬─────────  
+   │                    ╰─────────── does not match the annotation
 ───╯
 stack trace (most recent call first):
-  0: call2  at partial_arity_dynamic.vl:2:41
+  0: call2  at partial_arity_dynamic.vl:2:10
   1: <main> at partial_arity_dynamic.vl:3:7
