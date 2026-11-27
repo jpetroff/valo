@@ -1,0 +1,9 @@
+[E0206] Error: `_` is not a value
+   ╭─[ discard_name.vl:2:1 ]
+   │
+ 2 │ _ * 2
+   │ ┬  
+   │ ╰── `_` cannot be read
+   │ 
+   │ Help: `_` discards a value (`let _ = …`); it is not a variable
+───╯

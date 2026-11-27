@@ -19,13 +19,16 @@ where a debugger is rarely available, so the error message *is* the debugger.
 Every error has a stable code, so tests, documentation and users can refer to
 it. Codes never change once a golden test uses them.
 
-| Range | Stage | Codes in use (M1) |
+| Range | Stage | Codes in use (M3) |
 |-------|-------|-------------------|
 | E00xx | lexer | E0001 unexpected character · E0002 int literal out of range · E0003 bad dedent · E0006 tab in indentation · E0009 not supported yet · E0010 malformed number |
-| E01xx | parser | E0101 unexpected token · E0103 unclosed `(` |
+| E01xx | parser | E0101 unexpected token · E0102 `if` without `else` · E0103 unclosed `(` · E0104 block ends with a `let` · E0105 nested too deeply |
+| E02xx | resolve | E0201 undefined name (+ did-you-mean) · E0203 top-level name used before its definition · E0206 `_` used as a value |
 | E03xx | codegen | E0301 too many registers / constants |
 | R01xx | arithmetic | R0101 integer overflow · R0102 division/modulo by zero · R0104 negative exponent |
-| R02xx | types | R0201 operand type mismatch |
+| R02xx | types | R0201 operand type mismatch (incl. int/float mixing) · R0203 condition not a bool · R0205 values cannot be ordered |
+| R03xx | resources | R0302 global read before it was set (unreachable from `<main>`; from M4 a function can run before a binding it reads) |
+| R07xx | assertions | R0701 assertion failed |
 | R05xx | host | R0501 output write failed |
 | R09xx | internal | R0901 bad bytecode / unimplemented opcode |
 
@@ -96,11 +99,13 @@ File: [`vm/src/error.rs`](../vm/src/error.rs)
 
 ```rust
 pub enum ErrorKind { IntOverflow, DivisionByZero, NegativeExponent,
-                     TypeMismatch, HostIo, Internal }      // .code() → "R0101", ...
+                     TypeMismatch, ConditionNotBool, NotComparable,
+                     GlobalUninit, AssertionFailed, HostIo, Internal } // .code() → "R0101", ...
 
 pub struct RuntimeError {
     pub kind: ErrorKind,
     pub message: String,              // "division by zero: 7 // 0"
+    pub notes: Vec<String>,           // extra lines: "left: 4", "help: …"
     pub trace: Vec<TraceEntry>,       // innermost frame first
 }
 pub struct TraceEntry { pub fn_name: Rc<str>, pub span: SrcSpan }
@@ -118,6 +123,19 @@ error[R0101]: integer overflow: 9223372036854775807 + 1
   --> overflow.vl:1:1
 stack trace (most recent call first):
   0: <main> at overflow.vl:1:1
+```
+
+Notes follow the location line. A failed `assert` also quotes the asserted
+expression — the VM has no source text, but the span of the `ASSERT`
+instruction is that expression, so `render_runtime` slices it from the file:
+
+```text
+error[R0701]: assertion failed: a + a == 5
+  --> assert_cmp_fail.vl:2:8
+  left: 4
+  right: 5
+stack trace (most recent call first):
+  0: <main> at assert_cmp_fail.vl:2:8
 ```
 
 M9 adds the source snippet (like compile errors) and unifies both header

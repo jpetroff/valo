@@ -1,0 +1,5 @@
+# same-scope rebinding: the right-hand side reads the previous binding
+let n = 5
+let n = n * n
+let n = n + 1
+n

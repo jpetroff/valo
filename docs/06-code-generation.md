@@ -105,24 +105,97 @@ generation finishes and reports all errors at once.
 ### Compiling the program — `compile`
 
 ```rust
-pub fn compile(program: &ast::Program, sm: &SourceMap, opts: Options)
+pub fn compile(program: &ast::Program, resolved: &Resolved, sm: &SourceMap, opts: Options)
     -> Result<Program, Vec<Diagnostic>>
 ```
 
 1. Create the `<main>` `FuncState`.
 2. For each top-level expression: allocate `R0`, compile into it, emit `ECHO`
-   if `--echo` was given, free `R0` again.
+   if `--echo` was given, free `R0` again. For each top-level `let`: compile
+   the initialiser into a temporary and store it with `SETGLOBAL`.
 3. Emit `LOADUNIT r; RETURN r` (every function returns a value; a script's
    result is `()`).
-4. `finish()` and wrap in a `Program` with the file name and line index.
+4. `finish()` and wrap in a `Program` with the globals table, the file name
+   and the line index.
 
-## 6.4 Small optimisations
+## 6.4 Names: the resolver, globals and locals
+
+File: [`compiler/src/resolve.rs`](../compiler/src/resolve.rs)
+
+Before code generation, the **resolver** decides what every name refers to.
+It walks the tree with a stack of scopes (the top level, then one per
+indented block) and records, keyed by `NodeId`:
+
+- for every `let`: the slot it defines — a **global** (`Res::Global(GlobalId)`)
+  at top level, a **local** (`Res::Local(BindingId)`) inside a block;
+- for every name: the slot it reads.
+
+Shadowing (syntax.md S5) falls out of the order of work: the initialiser of
+`let x = x + 1` is resolved *before* the new `x` is pushed, so it reads the
+previous one; the new binding gets a new slot. Lookup searches the innermost
+scope first and, inside a scope, the newest binding first. Errors: E0201
+undefined name (with a "did you mean" from an edit-distance search over the
+visible names), E0203 a top-level name used above its `let`, E0206 `_` used
+as a value. `valo check f.vl --dump resolved` prints the result.
+
+Code generation then only looks names up:
+
+- a **global** is an index into the VM's globals array: `SETGLOBAL r g`
+  after the `let`, `GETGLOBAL dst g` at each use. Top-level bindings are
+  globals (plan D4) so that functions (M4) can reach them by index;
+- a **local** lives in a register: the `let` allocates the next free register
+  and compiles the initialiser straight into it (`FuncState::locals` maps the
+  binding to it); a use is `MOVE dst r`, or nothing if it is already in `dst`.
+
+## 6.5 Blocks: registers live as long as their scope
+
+`FuncState::block(items, dst)` remembers `free_reg`, gives each `let` the next
+register, compiles a middle expression line into a temporary, the last line
+into `dst`, and finally releases everything above the remembered mark. The
+next block reuses the same registers — the test `block_registers_are_reused`
+checks `regs=4` for two sequential blocks against a hand count. Because
+bindings are immutable, a local's register is written exactly once.
+
+## 6.6 Jumps: `if`, `and`/`or`, comparison chains
+
+A conditional jump is Lua's pair `TEST A B; JMP sJ`: `TEST` skips the `JMP`
+unless `R[A] == B`. The jump distance is unknown when the `JMP` is emitted, so
+`emit_jmp` writes a placeholder and returns its index, and `patch_here`
+fills in the offset once the target is reached (**backpatching**; offsets
+beyond ±8M instructions are E0301).
+
+```text
+if c then a else b            a and b                  a < b <= c
+  c → dst                       a → dst                  a → dst;  b → t1
+  TEST dst 0                    TEST dst 0               LT dst dst t1
+  JMP else                      JMP end                  TEST dst 0
+  a → dst                       b → dst                  JMP end
+  JMP end                       [TEST dst 0; JMP +0]     c → t2
+else: b → dst                 end:                       LE dst t1 t2
+end:                                                   end:
+```
+
+- The condition uses `dst` itself: both branches overwrite it.
+- `or` is the same as `and` with `TEST dst 1` (jump when true).
+- `and`/`or` operands must be bools. `TEST` checks the left one; the right
+  one is checked by `TEST dst 0; JMP +0` (both outcomes continue at the same
+  place) unless it is a bool by construction (a comparison, `not`, a bool
+  literal, another `and`/`or`).
+- In a chain each operand is evaluated once, left to right, and a false link
+  skips the rest — so `5 < 1 < 1 // 0` is `false`, not an error.
+- `a > b` is emitted as `LT dst b a` (one opcode pair for four operators).
+- `assert e` evaluates `e` into a register `t` and emits `ASSERT t 0`. If `e`
+  is a single comparison, its two sides go to `t+1` and `t+2` and the
+  instruction is `ASSERT t 1`, so a failure can print both values.
+
+## 6.7 Small optimisations
 
 - **Constant pool deduplication**: `100000 + 100000` stores `100000` once
-  (test `constants_are_deduplicated`).
+  (test `constants_are_deduplicated`). The key is `ConstKey`: floats by bit
+  pattern, so `0.0` and `-0.0` are distinct constants.
 - **Immediate operands**: integers −32768…32767 go directly into the
   instruction (`LOADI`), avoiding a memory access to the pool.
-- **Negative literal folding**: `-3` becomes `LOADI 1 -3` rather than
+- **Negative literal folding** (ints and floats): `-3` becomes `LOADI 1 -3` rather than
   `LOADI 1 3; NEG 1 1`. The tree is `Unary(Neg, Int(3))`; the fold is safe
   because the lexer only produces non-negative literals ≤ `i64::MAX`, whose
   negation always fits.
@@ -131,28 +204,27 @@ These are *peephole-style* decisions made locally while emitting. Anything
 more (constant folding of whole expressions, dead code removal) would be the
 job of a separate pass, not planned for the MVP.
 
-## 6.5 What codegen does *not* do
+## 6.8 What codegen does *not* do
 
-- It does not check types: `1 + ()` cannot be written yet, but in general
-  type errors are found at runtime by the VM (`arith`, chapter 7) until static
-  checks arrive (post-MVP).
+- It does not check types: `1 + 2.0` compiles, and the VM reports R0201
+  (`arith`, chapter 7). Type errors are found at runtime until static checks
+  arrive (post-MVP).
 - It does not decide *meaning* of operators: `IDIV` is emitted for `//`; what
   `//` does with negative numbers is defined once, in the VM.
-- True division `/` is parsed but rejected here with E0009, because it
-  always produces a float and floats arrive in M3.
 
-## 6.6 Where to change things
+## 6.9 Where to change things
 
 | Task | Where |
 |------|-------|
 | compile a new expression kind | `FuncState::expr`: new `match` arm |
 | map a new operator to an opcode | the `let opcode = match op { … }` in the `Binary` arm |
-| top-level `let` (M2) | `compile`: new `Item` arm; locals get registers via `alloc` and stay allocated until their block ends |
-| conditionals (M3) | emit `TEST` + `JMP` with placeholder offsets, then patch them once the target is known ("backpatching") |
+| how names are loaded | `FuncState::name` (`GETGLOBAL` / `MOVE`); what they mean: `resolve.rs` |
+| a new branching construct | `emit_jmp` + `patch_here`; see `if_expr`, `logic`, `compare` |
+| register lifetime of locals | `FuncState::block` |
 | functions (M4) | a stack of `FuncState`s; `CLOSURE` in the parent |
 | point runtime errors at the operator | pass `*op_span` instead of `e.span` to the arithmetic `emit` |
 
-## 6.7 Exercises
+## 6.10 Exercises
 
 1. Compile `1 + (2 + (3 + 4))` and `((1 + 2) + 3) + 4` with
    `valo check f.vl --dump bytecode`. Compare `regs=`. Why do they differ?
@@ -160,8 +232,11 @@ job of a separate pass, not planned for the MVP.
    compile time with `valo_vm::vm::int_arith`). Which runtime errors must you
    preserve, and how? (Hint: `1 // 0` must still fail at runtime, or become a
    compile error — a language design decision.)
+3. `a + b` with two locals emits `MOVE 0 1; MOVE 3 2; ADD 0 0 3`. Change the
+   `Binary` arm so that an operand which is a local is used from its own
+   register (`ADD 0 1 2`). Which snapshot changes?
 
-## 6.8 Further reading
+## 6.11 Further reading
 
 - *The Implementation of Lua 5.0*, §6 (register allocation in the compiler).
 - Lua 5.4 source: `lcode.c` — `luaK_exp2nextreg`, `freereg`, `luaK_code`.

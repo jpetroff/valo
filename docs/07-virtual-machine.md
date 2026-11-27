@@ -35,21 +35,28 @@ File: [`vm/src/value.rs`](../vm/src/value.rs)
 ```rust
 pub enum Value {
     Unit,        // ()  — also the initial content of every register
+    Bool(bool),  // true / false
     Int(i64),    // valo int
+    Float(f64),  // valo float
 }
 ```
 
 Each register holds one `Value`. Rust's `enum` is a tagged union: the tag
 says which variant it is, so the VM can check operand types at runtime
 (**dynamic typing** at the VM level; valo's annotations add checks on top in
-M10). Later variants: `Bool`, `Float` (M3), closures and natives (M4),
+M10). Later variants: closures and natives (M4),
 strings, `none`, `Ok`/`Err` (M7), lists (M8). Heap values will be shared with
 `Rc` — safe because valo values are immutable, and enough for memory
 management because immutable values in a strict language cannot form cycles
 (plan D3, feasibility report "reference counting, not a tracing GC").
 
-`Value::type_name` gives the lowercase name used in messages (`int`), and
-`impl Display` the printed form (`42`, `()`).
+`Value::type_name` gives the lowercase name used in messages (`int`,
+`float`, `bool`), and `impl Display` the printed form (`42`, `()`, `true`).
+Floats print with Rust's `{:?}`, which always shows that they are floats:
+`1.0`, `0.30000000000000004`, `1e100`, `inf`, `NaN`.
+
+The derived `PartialEq` on `Value` is for tests only: the language's `==`
+(`values_equal` in `vm.rs`) has its own rules, below.
 
 ## 7.3 The interpreter
 
@@ -97,8 +104,8 @@ Notes:
 
 - Rust's `match` on a dense `#[repr(u8)]` enum typically compiles to a jump
   table, the same dispatch technique as C's `switch` in `lvm.c`.
-- `pc` is incremented *before* executing, so jumps (M3) will be relative to
-  the next instruction, and an error at instruction `i` is found at `pc - 1`.
+- `pc` is incremented *before* executing, so jumps are relative to the next
+  instruction, and an error at instruction `i` is found at `pc - 1`.
 - Every operation that can fail returns `Result`, and `?` exits the loop with
   the error. The VM never panics on user input; panics (`expect`) are
   reserved for internal invariants.
@@ -150,9 +157,30 @@ The property test `floor_div_mod_identity` checks, for random `x` and `y`,
 that `(x // y) * y + x % y == x` (computed in 128-bit to avoid overflow) and
 that the remainder has the divisor's sign and is smaller in magnitude.
 
-Type errors (operands that are not both `int`) give R0201 from `arith`. In M1
-no program can produce one; with booleans and floats (M3) they become
-reachable — and `arith` gets new arms for floats.
+### Floats, true division and mixing (plan D9, D10)
+
+`arith` dispatches on both operand types: int×int goes to `int_arith`,
+float×float to `float_arith`. Float arithmetic is IEEE (overflow gives
+`inf`, `inf - inf` gives `NaN`) with two Python rules on top: `//` and `%`
+round toward −∞ like their int versions, and a zero divisor is R0102 rather
+than `inf`. `/` (`DIV`) is the one operator that accepts ints: it converts
+them and always returns a float (`7 / 2 == 3.5`, `6 / 3 == 2.0`). Every
+other int/float mix is R0201 with a hint — valo never converts silently.
+
+### Comparisons, conditions and globals
+
+- `EQ`/`NE` (`values_equal`): both sides must have the same type, else
+  R0201; floats follow IEEE, so `NaN == NaN` is false.
+- `LT`/`LE` (`less`): ints and floats (strings in M7). Bools and `()` have no
+  order (R0205).
+- `TEST`, `ASSERT` and `NOT` require a bool (R0203, R0203, R0201): valo has
+  no "truthy" values.
+- `JMP` sets `pc` relative to the next instruction.
+- `ASSERT` fails with R0701; the CLI adds the asserted source text and, for
+  `ASSERT A 1`, the notes `left: …` and `right: …`.
+- Globals are `Vec<Option<Value>>`, one slot per top-level `let`, sized from
+  `Program.globals`. `None` means "not set yet" (R0302 on read) — an internal
+  state, not a language-level nil.
 
 ## 7.5 Runtime errors and stack traces
 
@@ -202,7 +230,8 @@ crash.
 | Task | Where |
 |------|-------|
 | execute a new opcode | `Vm::execute`, new `match` arm |
-| floats (M3) | `Value::Float`, `arith` arm `(Float, Float)`, `DIV` opcode, `Const::Float` |
+| float arithmetic | `float_arith`; type dispatch in `arith` |
+| what `==` / `<` accept | `values_equal`, `less` |
 | function calls (M4) | push a `Frame` in `CALL`; in `RETURN`, pop and store into the caller's `R[A]` instead of returning |
 | a new effect | method on `Host` + both implementations |
 | change number formatting | `impl Display for Value` |

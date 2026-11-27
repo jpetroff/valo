@@ -1,0 +1,3 @@
+# the right operand is never evaluated, so the division by zero never runs
+false and 1 // 0 == 1
+true or 1 // 0 == 1

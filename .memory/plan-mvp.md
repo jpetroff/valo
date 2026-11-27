@@ -279,7 +279,7 @@ constants: (none)
 | range | stage | MVP codes |
 |---|---|---|
 | E00xx | lexer | E0001 unexpected character, E0002 Int literal out of range, E0003 inconsistent dedent, E0004 unterminated string, E0005 invalid escape, E0006 tab/space mix (per syntax.md), E0007 unterminated interpolation (missing `}`), E0008 empty interpolation `{}`, E0009 reserved syntax not supported yet (backtick cmd, `re"…"`, `=~`; also used by parser/codegen for constructs of later milestones), E0010 malformed number literal (leading zeros, bad `_`, bad suffix) |
-| E01xx | parser | E0101 unexpected token / expected X, E0102 missing else (if syntax requires), E0103 unclosed delimiter |
+| E01xx | parser | E0101 unexpected token / expected X, E0102 `if` without `else`, E0103 unclosed delimiter, E0104 block ends with a `let` binding, E0105 expression nested too deeply |
 | E02xx | resolve | E0201 undefined name (+did-you-mean), E0202 (retired: same-scope rebinding is allowed per Q7=b; keep code unused), E0203 top-level use before definition, E0204 local mutual recursion unsupported (Q16), E0205 wrong number of arguments to known fn (+hint `f(a, _)` partial), E0206 `_` placeholder outside a direct call argument |
 | E03xx | codegen | E0301 limit exceeded (registers/consts/jump/list literal >255 elems) |
 | E04xx | types | E0401 literal does not match annotation, E0402 unknown type name, E0403 malformed type, E0410 missing fn param/return annotation (`parameter p of fn grade needs a type annotation, e.g. p: int`) |
@@ -359,7 +359,9 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q1: Int overflow — (a) checked → R0101 (b) wrapping (c) bigint. Default (a).
 > Q2: RESOLVED (c) Python split — `/` always Float, `//` floor div, `%` floor mod, `**` power (syntax.md S11). See D9.
 
-### M2 — Bindings, names, blocks
+### M2 — Bindings, names, blocks — DONE 2026-11-27
+
+- Implementation notes: shipped in two commits on branch `m2-m3` — top-level `let`/names/globals/resolver first, then blocks together with M3 (user decision: no block syntax of its own; blocks are opened by `if` branches, later `fn` bodies and lambdas). A block ending in `let` is E0104 (user decision; top level may end with `let`). `let _ = e` evaluates and discards; `_` as a value is E0206. `let` lines are not echoed by `--echo`. Did-you-mean uses edit distance with adjacent transpositions, threshold `max(1, len/3)` (`resolve::suggest`, reuse for E0424). `--dump resolved` prints globals/locals tables and every use. The full type-annotation grammar (S4/S20) is parsed here already; M4 only adds E0402/E0410. The "closure captured earlier still sees the old value" part of `m2/rebind` moved to M6 (`m6/rebind_capture`). Parser nesting limit E0105 (`parser::MAX_DEPTH` = 200 recursion levels ≈ 100 nested parentheses) added because deep nesting overflowed test-thread stacks.
 
 - Goal: immutable bindings at top level and inside indented block expressions.
 - Blocks: binding (with optional type annotation — parsed into `TypeExpr`, ignored until M10), name reference, block expression (bindings + final expr, value = last expr, nested scopes).
@@ -378,7 +380,9 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q7: RESOLVED (b) — user chose Rust-style shadowing incl. same scope, bindings introduced by a keyword (syntax.md S5).
 > Q8: RESOLVED (b) (syntax.md S13) — fn param + return annotations required (E0410 from M4); `let`/lambda optional; type vars and `any` accepted, outer shape only. Runtime checks stay in M10 (see Reordering notes).
 
-### M3 — Bool, Float, comparisons, logic, conditionals
+### M3 — Bool, Float, comparisons, logic, conditionals — DONE 2026-11-27
+
+- Implementation notes: `if` grammar = inline `if c then a else b` (no elif) or block form with `:` branches, each branch inline or an indented block; `NEWLINE` + `elif`/`else` after an inline branch continues the `if`; `end_of_line` accepts a just-consumed DEDENT. Missing else → E0102 at the `if`. Comparison chains are one `Compare` AST node. `and`/`or` right operands get a `TEST r 0; JMP +0` bool check unless syntactically bool. Error choices: int/float mixing and cross-type `==` → R0201 with a help note; `<` on bool/unit → R0205; non-bool in TEST/ASSERT → R0203 ("expected a bool, found int"); `not` on non-bool → R0201. Float `//`/`%` floor like Python, zero divisor R0102 for all of `/ // %`; `**` on floats is IEEE `powf` (no Python ZeroDivisionError for `0.0 ** -1.0`). `RuntimeError.notes` carries `left:`/`right:` and help lines; the CLI quotes the asserted source text. `m1/true_div` (expected E0009) was removed; `m3/true_div` replaces it. `--trace-exec` now prints the executed instruction's index even after a jump.
 
 - Goal: branching programs over Int/Float/Bool.
 - Blocks: Bool/Float literals, true division, comparison ops incl. chaining (`a < b <= c`, middle evaluated once), logical conjunction/disjunction (short-circuit), negation, conditional expression (block and inline forms per syntax.md S6).
@@ -476,7 +480,7 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
  GETUPVAL reads via Rc<RefCell<UpVal>>         no open list, no CLOSE, no RefCell
 ```
 
-- Tests: insta resolved dump showing 3-level capture chain; disasm of CLOSURE with mixed reg/upvalue descriptors; golden `m6/adder`: function returning lambda capturing param → `8`; `m6/capture3`: capture across 3 nesting levels → value; `m6/partial`: 3-arg fn with `_` in each position and with two `_` → same result each time; `m6/partial_eval_once`: placeholder partial whose fixed arg prints a side effect, partial then called 3× → side effect printed once, before the first call; `m6/pipe_placeholder`: `x` piped into a call with `_` in 2nd position → value, no closure in disasm; `m6/compose`: compose two partials → value; `m6/partial_arity_static`: partial bound to a name, called with 2 args → E0205 exit 2; `m6/partial_arity_dynamic`: partial passed to a fn that calls it with 2 args → R0207 trace shows `<partial f@…>`; `m6/placeholder_misuse`: `_` outside a call argument → E0206 exit 2; `m6/local_rec`: local named recursive fn (GETSELF) computing fib 20 → `6765`; `m6/partial_loop`: tail-recursive loop invoked through a partial (tail call from lambda body) 10^6 iterations → flat stack; `m6/local_mutual` → E0204 exit 2.
+- Tests: golden `m6/rebind_capture` (moved from M2): a closure created before a same-scope rebinding still sees the old value; insta resolved dump showing 3-level capture chain; disasm of CLOSURE with mixed reg/upvalue descriptors; golden `m6/adder`: function returning lambda capturing param → `8`; `m6/capture3`: capture across 3 nesting levels → value; `m6/partial`: 3-arg fn with `_` in each position and with two `_` → same result each time; `m6/partial_eval_once`: placeholder partial whose fixed arg prints a side effect, partial then called 3× → side effect printed once, before the first call; `m6/pipe_placeholder`: `x` piped into a call with `_` in 2nd position → value, no closure in disasm; `m6/compose`: compose two partials → value; `m6/partial_arity_static`: partial bound to a name, called with 2 args → E0205 exit 2; `m6/partial_arity_dynamic`: partial passed to a fn that calls it with 2 args → R0207 trace shows `<partial f@…>`; `m6/placeholder_misuse`: `_` outside a call argument → E0206 exit 2; `m6/local_rec`: local named recursive fn (GETSELF) computing fib 20 → `6765`; `m6/partial_loop`: tail-recursive loop invoked through a partial (tail call from lambda body) 10^6 iterations → flat stack; `m6/local_mutual` → E0204 exit 2.
 - Exit: goldens pass; no `Rc` cycle possible by construction (closures never capture themselves; document invariant in `vm/value.rs`).
 - Out of scope: local mutual recursion, operator sections (`_` only valid as a direct call argument), named/default args, auto-currying.
 

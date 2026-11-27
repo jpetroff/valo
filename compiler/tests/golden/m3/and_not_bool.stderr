@@ -1,0 +1,4 @@
+error[R0203]: expected a bool, found int
+  --> and_not_bool.vl:1:10
+stack trace (most recent call first):
+  0: <main> at and_not_bool.vl:1:10

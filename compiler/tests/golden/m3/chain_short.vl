@@ -1,0 +1,2 @@
+# the first link is false, so `1 // 0` is never evaluated
+5 < 1 < 1 // 0

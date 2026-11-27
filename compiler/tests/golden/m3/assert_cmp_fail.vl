@@ -1,0 +1,2 @@
+let a = 2
+assert a + a == 5

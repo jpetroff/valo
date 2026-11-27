@@ -1,0 +1,9 @@
+[E0201] Error: undefined name `cuont`
+   ╭─[ undefined.vl:2:1 ]
+   │
+ 2 │ cuont + 1
+   │ ──┬──  
+   │   ╰──── not found in this scope
+   │ 
+   │ Help: did you mean `count`?
+───╯

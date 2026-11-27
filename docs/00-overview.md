@@ -12,35 +12,47 @@ code into compact bytecode, and a register-based virtual machine that runs it.
 The full design lives in `.memory/syntax.md` (syntax) and `.memory/plan-mvp.md`
 (implementation plan). This textbook covers what has been **built** so far.
 
-## 0.2 What works today (milestones M0 and M1)
+## 0.2 What works today (milestones M0–M3)
 
-A valo program is currently a sequence of integer expressions, one per line:
+A valo program is currently a script of bindings and expressions over ints,
+floats and bools, with conditionals:
 
 ```text
-# precedence and Python-style arithmetic
-(2 + 3) * 4 - 10 // 3
--7 // 2
-2 ** 10
+let price = 120
+let total = if price > 100:
+    let discount = price // 10
+    price - discount
+else: price
+total
+0 < total <= 200 and total / 2 == 54.0
+assert total == 108
 ```
 
 ```bash
 cargo run -q --bin valo -- run demo.vl --echo
 ```
 
-prints `17`, `-4`, `1024`. Supported:
+prints `108` and `true`. Supported:
 
-- integer literals: `42`, `1_000`, `0xff`, `0o755`, `0b1010`;
-- operators `+ - * // % **` and unary `-`, with Python's precedence and
-  Python's rounding for `//` and `%`;
+- literals: ints (`42`, `1_000`, `0xff`, `0o755`, `0b1010`), floats (`1.5`,
+  `2e3`), `true`, `false`;
+- operators `+ - * / // % **`, unary `-`, comparisons `== != < <= > >=`
+  (chained like Python: `0 < x <= 10`), `and`, `or`, `not`, with Python's
+  precedence and Python's rounding for `//` and `%`; `/` always gives a float,
+  otherwise ints and floats never mix;
+- immutable `let` bindings with optional type annotations (parsed, checked
+  from M10), shadowing, indented blocks whose value is their last line;
+- `if c: … elif c: … else: …` (block or inline branches) and
+  `if c then a else b`; `assert`;
 - parentheses, `#` comments, blank lines, line joining inside brackets;
 - precise compile errors (with source snippets) and runtime errors (overflow,
-  division by zero, negative exponent) with a stack trace;
+  division by zero, type mismatch, failed assertion) with a stack trace;
 - debugging views of every stage: `--dump tokens`, `--dump ast`,
-  `--dump bytecode`, `--trace-exec`.
+  `--dump resolved`, `--dump bytecode`, `--trace-exec`.
 
-Everything else in the language (names, functions, strings, lists, …) is
-recognised by the lexer but rejected with error `E0009 … is not supported
-yet`. Chapter 11 lists what comes next.
+Everything else in the language (functions, strings, lists, …) is recognised
+by the lexer but rejected with error `E0009 … is not supported yet`.
+Chapter 11 lists what comes next.
 
 ## 0.3 The pipeline
 
@@ -135,7 +147,7 @@ valo/
 │   │   ├── lexer.rs        lex()                                  (ch. 3)
 │   │   ├── ast.rs          Program, Item, Expr, ExprKind          (ch. 4)
 │   │   ├── parser.rs       parse()                                (ch. 4)
-│   │   ├── resolve.rs      name resolution (empty until M2)
+│   │   ├── resolve.rs      name resolution: globals, locals, scopes
 │   │   ├── codegen.rs      compile()                              (ch. 6)
 │   │   ├── diagnostic.rs   Diagnostic, render, render_runtime     (ch. 8)
 │   │   └── snapshots/      expected outputs of snapshot tests     (ch. 10)

@@ -16,7 +16,8 @@
 //!
 //! Columns: instruction index (`pc`), `[line:col]` of the source that produced
 //! it, mnemonic, operands (`A B C`, `A Bx`, …), and an optional `; comment`
-//! (the constant value for `LOADK`, the target for `JMP`).
+//! (the constant value for `LOADK`, the global's name for `GETGLOBAL` /
+//! `SETGLOBAL`, the target for `JMP`).
 //!
 //! **Textbook chapter:** `docs/05-bytecode-format.md` (section *Reading a
 //! disassembly*).
@@ -87,10 +88,13 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
             Format::AsBx => format!("{} {}", instr.a(), instr.sbx()),
             Format::SJ => format!("{}", instr.sj_offset()),
         };
-        // EXTEND: add an arm here to annotate other opcodes (e.g. GETGLOBAL
-        // with the global's name in M2).
+        // EXTEND: add an arm here to annotate other opcodes.
         let comment = match op {
             OpCode::LOADK => p.consts.get(instr.bx() as usize).map(const_repr),
+            OpCode::GETGLOBAL | OpCode::SETGLOBAL => program
+                .globals
+                .get(instr.bx() as usize)
+                .map(|g| g.name.to_string()),
             OpCode::JMP => Some(format!("to {}", pc as i64 + 1 + instr.sj_offset() as i64)),
             _ => None,
         };
@@ -118,6 +122,7 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
 fn const_repr(k: &Const) -> String {
     match k {
         Const::Int(n) => n.to_string(),
+        Const::Float(x) => format!("{x:?}"),
     }
 }
 
@@ -125,5 +130,6 @@ fn const_repr(k: &Const) -> String {
 fn const_entry(k: &Const) -> String {
     match k {
         Const::Int(n) => format!("int {n}"),
+        Const::Float(x) => format!("float {x:?}"),
     }
 }

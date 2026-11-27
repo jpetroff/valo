@@ -153,7 +153,7 @@ Python's literal rules (chosen in M1, recorded in `.memory/syntax.md`):
 |-------|-------|------|
 | `1_000` | `Int(1000)` | `_` allowed **between** digits (`check_underscores`) |
 | `0xff`, `0o755`, `0b1010` | `Int(255)`, `Int(493)`, `Int(10)` | radix prefixes |
-| `1.5`, `2e3`, `1e-2` | `Float(..)` | float literals (accepted by the parser from M3) |
+| `1.5`, `2e3`, `1e-2` | `Float(..)` | float literals |
 | `1.x` | `Int(1)`, `Dot`, `Ident(x)` | a fraction needs a digit after the dot |
 | `007` | E0010 | leading zeros forbidden (avoids C's octal trap); `00` is fine |
 | `12ab` | E0010 | letters glued to a number (`bad_suffix`) |

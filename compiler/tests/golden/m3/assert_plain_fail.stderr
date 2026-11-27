@@ -1,0 +1,4 @@
+error[R0701]: assertion failed: a > 1 and a > 3
+  --> assert_plain_fail.vl:2:8
+stack trace (most recent call first):
+  0: <main> at assert_plain_fail.vl:2:8
