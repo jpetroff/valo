@@ -3,7 +3,7 @@ error[R0208]: `?` needs a result (Ok or Err), got none
    │
  2 │     let p = parse_int(s)?
    │             ──────┬──────  
-   │                   ╰──────── here
+   │                   ╰──────── not a result
 ───╯
   help: `?` passes on errors of results; for an optional value use or_else(x, default) or compare with none
 stack trace (most recent call first):

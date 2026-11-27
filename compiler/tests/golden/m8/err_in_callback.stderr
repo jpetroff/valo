@@ -3,7 +3,7 @@ error[R0102]: division by zero: 10 // 0
    │
  4 │     map(xs, x => 10 // x)
    │                  ───┬───  
-   │                     ╰───── here
+   │                     ╰───── divisor is zero
 ───╯
 stack trace (most recent call first):
   0: <lambda@4:13> at err_in_callback.vl:4:18

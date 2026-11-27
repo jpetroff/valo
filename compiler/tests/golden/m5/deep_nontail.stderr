@@ -3,7 +3,7 @@ error[R0301]: stack overflow: more than 200000 nested calls
    │
  2 │ fn depth(n: int) -> int = if n == 0 then 0 else 1 + depth(n - 1)
    │                                                     ──────┬─────  
-   │                                                           ╰─────── here
+   │                                                           ╰─────── calls nested too deeply
 ───╯
   help: make the recursive call the last thing the function does (a tail call), e.g. by passing an accumulator
 stack trace (most recent call first):

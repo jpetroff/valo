@@ -266,7 +266,7 @@ const TRACE_TAIL: usize = 5;
 ///    │
 ///  3 │ assert a == b
 ///    │        ───┬──
-///    │           ╰──── here
+///    │           ╰──── this is false
 /// ───╯
 ///   left: 4
 ///   right: 5
@@ -296,7 +296,7 @@ pub fn render_runtime(sm: &SourceMap, err: &RuntimeError, color: bool) -> String
     header(&mut out, err.kind.code(), &message, color);
     if let Some(span) = err.primary_span() {
         let span = Span::new(span.start as usize, span.end as usize);
-        out.push_str(&snippet(sm, span, "", &[], &[], color));
+        out.push_str(&snippet(sm, span, err.kind.label(), &[], &[], color));
     }
     // R0601: where the Err came from and how it got here (D26, Q21).
     if let Some(trail) = &err.trail {

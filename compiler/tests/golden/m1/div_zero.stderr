@@ -3,7 +3,7 @@ error[R0102]: division by zero: 7 // 0
    │
  2 │ 7 // (2 - 2)
    │ ──────┬─────  
-   │       ╰─────── here
+   │       ╰─────── divisor is zero
 ───╯
 stack trace (most recent call first):
   0: <main> at div_zero.vl:2:1

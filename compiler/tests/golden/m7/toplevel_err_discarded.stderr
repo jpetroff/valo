@@ -3,7 +3,7 @@ error[R0601]: unhandled Err: "not positive: -1"
    │
  4 │ check(-1)
    │ ────┬────  
-   │     ╰────── here
+   │     ╰────── Err not handled
 ───╯
   origin: check at toplevel_err_discarded.vl:1:60
   propagated by `?` in:

@@ -3,7 +3,7 @@ error[R0701]: assertion failed: name == "vala"
    │
  2 │ assert name == "vala"
    │        ───────┬──────  
-   │               ╰──────── here
+   │               ╰──────── this is false
 ───╯
   left: "valo"
   right: "vala"

@@ -1,9 +1,10 @@
-error[R0104]: negative exponent: 2 ** -1 (int powers need an exponent >= 0)
+error[R0104]: negative exponent: 2 ** -1
    ╭─[ neg_pow.vl:1:1 ]
    │
  1 │ 2 ** -1
    │ ───┬───  
-   │    ╰───── here
+   │    ╰───── negative exponent
 ───╯
+  help: int powers need an exponent >= 0; for a float result use float(x) ** float(y)
 stack trace (most recent call first):
   0: <main> at neg_pow.vl:1:1

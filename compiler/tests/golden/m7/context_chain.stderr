@@ -3,7 +3,7 @@ error[R0601]: unhandled Err: "bad port"
    │
  9 │ outer()?
    │ ────┬───  
-   │     ╰───── here
+   │     ╰───── Err not handled
 ───╯
   context (outermost first):
     loading config

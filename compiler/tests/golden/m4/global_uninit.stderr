@@ -3,7 +3,7 @@ error[R0302]: global `limit` used before initialisation
    │
  1 │ fn scaled(x: int) -> int = x * limit
    │                                ──┬──  
-   │                                  ╰──── here
+   │                                  ╰──── read before its `let` ran
 ───╯
 stack trace (most recent call first):
   0: scaled at global_uninit.vl:1:32

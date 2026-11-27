@@ -3,7 +3,7 @@ error[R0101]: integer overflow: 21 * 2432902008176640000
    │
  3 │     else: n * fact(n - 1)
    │           ───────┬───────  
-   │                  ╰───────── here
+   │                  ╰───────── result does not fit in an int
 ───╯
 stack trace (most recent call first):
   0: fact   at fact_overflow.vl:3:11

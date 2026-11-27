@@ -3,7 +3,7 @@ error[R0402]: unwrap of none
    │
  1 │ fn first_number(s: str) -> int = unwrap(parse_int(s))
    │                                  ──────────┬─────────  
-   │                                            ╰─────────── here
+   │                                            ╰─────────── value is none
 ───╯
   help: test for none first (`x == none`) or use or_else(x, default)
 stack trace (most recent call first):

@@ -3,7 +3,7 @@ error[R0102]: division by zero: 10 // 0
    │
  1 │ fn inner(x: int) -> int = 10 // x
    │                           ───┬───  
-   │                              ╰───── here
+   │                              ╰───── divisor is zero
 ───╯
 stack trace (most recent call first):
   0: inner  at trace3.vl:1:27

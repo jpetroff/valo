@@ -3,7 +3,7 @@ error[R0206]: join() expects a list of str, but element 0 is int (1)
    │
  1 │ print(join([1, 2], ","))
    │       ────────┬────────  
-   │               ╰────────── here
+   │               ╰────────── wrong argument type
 ───╯
   help: convert the elements first, e.g. map(xs, str)
 stack trace (most recent call first):

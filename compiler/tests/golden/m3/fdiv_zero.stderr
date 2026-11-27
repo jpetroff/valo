@@ -3,7 +3,7 @@ error[R0102]: division by zero: 1.0 / 0.0
    │
  1 │ 1.0 / 0.0
    │ ────┬────  
-   │     ╰────── here
+   │     ╰────── divisor is zero
 ───╯
 stack trace (most recent call first):
   0: <main> at fdiv_zero.vl:1:1

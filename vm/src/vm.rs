@@ -67,10 +67,10 @@ use std::rc::Rc;
 use crate::builtins::NATIVES;
 use crate::chunk::{Const, GlobalKind, NativeId, Program, Proto, SrcSpan, UpvalSrc};
 use crate::debug::{DebugHook, LineTable, Resume, VmView};
-use crate::error::{Access, ErrTrail, ErrorKind, RuntimeError, Site, TraceEntry};
+use crate::error::{ErrorKind, RuntimeError, Site, TraceEntry};
 use crate::host::Host;
 use crate::opcode::{Format, Instr, OpCode};
-use crate::value::{Closure, ErrVal, Value};
+use crate::value::{Closure, Value};
 
 /// Most frames that may be active at once (R0301 beyond).
 pub const MAX_FRAMES: usize = 200_000;
@@ -315,7 +315,7 @@ impl<'h> Vm<'h> {
                             };
                             Rc::make_mut(&mut e).propagated.push(site);
                             if self.frames.len() == 1 {
-                                return Err(unhandled(&e));
+                                return Err(RuntimeError::unhandled(&e));
                             }
                             if let Some(result) = self.do_return(Value::Err(e)) {
                                 return Ok(result);
@@ -324,17 +324,7 @@ impl<'h> Vm<'h> {
                             continue;
                         }
                         other if lenient => self.stack[ra] = other,
-                        other => {
-                            let err = RuntimeError::new(
-                                ErrorKind::NotResult,
-                                format!("`?` needs a result (Ok or Err), got {}", other.describe()),
-                            );
-                            return Err(if matches!(other, Value::None) {
-                                err.note("help: `?` passes on errors of results; for an optional value use or_else(x, default) or compare with none")
-                            } else {
-                                err
-                            });
-                        }
+                        other => return Err(RuntimeError::not_result(&other)),
                     }
                 }
                 OpCode::LOADNONE => self.stack[ra] = Value::None,
@@ -454,18 +444,13 @@ impl<'h> Vm<'h> {
                             // -i64::MIN does not fit in i64: checked_neg
                             // returns None, which becomes R0101.
                             n.checked_neg()
-                                .ok_or_else(|| overflow(format!("integer overflow: -({n})")))?,
+                                .ok_or_else(|| RuntimeError::int_overflow(&format!("-({n})")))?,
                         ),
                         Value::Float(x) => Value::Float(-x),
                         // Any other type cannot be negated.
                         // RUST: a bare name in a pattern matches anything and
                         // binds it, here to `other`.
-                        other => {
-                            return Err(RuntimeError::new(
-                                ErrorKind::TypeMismatch,
-                                format!("cannot negate {}", other.type_name()),
-                            ));
-                        }
+                        other => return Err(RuntimeError::cannot_negate(other)),
                     };
                     self.stack[ra] = v;
                 }
@@ -482,13 +467,7 @@ impl<'h> Vm<'h> {
                         // happen from `<main>`; from M4 a function may run
                         // before the binding it reads (plan D4).
                         Some(None) => {
-                            return Err(RuntimeError::new(
-                                ErrorKind::GlobalUninit,
-                                format!(
-                                    "global `{}` used before initialisation",
-                                    self.global_names[g]
-                                ),
-                            ));
+                            return Err(RuntimeError::global_uninit(&self.global_names[g]));
                         }
                         None => return Err(internal("global index out of range")),
                     };
@@ -519,12 +498,7 @@ impl<'h> Vm<'h> {
                 OpCode::NOT => {
                     let v = match &self.stack[base + instr.b() as usize] {
                         Value::Bool(b) => !b,
-                        other => {
-                            return Err(RuntimeError::new(
-                                ErrorKind::TypeMismatch,
-                                format!("`not` needs a bool, found {}", other.type_name()),
-                            ));
-                        }
+                        other => return Err(RuntimeError::not_needs_bool(other)),
                     };
                     self.stack[ra] = Value::Bool(v);
                 }
@@ -538,12 +512,7 @@ impl<'h> Vm<'h> {
                                 self.frame_mut().pc += 1;
                             }
                         }
-                        other => {
-                            return Err(RuntimeError::new(
-                                ErrorKind::ConditionNotBool,
-                                format!("expected a bool, found {}", other.type_name()),
-                            ));
-                        }
+                        other => return Err(RuntimeError::condition_not_bool(None, other)),
                     }
                 }
                 OpCode::JMP => {
@@ -560,20 +529,12 @@ impl<'h> Vm<'h> {
                     Value::Bool(false) => {
                         // The CLI appends the asserted source text to the
                         // message; the VM has no source.
-                        let mut err =
-                            RuntimeError::new(ErrorKind::AssertionFailed, "assertion failed");
-                        if instr.b() == 1 {
-                            err = err
-                                .note(format!("left: {}", self.stack[ra + 1].repr()))
-                                .note(format!("right: {}", self.stack[ra + 2].repr()));
-                        }
-                        return Err(err);
+                        let sides =
+                            (instr.b() == 1).then(|| (&self.stack[ra + 1], &self.stack[ra + 2]));
+                        return Err(RuntimeError::assertion_failed(sides));
                     }
                     other => {
-                        return Err(RuntimeError::new(
-                            ErrorKind::ConditionNotBool,
-                            format!("`assert` needs a bool, found {}", other.type_name()),
-                        ));
+                        return Err(RuntimeError::condition_not_bool(Some("assert"), other));
                     }
                 },
                 // R[A] = [R[B], …, R[B+C-1]] (M8). The element registers are
@@ -636,10 +597,7 @@ impl<'h> Vm<'h> {
         };
         match hook.on_line(&view, line) {
             Resume::Continue => Ok(()),
-            Resume::Abort => Err(RuntimeError::new(
-                ErrorKind::Interrupted,
-                "program stopped by the debugger",
-            )),
+            Resume::Abort => Err(RuntimeError::interrupted()),
         }
     }
 
@@ -735,12 +693,7 @@ impl<'h> Vm<'h> {
                 let v = std::mem::replace(&mut self.stack[ra], Value::Unit);
                 return Ok(self.do_return(v));
             }
-            other => {
-                return Err(RuntimeError::new(
-                    ErrorKind::NotCallable,
-                    format!("cannot call a value of type {}", other.type_name()),
-                ));
-            }
+            other => return Err(RuntimeError::not_callable(other)),
         };
         let arity = c.proto.arity as usize;
         check_arg_count(&c.proto.name, c.proto.required as usize, arity, nargs)?;
@@ -825,10 +778,7 @@ impl<'h> Vm<'h> {
                 self.stack[ra] = result;
                 Ok(())
             }
-            other => Err(RuntimeError::new(
-                ErrorKind::NotCallable,
-                format!("cannot call a value of type {}", other.type_name()),
-            )),
+            other => Err(RuntimeError::not_callable(other)),
         }
     }
 
@@ -858,13 +808,7 @@ impl<'h> Vm<'h> {
             return Ok(v);
         }
         if self.reentry_depth >= MAX_REENTRY {
-            return Err(RuntimeError::new(
-                ErrorKind::StackOverflow,
-                format!(
-                    "stack overflow: more than {MAX_REENTRY} nested calls through built-ins such as map"
-                ),
-            )
-            .note("help: a callback that calls map/filter/reduce on deeper and deeper data recurses through the built-in; use a recursive fn instead"));
+            return Err(RuntimeError::reentry_overflow(MAX_REENTRY));
         }
         self.call(ra, nargs)?;
         self.frame_mut().reentry = true;
@@ -917,38 +861,15 @@ impl<'h> Vm<'h> {
     }
 }
 
-// Small constructors for common errors, to keep `execute` readable.
-
-/// R0601 for an `Err` that reached the top level: the payload in the
-/// message, the history in `trail` (rendered by the CLI).
-fn unhandled(e: &ErrVal) -> RuntimeError {
-    let mut err = RuntimeError::new(
-        ErrorKind::UnhandledErr,
-        format!("unhandled Err: {}", e.payload.repr()),
-    );
-    err.trail = Some(Box::new(ErrTrail {
-        context: e.context.clone(),
-        origin: e.origin.clone(),
-        propagated: e.propagated.clone(),
-    }));
-    err
-}
+// Short names for the error constructors used most in `execute`.
 
 fn internal(msg: impl Into<String>) -> RuntimeError {
-    RuntimeError::new(ErrorKind::Internal, msg)
-}
-
-fn overflow(msg: String) -> RuntimeError {
-    RuntimeError::new(ErrorKind::IntOverflow, msg)
+    RuntimeError::internal(msg)
 }
 
 /// R0301.
 fn stack_overflow() -> RuntimeError {
-    RuntimeError::new(
-        ErrorKind::StackOverflow,
-        format!("stack overflow: more than {MAX_FRAMES} nested calls"),
-    )
-    .note("help: make the recursive call the last thing the function does (a tail call), e.g. by passing an accumulator")
+    RuntimeError::stack_overflow(MAX_FRAMES)
 }
 
 /// R0207 unless `required <= nargs <= arity`.
@@ -961,21 +882,11 @@ fn check_arg_count(
     if (required..=arity).contains(&nargs) {
         return Ok(());
     }
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let takes = if required == arity {
-        format!("{arity} argument{}", plural(arity))
-    } else {
-        format!("{required} to {arity} arguments")
-    };
-    let given = if nargs == 1 { "was" } else { "were" };
-    Err(RuntimeError::new(
-        ErrorKind::WrongArgCount,
-        format!("`{name}` takes {takes} but {nargs} {given} given"),
-    ))
+    Err(RuntimeError::wrong_arg_count(name, required, arity, nargs))
 }
 
 fn host_io(e: std::io::Error) -> RuntimeError {
-    RuntimeError::new(ErrorKind::HostIo, format!("cannot write output: {e}"))
+    RuntimeError::output_failed(&e)
 }
 
 /// Binary arithmetic (D8–D10). Type-directed: int×int and float×float.
@@ -1011,30 +922,7 @@ pub fn arith(op: OpCode, b: &Value, c: &Value) -> Result<Value, RuntimeError> {
         (Value::Float(x), Value::Int(y)) if op == OpCode::DIV => {
             float_arith(op, *x, *y as f64, b, c).map(Value::Float)
         }
-        _ => Err(mismatch(
-            format!(
-                "unsupported operand types for {}: {} and {}",
-                symbol(op),
-                b.type_name(),
-                c.type_name()
-            ),
-            b,
-            c,
-        )),
-    }
-}
-
-/// R0201, with a hint when the cause is int/float mixing (D10).
-fn mismatch(message: String, b: &Value, c: &Value) -> RuntimeError {
-    let err = RuntimeError::new(ErrorKind::TypeMismatch, message);
-    match (b, c) {
-        (Value::Int(_), Value::Float(_)) | (Value::Float(_), Value::Int(_)) => err.note(
-            "help: int and float never mix implicitly (only `/` converts); make both operands the same type",
-        ),
-        (Value::Str(_), _) | (_, Value::Str(_)) => err.note(
-            "help: to build text from other values, use interpolation: \"{a}{b}\" (or convert with str())",
-        ),
-        _ => err,
+        _ => Err(RuntimeError::operand_types(symbol(op), b, c)),
     }
 }
 
@@ -1043,15 +931,7 @@ fn mismatch(message: String, b: &Value, c: &Value) -> RuntimeError {
 /// divisor (Q20). `b` and `c` are the original operands, for messages.
 pub fn float_arith(op: OpCode, x: f64, y: f64, b: &Value, c: &Value) -> Result<f64, RuntimeError> {
     if matches!(op, OpCode::DIV | OpCode::IDIV | OpCode::MOD) && y == 0.0 {
-        let what = if op == OpCode::MOD {
-            "modulo"
-        } else {
-            "division"
-        };
-        return Err(RuntimeError::new(
-            ErrorKind::DivisionByZero,
-            format!("{what} by zero: {b} {} {c}", symbol(op)),
-        ));
+        return Err(RuntimeError::division_by_zero(symbol(op), b, c));
     }
     Ok(match op {
         OpCode::ADD => x + y,
@@ -1105,18 +985,9 @@ pub fn values_equal(b: &Value, c: &Value) -> Result<bool, RuntimeError> {
         (Value::Err(x), Value::Err(y)) => return values_equal(&x.payload, &y.payload),
         (Value::Ok(_), Value::Err(_)) | (Value::Err(_), Value::Ok(_)) => false,
         _ if b.type_name() == "function" && c.type_name() == "function" => {
-            return Err(RuntimeError::new(
-                ErrorKind::NotComparable,
-                "functions cannot be compared",
-            ));
+            return Err(RuntimeError::functions_not_comparable());
         }
-        _ => {
-            return Err(mismatch(
-                format!("cannot compare {} and {}", b.type_name(), c.type_name()),
-                b,
-                c,
-            ));
-        }
+        _ => return Err(RuntimeError::compare_types(b, c)),
     })
 }
 
@@ -1129,15 +1000,8 @@ pub fn less(b: &Value, c: &Value, or_equal: bool) -> Result<bool, RuntimeError> 
         (Value::Int(x), Value::Int(y)) => Ok(if or_equal { x <= y } else { x < y }),
         (Value::Float(x), Value::Float(y)) => Ok(if or_equal { x <= y } else { x < y }),
         (Value::Str(x), Value::Str(y)) => Ok(if or_equal { x <= y } else { x < y }),
-        _ if b.type_name() == c.type_name() => Err(RuntimeError::new(
-            ErrorKind::NotComparable,
-            format!("values of type {} cannot be ordered", b.type_name()),
-        )),
-        _ => Err(mismatch(
-            format!("cannot compare {} and {}", b.type_name(), c.type_name()),
-            b,
-            c,
-        )),
+        _ if b.type_name() == c.type_name() => Err(RuntimeError::not_ordered(b)),
+        _ => Err(RuntimeError::compare_types(b, c)),
     }
 }
 
@@ -1150,28 +1014,9 @@ pub fn index(b: &Value, c: &Value) -> Result<Value, RuntimeError> {
             .ok()
             .and_then(|i| xs.get(i))
             .cloned()
-            .ok_or_else(|| {
-                let mut err = RuntimeError::new(
-                    ErrorKind::IndexOutOfRange,
-                    format!("index {i} out of range (len {})", xs.len()),
-                );
-                if *i < 0 {
-                    err = err.note("help: negative indices are not supported; count from the start (len(xs) - 1 is the last element)");
-                }
-                err.access = Some(Box::new(Access {
-                    index: i.to_string(),
-                    len: xs.len(),
-                }));
-                err
-            }),
-        (Value::List(_), other) => Err(RuntimeError::new(
-            ErrorKind::TypeMismatch,
-            format!("list index must be an int, not {}", other.describe()),
-        )),
-        (other, _) => Err(RuntimeError::new(
-            ErrorKind::TypeMismatch,
-            format!("cannot index a value of type {}", other.type_name()),
-        )),
+            .ok_or_else(|| RuntimeError::index_out_of_range(*i, xs.len())),
+        (Value::List(_), other) => Err(RuntimeError::index_type(other)),
+        (other, _) => Err(RuntimeError::not_indexable(other)),
     }
 }
 
@@ -1211,23 +1056,17 @@ pub fn int_arith(op: OpCode, x: i64, y: i64) -> Result<i64, RuntimeError> {
     let sym = symbol(op);
     // RUST: a closure (anonymous function) that builds the overflow error;
     // `ok_or_else(ovf)` calls it only when a checked operation returned None.
-    let ovf = || overflow(format!("integer overflow: {x} {sym} {y}"));
+    let ovf = || RuntimeError::int_overflow(&format!("{x} {sym} {y}"));
     match op {
         OpCode::ADD => x.checked_add(y).ok_or_else(ovf),
         OpCode::SUB => x.checked_sub(y).ok_or_else(ovf),
         OpCode::MUL => x.checked_mul(y).ok_or_else(ovf),
         // RUST: `if y == 0` after the pattern is a *guard*: this arm applies
         // only when the condition holds; otherwise matching continues below.
-        OpCode::IDIV | OpCode::MOD if y == 0 => Err(RuntimeError::new(
-            ErrorKind::DivisionByZero,
-            format!(
-                "{} by zero: {x} {sym} 0",
-                if op == OpCode::MOD {
-                    "modulo"
-                } else {
-                    "division"
-                }
-            ),
+        OpCode::IDIV | OpCode::MOD if y == 0 => Err(RuntimeError::division_by_zero(
+            sym,
+            &Value::Int(x),
+            &Value::Int(0),
         )),
         OpCode::IDIV => {
             // Rust's `/` truncates toward zero; Python's `//` floors. They
@@ -1255,10 +1094,7 @@ pub fn int_arith(op: OpCode, x: i64, y: i64) -> Result<i64, RuntimeError> {
         }
         OpCode::POW => {
             if y < 0 {
-                return Err(RuntimeError::new(
-                    ErrorKind::NegativeExponent,
-                    format!("negative exponent: {x} ** {y} (int powers need an exponent >= 0)"),
-                ));
+                return Err(RuntimeError::negative_exponent(x, y));
             }
             // `checked_pow` takes a u32 exponent; huge exponents only work
             // for bases 0, 1 and -1.
@@ -1589,7 +1425,7 @@ mod tests {
             .program();
         let e = run(&p).0.unwrap_err();
         assert_eq!(e.kind.code(), "R0202");
-        assert_eq!(e.message, "cannot call a value of type int");
+        assert_eq!(e.message, "cannot call int (1): it is not a function");
     }
 
     #[test]

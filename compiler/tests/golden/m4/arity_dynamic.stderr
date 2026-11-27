@@ -3,7 +3,7 @@ error[R0207]: `add` takes 2 arguments but 1 was given
    │
  2 │ fn apply(f: (int, int) -> int, x: int) -> int = f(x)
    │                                                 ──┬─  
-   │                                                   ╰─── here
+   │                                                   ╰─── wrong number of arguments
 ───╯
 stack trace (most recent call first):
   0: apply  at arity_dynamic.vl:2:49

@@ -3,7 +3,7 @@ error[R0301]: stack overflow: more than 200 nested calls through built-ins such 
    │
  2 │ fn deep(x: int) -> list[int] = flat_map([x], deep)
    │                                ─────────┬─────────  
-   │                                         ╰─────────── here
+   │                                         ╰─────────── calls nested too deeply
 ───╯
   help: a callback that calls map/filter/reduce on deeper and deeper data recurses through the built-in; use a recursive fn instead
 stack trace (most recent call first):

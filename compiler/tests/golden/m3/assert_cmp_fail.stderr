@@ -3,7 +3,7 @@ error[R0701]: assertion failed: a + a == 5
    │
  2 │ assert a + a == 5
    │        ─────┬────  
-   │             ╰────── here
+   │             ╰────── this is false
 ───╯
   left: 4
   right: 5

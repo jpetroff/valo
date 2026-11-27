@@ -3,7 +3,7 @@ error[R0207]: `<partial add@3:13>` takes 1 argument but 2 were given
    │
  2 │ fn call2(h: (int, int) -> int) -> int = h(1, 2)
    │                                         ───┬───  
-   │                                            ╰───── here
+   │                                            ╰───── wrong number of arguments
 ───╯
 stack trace (most recent call first):
   0: call2  at partial_arity_dynamic.vl:2:41

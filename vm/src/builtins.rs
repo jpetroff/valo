@@ -43,7 +43,7 @@
 use std::rc::Rc;
 
 use crate::chunk::NativeId;
-use crate::error::{ErrorKind, RuntimeError};
+use crate::error::RuntimeError;
 use crate::value::{ErrVal, Value, quote};
 use crate::vm::{Vm, values_equal};
 
@@ -322,10 +322,7 @@ pub static NATIVES: &[NativeDef] = &[
 
 /// R0206 for a native that got an argument of the wrong type.
 fn arg_type_error(native: &str, expected: &str, got: &Value) -> RuntimeError {
-    RuntimeError::new(
-        ErrorKind::NativeArgType,
-        format!("{native}() expects {expected}, got {}", got.describe()),
-    )
+    RuntimeError::native_arg(native, expected, got)
 }
 
 /// R0206 unless `v` is a string.
@@ -382,10 +379,7 @@ fn native_int(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError>
             if (-LIMIT..LIMIT).contains(&t) {
                 Ok(Value::Int(t as i64))
             } else {
-                Err(RuntimeError::new(
-                    ErrorKind::FloatToInt,
-                    format!("cannot convert {x:?} to int"),
-                ))
+                Err(RuntimeError::float_to_int(*x))
             }
         }
         other => Err(arg_type_error("int", "a float", other)),
@@ -461,13 +455,8 @@ fn native_is_err(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeErr
 fn native_unwrap(_vm: &mut Vm<'_>, mut args: Vec<Value>) -> Result<Value, RuntimeError> {
     match args.swap_remove(0) {
         Value::Ok(v) => Ok(Rc::try_unwrap(v).unwrap_or_else(|rc| (*rc).clone())),
-        Value::Err(e) => Err(RuntimeError::new(
-            ErrorKind::UnwrapErr,
-            format!("unwrap of Err({})", e.payload.repr()),
-        )
-        .note("help: handle the error with `?`, is_err(r) or or_else(r, default)")),
-        Value::None => Err(RuntimeError::new(ErrorKind::UnwrapNone, "unwrap of none")
-            .note("help: test for none first (`x == none`) or use or_else(x, default)")),
+        Value::Err(e) => Err(RuntimeError::unwrap_err(&e.payload)),
+        Value::None => Err(RuntimeError::unwrap_none()),
         other => Ok(other),
     }
 }
@@ -503,10 +492,7 @@ fn native_read_line(vm: &mut Vm<'_>, _args: Vec<Value>) -> Result<Value, Runtime
     match vm.host().read_line() {
         Ok(Some(line)) => Ok(Value::Str(line.into())),
         Ok(None) => Ok(Value::None),
-        Err(e) => Err(RuntimeError::new(
-            ErrorKind::HostIo,
-            format!("cannot read standard input: {}", io_message(&e)),
-        )),
+        Err(e) => Err(RuntimeError::input_failed(&io_message(&e))),
     }
 }
 
@@ -775,14 +761,8 @@ fn native_join(_vm: &mut Vm<'_>, args: Vec<Value>) -> Result<Value, RuntimeError
     let mut out = String::new();
     for (i, x) in xs.iter().enumerate() {
         let Value::Str(t) = x else {
-            return Err(RuntimeError::new(
-                ErrorKind::NativeArgType,
-                format!(
-                    "join() expects a list of str, but element {i} is {}",
-                    x.describe()
-                ),
-            )
-            .note("help: convert the elements first, e.g. map(xs, str)"));
+            return Err(RuntimeError::native_elem("join", "a list of str", i, x)
+                .help("convert the elements first, e.g. map(xs, str)"));
         };
         if i > 0 {
             out.push_str(sep);

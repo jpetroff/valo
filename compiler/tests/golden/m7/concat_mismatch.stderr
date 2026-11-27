@@ -1,9 +1,9 @@
-error[R0201]: unsupported operand types for +: str and int
+error[R0201]: unsupported operand types for `+`: str ("n = ") and int (3)
    ╭─[ concat_mismatch.vl:2:7 ]
    │
  2 │ print("n = " + n)
    │       ─────┬────  
-   │            ╰────── here
+   │            ╰────── wrong operand type
 ───╯
   help: to build text from other values, use interpolation: "{a}{b}" (or convert with str())
 stack trace (most recent call first):
