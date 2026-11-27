@@ -1,0 +1,47 @@
+# Workspace manifest: one repository, two crates (Rust packages).
+#   compiler/  valo-compiler  lexer, parser, codegen + the `valo` CLI
+#   vm/        valo-vm        bytecode format + interpreter (no compiler dependency)
+# Build everything: `cargo build --workspace`; test: `cargo test --workspace`.
+# Explained in docs/01-rust-primer.md ("Cargo, crates and workspaces").
+
+[workspace]
+members = ["compiler", "vm"]
+resolver = "3"
+
+# Fields shared by both crates (`version.workspace = true` in their manifests).
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+
+# Every third-party library and its version, declared once. A crate opts in
+# with `name.workspace = true` under its own [dependencies].
+# To add a library: put it here, then reference it from compiler/ or vm/.
+[workspace.dependencies]
+# Internal crates
+valo-vm = { path = "vm", version = "0.1.0" }
+
+# Runtime / library dependencies
+thiserror = "2.0.21"
+ariadne = "0.6.0"
+clap = { version = "4.6.10", features = ["derive"] }
+
+# Dev / test dependencies
+insta = "1.49.0"
+proptest = "1.11.0" # 1.12 needs Rust 1.88 > our rust-version; the MSRV-aware resolver picks the newest compatible
+pretty_assertions = "1.4.1"
+
+# Lints (compiler warnings) applied to both crates. `unsafe_code = forbid`
+# rejects any `unsafe` block: the whole project is memory-safe Rust.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# `cargo build --release`: smaller, faster binaries to copy to servers.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

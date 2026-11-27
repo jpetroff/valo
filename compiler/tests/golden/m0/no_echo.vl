@@ -1,0 +1,4 @@
+# comments and blank lines are ignored
+
+# a value: no output without --echo
+1 + 2

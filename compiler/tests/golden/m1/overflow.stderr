@@ -1,0 +1,4 @@
+error[R0101]: integer overflow: 9223372036854775807 + 1
+  --> overflow.vl:1:1
+stack trace (most recent call first):
+  0: <main> at overflow.vl:1:1

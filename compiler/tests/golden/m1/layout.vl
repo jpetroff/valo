@@ -1,0 +1,8 @@
+#!/usr/bin/env valo
+## doc comment
+(1 +
+    2 +
+  3)   # brackets join lines
+
+1_000_000 + 0x10 + 0o17 + 0b11
+40000 * 3

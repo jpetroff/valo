@@ -1,0 +1,4 @@
+error[R0102]: division by zero: 7 // 0
+  --> div_zero.vl:2:1
+stack trace (most recent call first):
+  0: <main> at div_zero.vl:2:1

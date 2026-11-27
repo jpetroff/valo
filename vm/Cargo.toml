@@ -1,0 +1,30 @@
+# Manifest of the VM crate: bytecode format + interpreter. Must not depend on
+# valo-compiler (see vm/src/lib.rs). Produces the library `valo_vm` and the
+# binary `valo-vm` (placeholder until bytecode files exist, M11).
+
+[package]
+name = "valo-vm"
+description = "Register-based bytecode VM, runtime and bytecode format for the valo language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "valo_vm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "valo-vm"
+path = "src/bin/valo-vm.rs"
+
+[dependencies]
+thiserror.workspace = true
+
+# Libraries used only by tests (`cargo test`).
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
