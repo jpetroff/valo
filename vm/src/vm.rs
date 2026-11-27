@@ -65,12 +65,12 @@
 use std::rc::Rc;
 
 use crate::builtins::NATIVES;
-use crate::chunk::{Const, GlobalKind, Program, Proto, UpvalSrc};
+use crate::chunk::{Const, GlobalKind, Program, Proto, SrcSpan, UpvalSrc};
 use crate::debug::{DebugHook, LineTable, Resume, VmView};
-use crate::error::{ErrorKind, RuntimeError, TraceEntry};
+use crate::error::{ErrTrail, ErrorKind, RuntimeError, Site, TraceEntry};
 use crate::host::Host;
 use crate::opcode::{Format, Instr, OpCode};
-use crate::value::{Closure, Value};
+use crate::value::{Closure, ErrVal, Value};
 
 /// Most frames that may be active at once (R0301 beyond).
 pub const MAX_FRAMES: usize = 200_000;
@@ -262,6 +262,47 @@ impl<'h> Vm<'h> {
                     // Not traced: `ra` belongs to the finished frame.
                     continue;
                 }
+                // `?` (M7, D26): unwrap an Ok, or return the Err from this
+                // function, recording this `?` on it.
+                OpCode::TRY => {
+                    let lenient = instr.c() == 1;
+                    let v =
+                        std::mem::replace(&mut self.stack[base + instr.b() as usize], Value::Unit);
+                    match v {
+                        Value::Ok(inner) => {
+                            self.stack[ra] =
+                                Rc::try_unwrap(inner).unwrap_or_else(|rc| (*rc).clone());
+                        }
+                        Value::Err(mut e) => {
+                            let site = Site {
+                                fn_name: Rc::clone(&proto.name),
+                                span: proto.spans.get(at).copied().unwrap_or_default(),
+                            };
+                            Rc::make_mut(&mut e).propagated.push(site);
+                            if self.frames.len() == 1 {
+                                return Err(unhandled(&e));
+                            }
+                            if let Some(result) = self.do_return(Value::Err(e)) {
+                                return Ok(result);
+                            }
+                            // Not traced: the frame is gone.
+                            continue;
+                        }
+                        other if lenient => self.stack[ra] = other,
+                        other => {
+                            let err = RuntimeError::new(
+                                ErrorKind::NotResult,
+                                format!("`?` needs a result (Ok or Err), got {}", other.describe()),
+                            );
+                            return Err(if matches!(other, Value::None) {
+                                err.note("help: `?` passes on errors of results; for an optional value use or_else(x, default) or compare with none")
+                            } else {
+                                err
+                            });
+                        }
+                    }
+                }
+                OpCode::LOADNONE => self.stack[ra] = Value::None,
                 OpCode::TAILCALL => {
                     if let Some(result) = self.tail_call(ra, instr.b() as usize)? {
                         return Ok(result);
@@ -568,6 +609,28 @@ impl<'h> Vm<'h> {
     }
 
     /// The running frame.
+    /// Where the running code is: the innermost frame's function and the
+    /// span of the instruction it is executing (for a native: the call).
+    /// The `Err` built-in records it as the error's origin (M7).
+    pub fn current_site(&self) -> Site {
+        match self.frames.last() {
+            Some(f) => Site {
+                fn_name: Rc::clone(&f.closure.proto.name),
+                span: f
+                    .closure
+                    .proto
+                    .spans
+                    .get(f.pc.saturating_sub(1))
+                    .copied()
+                    .unwrap_or_default(),
+            },
+            None => Site {
+                fn_name: "<main>".into(),
+                span: SrcSpan::default(),
+            },
+        }
+    }
+
     fn frame_mut(&mut self) -> &mut Frame {
         self.frames.last_mut().expect("execute without a frame")
     }
@@ -704,6 +767,13 @@ impl<'h> Vm<'h> {
         self.host.write_stdout(s).map_err(host_io)
     }
 
+    /// The host, for natives that perform effects (`read_line`,
+    /// `read_file`, …, M7). File errors are values (`Err`), so natives
+    /// handle the `io::Result` themselves.
+    pub fn host(&mut self) -> &mut dyn Host {
+        &mut *self.host
+    }
+
     /// One `--trace-exec` line: `[<main>] 0003 ADD 0 0 1 | R[0]=17`.
     fn trace_instr(
         &mut self,
@@ -727,7 +797,7 @@ impl<'h> Vm<'h> {
         });
         if writes_a {
             if let Some(v) = self.stack.get(ra) {
-                line.push_str(&format!(" | R[{}]={v}", instr.a()));
+                line.push_str(&format!(" | R[{}]={}", instr.a(), v.repr()));
             }
         }
         line.push('\n');
@@ -736,6 +806,21 @@ impl<'h> Vm<'h> {
 }
 
 // Small constructors for common errors, to keep `execute` readable.
+
+/// R0601 for an `Err` that reached the top level: the payload in the
+/// message, the history in `trail` (rendered by the CLI).
+fn unhandled(e: &ErrVal) -> RuntimeError {
+    let mut err = RuntimeError::new(
+        ErrorKind::UnhandledErr,
+        format!("unhandled Err: {}", e.payload.repr()),
+    );
+    err.trail = Some(Box::new(ErrTrail {
+        context: e.context.clone(),
+        origin: e.origin.clone(),
+        propagated: e.propagated.clone(),
+    }));
+    err
+}
 
 fn internal(msg: impl Into<String>) -> RuntimeError {
     RuntimeError::new(ErrorKind::Internal, msg)
@@ -785,7 +870,7 @@ fn host_io(e: std::io::Error) -> RuntimeError {
 /// Mixed int/float is an error (R0201), with one exception: true division
 /// `/` converts int operands to float and always returns a float (D9).
 ///
-/// EXTEND (M7/M8): `+` on two strings / two lists gets an arm here.
+/// EXTEND (M8): `+` on two lists gets an arm here.
 pub fn arith(op: OpCode, b: &Value, c: &Value) -> Result<Value, RuntimeError> {
     // RUST: matching on a tuple of two references checks both types at once.
     match (b, c) {
@@ -881,6 +966,12 @@ pub fn values_equal(b: &Value, c: &Value) -> Result<bool, RuntimeError> {
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
+        // Any value may be compared with `none`: that is how an optional
+        // is tested (plan §2.4).
+        (Value::None, other) | (other, Value::None) => matches!(other, Value::None),
+        (Value::Ok(x), Value::Ok(y)) => return values_equal(x, y),
+        (Value::Err(x), Value::Err(y)) => return values_equal(&x.payload, &y.payload),
+        (Value::Ok(_), Value::Err(_)) | (Value::Err(_), Value::Ok(_)) => false,
         _ if b.type_name() == "function" && c.type_name() == "function" => {
             return Err(RuntimeError::new(
                 ErrorKind::NotComparable,
@@ -1182,6 +1273,102 @@ mod tests {
         assert_eq!(e.kind.code(), "R0201");
         assert!(e.notes[0].contains("interpolation"), "{:?}", e.notes);
         assert_eq!(Value::Str("a\"{".into()).repr(), "\"a\\\"\\{\"");
+    }
+
+    /// Index of a built-in by name.
+    fn native(name: &str) -> u16 {
+        NATIVES
+            .iter()
+            .position(|n| n.name == name)
+            .expect("known native") as u16
+    }
+
+    /// M7: `fail()` returns `Err("bad")` (made by the `Err` built-in);
+    /// `mid()` does `fail()?`; `<main>` calls `mid()` and applies TRY with
+    /// flag `c`. The Err records its origin and every `?` on its way.
+    fn try_program(c: u8) -> Program {
+        let fail = ProtoBuilder::new("fail", 2)
+            .global("Err")
+            .konst(Const::Str("bad".into()))
+            .op(Instr::abx(OpCode::GETGLOBAL, 0, 0))
+            .op(Instr::abx(OpCode::LOADK, 1, 0))
+            .op(Instr::abc(OpCode::CALL, 0, 1, 0))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        let mid = ProtoBuilder::new("mid", 1)
+            .op(Instr::abx(OpCode::GETGLOBAL, 0, 1))
+            .op(Instr::abc(OpCode::CALL, 0, 0, 0))
+            .op(Instr::abc(OpCode::TRY, 0, 0, 0))
+            .op(Instr::asbx(OpCode::LOADI, 0, 99)) // never reached
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .build();
+        ProtoBuilder::new("<main>", 1)
+            .native_global(native("Err"))
+            .global("fail")
+            .global("mid")
+            .proto(fail)
+            .proto(mid)
+            .op(Instr::abx(OpCode::CLOSURE, 0, 0))
+            .op(Instr::abx(OpCode::SETGLOBAL, 0, 1))
+            .op(Instr::abx(OpCode::CLOSURE, 0, 1))
+            .op(Instr::abx(OpCode::SETGLOBAL, 0, 2))
+            .op(Instr::abx(OpCode::GETGLOBAL, 0, 2))
+            .op(Instr::abc(OpCode::CALL, 0, 0, 0))
+            .op(Instr::abc(OpCode::TRY, 0, 0, c))
+            .op(Instr::abc(OpCode::RETURN, 0, 0, 0))
+            .program()
+    }
+
+    #[test]
+    fn try_propagates_err_and_reports_it_at_the_top() {
+        for c in [0, 1] {
+            let e = run(&try_program(c)).0.unwrap_err();
+            assert_eq!(e.kind.code(), "R0601");
+            assert_eq!(e.message, "unhandled Err: \"bad\"");
+            let trail = e.trail.expect("trail");
+            assert_eq!(&*trail.origin.fn_name, "fail");
+            let sites: Vec<&str> = trail.propagated.iter().map(|s| &*s.fn_name).collect();
+            assert_eq!(sites, ["mid", "<main>"]);
+        }
+    }
+
+    #[test]
+    fn try_unwraps_ok_and_checks_its_operand() {
+        let prog = |load: Instr, c: u8| {
+            ProtoBuilder::new("<main>", 2)
+                .native_global(native("Ok"))
+                .op(Instr::abx(OpCode::GETGLOBAL, 0, 0))
+                .op(load)
+                .op(Instr::abc(OpCode::CALL, 0, 1, 0))
+                .op(Instr::abc(OpCode::TRY, 0, 0, 0))
+                .op(Instr::abc(OpCode::MOVE, 1, 0, 0))
+                .op(Instr::abc(OpCode::TRY, 1, 1, c))
+                .op(Instr::abc(OpCode::RETURN, 1, 0, 0))
+                .program()
+        };
+        // Ok(7)? = 7; then 7? passes only when lenient.
+        let seven = Instr::asbx(OpCode::LOADI, 1, 7);
+        assert_eq!(run(&prog(seven, 1)).0, Ok(Value::Int(7)));
+        let e = run(&prog(seven, 0)).0.unwrap_err();
+        assert_eq!(e.kind.code(), "R0208");
+        assert_eq!(e.message, "`?` needs a result (Ok or Err), got int (7)");
+        // Ok(none)? = none; none? is R0208 with a hint.
+        let none = Instr::abc(OpCode::LOADNONE, 1, 0, 0);
+        let e = run(&prog(none, 0)).0.unwrap_err();
+        assert_eq!(e.message, "`?` needs a result (Ok or Err), got none");
+        assert!(e.notes[0].contains("or_else"), "{:?}", e.notes);
+    }
+
+    #[test]
+    fn none_compares_with_anything_and_results_structurally() {
+        let ok = |v| Value::Ok(Rc::new(v));
+        assert!(values_equal(&Value::None, &Value::None).unwrap());
+        assert!(!values_equal(&Value::None, &Value::Int(0)).unwrap());
+        assert!(!values_equal(&Value::Str("".into()), &Value::None).unwrap());
+        assert!(values_equal(&ok(Value::Int(1)), &ok(Value::Int(1))).unwrap());
+        assert!(!values_equal(&ok(Value::Int(1)), &ok(Value::Int(2))).unwrap());
+        assert_eq!(ok(Value::Str("a".into())).to_string(), "Ok(\"a\")");
+        assert_eq!(Value::None.to_string(), "none");
     }
 
     /// `fn add(a, b) = a + b` as a prototype.

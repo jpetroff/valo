@@ -4,7 +4,7 @@ valo is a functional, indentation-based scripting language. Source is compiled
 to bytecode and executed by a register-based virtual machine; Lua 5.x is the
 guiding model for the VM and runtime.
 
-Status: early MVP. Bindings, ints, floats, bools, conditionals, functions, lambdas and closures, calls, keyword arguments, `_` partial application, strings with `{…}` interpolation and `print` run, with proper tail calls (milestones M0–M6, M7a).
+Status: early MVP. Bindings, ints, floats, bools, conditionals, functions, lambdas and closures, calls, keyword arguments, `_` partial application, strings with `{…}` interpolation, `none`, `Ok`/`Err` with `?`, stdin and file I/O run, with proper tail calls (milestones M0–M7).
 
 File extensions (tentative): source files use `.vl`, compiled bytecode uses `.vlc`.
 
@@ -31,7 +31,7 @@ like Lua running `luac` output).
 
 ## Status
 
-Milestones M0–M6 of `.memory/plan-mvp.md` are done: `let` bindings with shadowing,
+Milestones M0–M7 of `.memory/plan-mvp.md` are done: `let` bindings with shadowing,
 indented blocks, ints, floats, bools, comparisons (chained), `and`/`or`/`not`,
 `if`/`elif`/`else`, `assert`, `fn` definitions (hoisted at top level, local `fn`s inside
 blocks, annotated), lambdas (`x => x + 1`, `(a, b) => …`) and closures that capture by
@@ -39,8 +39,10 @@ value, `_` partial application (`add(1, _)`, `x |> sub(10, _)`), calls with
 compile-time argument checks, keyword-only parameters with defaults (`f(x, retries=2)`),
 pipes `|>`, proper tail calls (loops as tail recursion run in constant stack space; deep
 non-tail recursion stops with a clean R0301), strings (`"Hello, {name}!"`, escapes, raw
-`r"…"`, `+`, comparisons), and the built-ins `print` (with `end=`), `int`, `float`, `str`,
-`str_len`, `trim`
+`r"…"`, `+`, comparisons), `none`, results with `?` and `context` (an unhandled `Err` prints
+its context chain and where it came from), and the built-ins `print` (with `end=`), `int`,
+`float`, `str`, `str_len`, `trim`, `parse_int`, `parse_float`, `Ok`, `Err`, `context`,
+`is_ok`, `is_err`, `unwrap`, `or_else`, `read_line`, `read_file`, `write_file`
 run end to end (indentation-aware lexer → Pratt parser → desugaring → name resolver →
 register bytecode → VM with call frames and stack traces).
 

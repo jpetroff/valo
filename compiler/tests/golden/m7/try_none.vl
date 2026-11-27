@@ -1,0 +1,4 @@
+fn get_port(s: str) -> int:
+    let p = parse_int(s)?
+    p
+print(get_port("eighty"))

@@ -349,7 +349,7 @@ function <partial add@2:11> upvals=1          CALL      1 2
 The call inside the partial is a tail call, so a loop driven through a
 partial still runs in constant stack space.
 
-## 6.10 Strings (M7)
+## 6.10 Strings, `none` and `?` (M7)
 
 A string literal is a constant (`Const::Str`, deduplicated like numbers)
 loaded with `LOADK`. An interpolated string puts every part — text pieces
@@ -370,6 +370,14 @@ print("n = {n}, next {n + 1}")
 
 The alternative — rewriting to `"n = " + str(n) + …` — would allocate an
 intermediate string per `+`.
+
+**`none` and `?`.** `none` is `LOADNONE dst`. `e?` compiles `e` into `dst`
+and adds `TRY dst dst 0`: one fused instruction instead of a test, a jump
+and a `RETURN`, because it also records the `?`'s position on the `Err`
+(plan D26). Every expression line of `<main>` ends with a *lenient*
+`TRY dst dst 1`, which lets every value through except an `Err`: a result
+that nobody looked at must not vanish silently (Q23). `?` inside a lambda
+returns from the lambda — `TRY` acts on whatever frame runs it.
 
 ## 6.11 What codegen does *not* do
 

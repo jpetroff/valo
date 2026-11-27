@@ -2,20 +2,20 @@
 source: compiler/src/resolve.rs
 expression: "resolve_src(\"let x = 1\\nlet y = if true:\\n    let x = x + 1\\n    let x = x * 10\\n    \\\n                 if x > 0:\\n        let x = 0\\n        x\\n    else: x\\nelse: x\\nx + y\").unwrap()"
 ---
-natives: global#0..#5 (print int float str str_len trim)
+natives: global#0..#17 (print int float str str_len trim Ok Err context is_ok is_err unwrap or_else parse_int parse_float read_line read_file write_file)
 globals:
-  global#6   x            1:5
-  global#7   y            2:5
+  global#18  x            1:5
+  global#19  y            2:5
 locals:
   local#0   x            3:9
   local#1   x            4:9
   local#2   x            6:13
 uses:
-  3:13    x -> global#6
+  3:13    x -> global#18
   4:13    x -> local#0
   5:8     x -> local#1
   7:9     x -> local#2
   8:11    x -> local#1
-  9:7     x -> global#6
-  10:1    x -> global#6
-  10:5    y -> global#7
+  9:7     x -> global#18
+  10:1    x -> global#18
+  10:5    y -> global#19

@@ -522,7 +522,7 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q4: closure capture — (a) by value at creation, no open upvalues (b) Lua open/closed upvalues. Default (a).
 > Q16: local mutual recursion — (a) unsupported, E0204 (b) letrec groups via shared env record. Default (a).
 
-### M7 — Str, interpolation, text I/O host functions, optional (`none`) and Result with `?`
+### M7 — Str, interpolation, text I/O host functions, optional (`none`) and Result with `?` — DONE 2026-11-27
 
 - Implementation notes, M7a (strings; branch `m6-m7`, committed separately from M7b):
   - Lexer tokens `StrStart StrText(decoded) InterpStart … InterpEnd StrEnd`; mode stack `Lexer::interps: Vec<Interp { depth, string_start, brace }>` — the `}` whose bracket depth matches the top entry ends the interpolation; `depth` is +1 while one is open. Escapes `\n \t \r \0 \" \\ \{ \} \u{1-6 hex}`, else E0005. A string reaching end of line/file = E0004, but only E0007 when that string sits inside an unclosed `{…}` (`"a {x"`); a line break inside `{…}` = E0007; `{}` / `{ }` = E0008. A lone `}` in text is literal. Raw `r"…"`: no escapes/interpolation, ends at the first `"`. Backtick, `re"`, `=~`, `!~` stay E0009.
@@ -532,6 +532,14 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
   - Natives appended: `str`, `str_len`, `trim`; `print` gained `end` (keyword, default `"\n"`, deferred from M4b) — so `print` displays as `<native print/2>` and a dynamic 2-argument call passes `end` positionally (Q27). Every global index shifted by 3 (snapshots re-accepted, only numbering changed).
   - Golden runner: `<name>.files/` fixtures copied next to the program (and skipped when collecting tests). DAP Variables/hover show strings quoted. Grammar: `str_len`, `trim` added to the built-in list.
   - Extra goldens: `print_end`, `str_ops`, `assert_str`.
+- Implementation notes, M7b (`none`, results, `?`):
+  - Parser: `none` → `ExprKind::None`; postfix `?` = Pratt row `Infix::Try` at `CALL_BP` → `ExprKind::Try`. Desugar: `Pipe(x, Try(rhs))` → `Try(pipe(x, rhs))` recursively (`x |> f? |> g(1)??` works). The compile-time error for a literal `none?` (Q19) was skipped: it is R0208 at runtime like any non-result.
+  - Codegen: `LOADNONE`; `e?` → `TRY dst dst 0`; EVERY top-level expression line ends with lenient `TRY dst dst 1` (Q23: static types would be needed to emit it only for results). All `<main>` disassembly snapshots changed by that.
+  - VM: `Value::{None, Ok(Rc<Value>), Err(Rc<ErrVal { payload, context, origin: Site, propagated: Vec<Site> }>)}`; `Site { fn_name, span }` lives in `error.rs`; `type_name` of Ok/Err = "result"; Display `none`, `Ok(1)`, `Err("x")` (payload via repr); `Value::describe()` for messages (`int (3)`, `none`). `none == x` allowed for any x; Ok/Err compare by content. TRY: Err → push the `?` site, `do_return` it; in `<main>` (frames.len() == 1) → R0601 with `RuntimeError::trail: Option<Box<ErrTrail>>` (boxed: clippy large_err). `Vm::current_site()` = innermost frame + span of its current instruction (the `Err` built-in's origin); `Vm::host()` gives natives the host.
+  - Natives appended (12): `Ok Err context is_ok is_err unwrap or_else parse_int parse_float read_line read_file write_file` — global indices shifted again (+12; snapshots: numbering only). `or_else(x, d)`: `none`/`Err` → d, `Ok(v)` → v, else x. `parse_int`/`parse_float` trim whitespace, accept a sign. File errors are values: `Err("cannot read \"p\": file not found")` (platform-neutral reasons via `io_message`); a failing stdin read is R0501.
+  - R0601 rendering (`diagnostic.rs`): `context (outermost first):`, `origin: f at file:l:c`, `propagated by \`?\` in:` list, then the stack trace. DAP exception text adds context + origin; DAP `read_line` returns `none`.
+  - New codes: R0208, R0402, R0403, R0601 (catalogue §5 unchanged; chapter 8 table updated).
+  - Extra goldens: `toplevel_err_discarded`, `try_in_lambda`.
 
 - Goal: text programs: hello world, interpolated output, stdin line processing, file read/write with `?` propagation and context chains.
 - Blocks: string literal (escapes, interpolation `{expr}`, raw strings), string concatenation via `+`, string comparison; `none` literal; Result constructors `Ok`/`Err` (builtins), postfix `?`.

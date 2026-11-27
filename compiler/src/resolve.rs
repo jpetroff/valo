@@ -696,7 +696,8 @@ impl Resolver {
             }
             ExprKind::Call { callee, args, .. } => self.call(e, callee, args),
             ExprKind::Lambda(l) => self.lambda(e, l),
-            ExprKind::Str(_) => {}
+            ExprKind::Str(_) | ExprKind::None => {}
+            ExprKind::Try(x) => self.expr(x),
             ExprKind::Interp(parts) => {
                 for p in parts {
                     if let StrPart::Expr(x) = p {
@@ -1451,7 +1452,7 @@ mod tests {
     fn fn_bodies_see_globals_as_at_definition() {
         let src = "let x = 1\nfn f() -> int = x\nlet x = 2\nf()";
         let d = resolve_src(src).unwrap();
-        assert!(d.contains("2:17    x -> global#6"), "{d}");
+        assert!(d.contains("2:17    x -> global#18"), "{d}");
     }
 
     // Snapshot: src/snapshots/valo_compiler__resolve__tests__capture_chain.snap

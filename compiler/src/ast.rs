@@ -37,6 +37,7 @@
 //!         ::Lambda(Lambda{params, body, partial_of}) `x => e`, `(a, b) => e` (M6)
 //!         ::Str(String)                              `"text"` (M7)
 //!         ::Interp(Vec<StrPart>)                     `"a {x} b"`: Text / Expr parts (M7)
+//!         ::None | Try(expr)                         `none`, postfix `e?` (M7)
 //! Arg::Positional(Expr) | Keyword { name, value } | Placeholder (`_`, M6)
 //! TypeExpr { span, kind: TypeKind }      annotations (checked from M10)
 //! ```
@@ -277,6 +278,11 @@ pub enum ExprKind {
     Lambda(Box<Lambda>),
     /// A string literal without interpolation (escapes decoded; M7).
     Str(String),
+    /// The empty value `none` (S9, M7).
+    None,
+    /// Postfix `e?` (S10, M7): the value inside an `Ok`, or return the
+    /// `Err` from the enclosing fn or lambda.
+    Try(Box<Expr>),
     /// An interpolated string `"a {x} b"` (S12, M7): text and expressions
     /// in order; each expression is converted to text when it runs.
     Interp(Vec<StrPart>),
@@ -437,6 +443,8 @@ impl fmt::Display for Expr {
             }
             ExprKind::Pipe { lhs, rhs, .. } => write!(f, "(|> {lhs} {rhs})"),
             ExprKind::Str(text) => write!(f, "{text:?}"),
+            ExprKind::None => f.write_str("none"),
+            ExprKind::Try(e) => write!(f, "(? {e})"),
             ExprKind::Interp(parts) => {
                 f.write_str("(interp")?;
                 for p in parts {

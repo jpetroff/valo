@@ -4,7 +4,7 @@ expression: "disasm(\"fn outer(a: int) -> int:\\n    fn mid(b: int) -> int:\\n  
 ---
 function <main> arity=0 regs=1 consts=0 protos=1   ; t.vl:1:1
   0000  [1:4]   CLOSURE   0 0      ; <fn outer/1>
-  0001  [1:4]   SETGLOBAL 0 6      ; outer
+  0001  [1:4]   SETGLOBAL 0 18     ; outer
   0002  [5:12]  LOADUNIT  0
   0003  [5:12]  RETURN    0
 constants: (none)

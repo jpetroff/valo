@@ -1,0 +1,3 @@
+fn first_number(s: str) -> int = unwrap(parse_int(s))
+print(first_number("12"))
+print(first_number("twelve"))

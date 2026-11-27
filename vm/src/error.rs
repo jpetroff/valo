@@ -57,6 +57,15 @@ pub enum ErrorKind {
     NativeArgType,
     /// R0207 wrong number of arguments in a call the compiler could not check.
     WrongArgCount,
+    /// R0208 `?` on a value that is not a result (`Ok`/`Err`), incl. `none`.
+    NotResult,
+    /// R0402 `unwrap` of `none`.
+    UnwrapNone,
+    /// R0403 `unwrap` of an `Err`.
+    UnwrapErr,
+    /// R0601 an `Err` reached the top level unhandled (`?` in `<main>`, or
+    /// a top-level expression whose value is an `Err`, Q23).
+    UnhandledErr,
     /// R0301 too many nested calls.
     StackOverflow,
     /// R0302 global read before its `SETGLOBAL` ran.
@@ -85,6 +94,10 @@ impl ErrorKind {
             ErrorKind::NotComparable => "R0205",
             ErrorKind::NativeArgType => "R0206",
             ErrorKind::WrongArgCount => "R0207",
+            ErrorKind::NotResult => "R0208",
+            ErrorKind::UnwrapNone => "R0402",
+            ErrorKind::UnwrapErr => "R0403",
+            ErrorKind::UnhandledErr => "R0601",
             ErrorKind::StackOverflow => "R0301",
             ErrorKind::GlobalUninit => "R0302",
             ErrorKind::AssertionFailed => "R0701",
@@ -108,6 +121,28 @@ pub struct TraceEntry {
     pub tail_calls: u32,
 }
 
+/// A place in the program: function name and the span of an instruction
+/// (where an `Err` was made, or a `?` passed it on).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Site {
+    /// Function display name.
+    pub fn_name: Rc<str>,
+    /// Source span.
+    pub span: SrcSpan,
+}
+
+/// The history of an unhandled `Err` (R0601, plan D26/Q21): its context
+/// messages and where it was created and propagated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrTrail {
+    /// `context(r, msg)` messages, innermost (first added) first.
+    pub context: Vec<Rc<str>>,
+    /// Where `Err(…)` (or a failing built-in) created it.
+    pub origin: Site,
+    /// Every `?` that passed it on, in order (innermost first).
+    pub propagated: Vec<Site>,
+}
+
 /// A runtime fault.
 // RUST: `thiserror` turns the `#[error(...)]` line into a `Display` impl, so
 // `err.to_string()` gives e.g. "error[R0102]: division by zero: 7 // 0".
@@ -123,6 +158,9 @@ pub struct RuntimeError {
     pub notes: Vec<String>,
     /// Stack trace, innermost frame first.
     pub trace: Vec<TraceEntry>,
+    /// For R0601: the `Err`'s context chain and sites (boxed: rare, and it
+    /// would make every `Result<_, RuntimeError>` larger).
+    pub trail: Option<Box<ErrTrail>>,
 }
 
 impl RuntimeError {
@@ -133,6 +171,7 @@ impl RuntimeError {
             message: message.into(),
             notes: Vec::new(),
             trace: Vec::new(),
+            trail: None,
         }
     }
 

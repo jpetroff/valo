@@ -120,10 +120,30 @@ impl Desugar {
     /// `lhs |> rhs` → a call (D24).
     fn pipe(&mut self, e: &mut Expr) {
         // Move the pipe out of the tree, leaving a placeholder for a moment.
-        let ExprKind::Pipe { mut lhs, rhs, .. } = std::mem::replace(&mut e.kind, ExprKind::Unit)
+        let ExprKind::Pipe {
+            op_span,
+            mut lhs,
+            rhs,
+        } = std::mem::replace(&mut e.kind, ExprKind::Unit)
         else {
             unreachable!("checked by the caller");
         };
+        // `x |> f(a)?` → `f(x, a)?`: the `?` applies to the whole stage
+        // (S10, D26), so the pipe is rewritten inside it.
+        if let ExprKind::Try(inner) = rhs.kind {
+            let mut stage = Expr {
+                id: self.id(),
+                span: e.span,
+                kind: ExprKind::Pipe {
+                    op_span,
+                    lhs,
+                    rhs: inner,
+                },
+            };
+            self.pipe(&mut stage);
+            e.kind = ExprKind::Try(Box::new(stage));
+            return;
+        }
         self.expr(&mut lhs);
         let mut rhs = *rhs;
         match rhs.kind {
@@ -327,7 +347,8 @@ impl Desugar {
                 }
             }
             ExprKind::Lambda(l) => self.expr(&mut l.body),
-            ExprKind::Str(_) => {}
+            ExprKind::Str(_) | ExprKind::None => {}
+            ExprKind::Try(x) => self.expr(x),
             ExprKind::Interp(parts) => {
                 for p in parts {
                     if let StrPart::Expr(x) = p {
@@ -387,6 +408,12 @@ mod tests {
     #[test]
     fn pipes_fill_placeholders() {
         assert_eq!(desugared("x |> f(1, _)"), "(expr (pcall f 1 x))\n");
+        // `?` ends the stage: it applies to the rewritten call.
+        assert_eq!(desugared("x |> f(a)?"), "(expr (? (pcall f x a)))\n");
+        assert_eq!(
+            desugared("x |> f? |> g(1)??"),
+            "(expr (? (? (pcall g (? (pcall f x)) 1))))\n"
+        );
         // A second `_`: a partial with the piped value fixed, evaluated first.
         assert_eq!(
             desugared("x |> f(a, _, _)"),

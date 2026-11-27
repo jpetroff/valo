@@ -6,7 +6,9 @@ locals in registers), bools, floats, comparisons, `and`/`or`/`not`, `if` and
 `assert` (jumps with backpatching). M4 added functions: `fn` definitions,
 calls with frames, built-ins and the pipe (a desugaring pass); M4b keyword
 arguments and defaults; M5 proper tail calls; M6 lambdas, local fns,
-closures that capture by value and `_` partials. Every later
+closures that capture by value and `_` partials; M7 strings with
+interpolation, `none`, `Ok`/`Err` with `?` and `context`, and stdin/file
+built-ins. Every later
 milestone widens the same pipeline; no stage is replaced. This chapter maps each planned milestone onto the files you have
 now read. The authoritative plan is `.memory/plan-mvp.md`; syntax is in
 `.memory/syntax.md`.
@@ -19,7 +21,7 @@ now read. The authoritative plan is `.memory/plan-mvp.md`; syntax is in
 | ~~M4b~~ (done) | keyword and default arguments | — | `name=value` arguments | normalise to positional | `LOADMISSING`, `JMPIFSET` | missing-argument sentinel |
 | ~~M5~~ (done) | recursion without stack growth | — | — | tail position | `TAILCALL` | frame reuse, stack limits |
 | ~~M6~~ (done) | lambdas `x => …`, closures, local `fn`s, `f(a, _)` | — | `ExprKind::Lambda`, `paren_lambda_ahead` | function stack, captures (`Res::Upvalue`), `_` rewriting in `desugar.rs` | `compile_function`, `FuncState::closure`, `GETUPVAL`, `GETSELF` | `CLOSURE` copies captures (`Proto::upvals`) |
-| **M7** | strings `"…{x}…"`, file/stdin I/O, `none`, `Ok/Err`, `?` | string scanner with interpolation | string parts | — | `CONCAT`, `LOADNONE`, `TRY` | `Value::Str`, `Host` gains I/O |
+| ~~M7~~ (done) | strings `"…{x}…"`, file/stdin I/O, `none`, `Ok/Err`, `?` | string scanner with a mode stack | `Str`/`Interp`, `None`, postfix `Try` | pipe + `?` rewriting | `CONCAT`, `LOADNONE`, `TRY` (lenient after top-level lines) | `Value::{Str, None, Ok, Err}`, `Host` gains stdin/files, R0601 with the `Err`'s history |
 | **M8** | lists, indexing, `map/filter/reduce`, comprehensions | — | list literals, `[i]`, comprehensions | comprehension rewriting | `NEWLIST`, `INDEX` | `Value::List`, natives calling back into the VM |
 | **M8b** | tuples, dicts, `.key` | — | dict/tuple literals | — | `NEWTUPLE`, `NEWDICT`, `GETFIELD` | `Value::Dict` |
 | **M9** | diagnostics quality | — | multi-error recovery, did-you-mean | — | — | source snippets in runtime errors |

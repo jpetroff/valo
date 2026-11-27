@@ -283,6 +283,11 @@ a scope's `variablesReference`, answered by the program thread from
 sends `evaluate`, which looks it up the same way (locals, then captures,
 then globals).
 
+Values are shown as they would appear inside other values: strings quoted
+(`"a\tb"`, `Value::repr`), results as `Ok(1)` / `Err("x")`. When a run
+stops at an unhandled `Err` (R0601), the exception text adds the `Err`'s
+context messages and origin.
+
 *Closure* (M6) lists what a lambda or local fn captured: the values in
 `Closure::captures`, named by `Proto::upvals` (the compiler stores each
 captured binding's name next to where `CLOSURE` takes it from). The scope

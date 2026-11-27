@@ -745,7 +745,7 @@
 
     "builtin-functions": {
       "comment": "Prelude natives (no import needed), called or passed as values.",
-      "match": "(?<!\\.)\\b(print|int|float|str|str_len|trim|len|map|filter|reduce|flat_map|range|get|context)\\b",
+      "match": "(?<!\\.)\\b(print|int|float|str|str_len|trim|parse_int|parse_float|read_line|read_file|write_file|is_ok|is_err|unwrap|or_else|len|map|filter|reduce|flat_map|range|get|context)\\b",
       "name": "support.function.builtin.valo"
     },
 

@@ -95,6 +95,7 @@ pub enum ExprKind {
     Pipe { op_span: Span, lhs: Box<Expr>, rhs: Box<Expr> },           // x |> f
     Lambda(Box<Lambda>),                                              // x => e (M6)
     Str(String), Interp(Vec<StrPart>),                                // "text", "a {x}" (M7)
+    None, Try(Box<Expr>),                                             // none, e? (M7)
 }
 pub struct CmpLink { pub op: CmpOp, pub op_span: Span, pub rhs: Expr }
 ```
@@ -225,6 +226,12 @@ with interpolation `ExprKind::Interp(parts)`:
 "a {x + 1} b {f("in {y}")}"   →   (interp "a " (+ x 1) " b " (call f (interp "in " y)))
 ```
 
+**`none` and `?`** (M7). `none` is a literal (`ExprKind::None`). Postfix
+`?` is a row of the Pratt table with the binding power of a call, so
+`1 + f(x)?` is `1 + (f(x)?)`. In a pipe, `x |> f(a)?` parses as
+`x |> (f(a)?)`, but S10 says `?` ends the whole stage; `desugar.rs` moves
+it out: `(? (pcall f x a))`.
+
 **Comparison chains.** When the loop meets a comparison operator it calls
 `compare_chain`, which keeps consuming `op operand` pairs (operands parsed
 with `expr(9)`, so they contain no comparison themselves) for as long as the
@@ -308,7 +315,7 @@ pass overflow the stack.
 ### Constructs of later milestones
 
 The parser recognises tokens that are valid valo but not implemented yet —
-`[`, `.`, `?`, `in`, `match`, `none` — and reports
+`[`, `.`, `in`, `match`, `def`, `import` — and reports
 `E0009 … is not supported yet` instead of a confusing "unexpected token".
 These checks are in `Parser::prefix` (things that start an expression) and in
 the operator table of `Parser::expr` (things that follow one).

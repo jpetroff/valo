@@ -2,9 +2,9 @@
 source: compiler/src/resolve.rs
 expression: "resolve_src(\"fn outer(a: int) -> int:\\n    fn mid(b: int) -> int:\\n        \\\n                 let f = c => a + b + c + mid(0)\\n        f(1)\\n    mid(10)\").unwrap()"
 ---
-natives: global#0..#5 (print int float str str_len trim)
+natives: global#0..#17 (print int float str str_len trim Ok Err context is_ok is_err unwrap or_else parse_int parse_float read_line read_file write_file)
 globals:
-  global#6   outer        1:4     fn
+  global#18  outer        1:4     fn
 locals:
   local#0   a            1:10
   local#1   mid          2:8

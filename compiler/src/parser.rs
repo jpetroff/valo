@@ -38,7 +38,7 @@
 //! | `*` `/` `//` `%`           | 20      | 21       | left          |
 //! | prefix `-`                 | —       | 30       | prefix        |
 //! | `**`                       | 41      | 40       | right         |
-//! | call `f(args)`             | 50      | —        | postfix       |
+//! | call `f(args)`, `e?`       | 50      | —        | postfix       |
 //!
 //! Comparisons *chain* (Python): `a < b <= c` becomes one `Compare` node
 //! with two links, not `(a < b) <= c` (`Parser::compare_chain`).
@@ -70,7 +70,7 @@
 //! | add a prefix form (literals, lambdas)       | `Parser::prefix`                                      |
 //! | change lambda syntax (S3)                   | `paren_lambda_ahead`, `lambda_params`, `lambda_rest`  |
 //! | change `if` syntax                          | `if_expr`, `if_block_rest`, `branch`                  |
-//! | add postfix forms (`.field`, `[i]`, `?`)    | `Parser::expr` loop (calls: `call_args`; the others still report E0009) |
+//! | add postfix forms (`.field`, `[i]`)         | `Parser::expr` loop (calls: `call_args`, `?`: `Infix::Try`; the others still report E0009) |
 //! | change call arguments (keywords, `_`)       | `call_args`                                           |
 //! | change `fn` definitions                     | `fn_def`, `params`                                    |
 //! | add statements (`def`)                      | `Parser::item` (dispatch on the first token; see `let_binding`) |
@@ -125,6 +125,7 @@ enum Infix {
     Compare,
     Pipe,
     Call,
+    Try,
 }
 
 /// The comparison operator a token spells, if any.
@@ -790,12 +791,13 @@ impl Parser<'_> {
                 TokenKind::StarStar => (Infix::Arith(BinOp::Pow), 41, 40),
                 TokenKind::PipeGt => (Infix::Pipe, 1, 2),
                 TokenKind::LParen => (Infix::Call, CALL_BP, 0),
+                // Postfix `?` (S10): as tight as a call, so `f(x)?` and
+                // `x |> f(a)?` (whose `?` the desugaring moves outside the
+                // pipe) apply it to the call.
+                TokenKind::Question => (Infix::Try, CALL_BP, 0),
                 // Known operators of later milestones: say so clearly
                 // instead of a confusing "expected end of line".
-                TokenKind::Kw(Keyword::In)
-                | TokenKind::LBracket
-                | TokenKind::Dot
-                | TokenKind::Question => {
+                TokenKind::Kw(Keyword::In) | TokenKind::LBracket | TokenKind::Dot => {
                     return Err(self.error(
                         Diagnostic::new(
                             "E0009",
@@ -813,6 +815,15 @@ impl Parser<'_> {
             }
             if let Infix::Compare = op {
                 lhs = self.compare_chain(lhs)?;
+                continue;
+            }
+            if let Infix::Try = op {
+                let q = self.bump();
+                lhs = Expr {
+                    id: self.id(),
+                    span: lhs.span.to(q.span),
+                    kind: ExprKind::Try(Box::new(lhs)),
+                };
                 continue;
             }
             if let Infix::Call = op {
@@ -851,7 +862,7 @@ impl Parser<'_> {
                     lhs: lhs_box,
                     rhs: rhs_box,
                 },
-                Infix::Compare | Infix::Call => unreachable!("handled above"),
+                Infix::Compare | Infix::Call | Infix::Try => unreachable!("handled above"),
             };
             lhs = Expr {
                 id: self.id(),
@@ -1343,6 +1354,11 @@ impl Parser<'_> {
             }
             TokenKind::Kw(Keyword::If) => self.if_expr(t),
             TokenKind::StrStart => self.string(t.span),
+            TokenKind::Kw(Keyword::None) => Ok(Expr {
+                id: self.id(),
+                span: t.span,
+                kind: ExprKind::None,
+            }),
             // `assert e` (plan D29): an expression of type `()`.
             TokenKind::Kw(Keyword::Assert) => {
                 let e = self.expr(0)?;
@@ -1408,7 +1424,6 @@ impl Parser<'_> {
             TokenKind::Kw(
                 Keyword::Def
                 | Keyword::Match
-                | Keyword::None
                 | Keyword::Import
                 | Keyword::From
                 | Keyword::Test
@@ -1481,10 +1496,7 @@ mod tests {
     fn errors_recover_per_line() {
         assert_eq!(parse_codes("1 +\n2 2\n3\n(1"), ["E0101", "E0101", "E0103"]);
         assert_eq!(parse_codes("  1"), ["E0101"]);
-        assert_eq!(
-            parse_codes("[1]\nx in y\nx.y\nx?"),
-            ["E0009", "E0009", "E0009", "E0009"]
-        );
+        assert_eq!(parse_codes("[1]\nx in y\nx.y"), ["E0009", "E0009", "E0009"]);
         assert_eq!(
             parse_codes("let = 1\nlet x 1\nlet y: = 2\n1 + let"),
             ["E0101"; 4]
@@ -1572,6 +1584,17 @@ mod tests {
         insta::assert_snapshot!(parse_ok(
             "\"plain\"\n\"\"\n\"{x}\"\n\"a {x + 1} b {f(\"in {y}\")}\"\nr\"{raw}\" + \"s\""
         ));
+    }
+
+    #[test]
+    fn none_and_try() {
+        // `?` is as tight as a call: it applies to `f(x)`, not to `1 + …`;
+        // in a pipe it ends the stage (moved by desugar.rs).
+        assert_eq!(
+            parse_ok("none\n1 + f(x)?\nx |> f(a)?\nf()?(1)?"),
+            "(expr none)\n(expr (+ 1 (? (call f x))))\n(expr (|> x (? (call f a))))\n\
+             (expr (? (call (? (call f)) 1)))\n"
+        );
     }
 
     #[test]

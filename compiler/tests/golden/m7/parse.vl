@@ -1,0 +1,6 @@
+print(parse_int("42"))
+print(parse_int(" -7 "))
+print(parse_int("x"))
+print(parse_float("2.5"))
+print(parse_float("1e3"))
+print(or_else(parse_int("nope"), 0))

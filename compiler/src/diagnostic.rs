@@ -179,6 +179,26 @@ pub fn render_runtime(sm: &SourceMap, err: &RuntimeError) -> String {
         let (l, c) = sm.line_col(span.start);
         let _ = writeln!(out, "  --> {}:{l}:{c}", sm.name);
     }
+    // R0601: where the Err came from and how it got here (D26, Q21).
+    if let Some(trail) = &err.trail {
+        let at = |site: &valo_vm::error::Site| {
+            let (l, c) = sm.line_col(site.span.start);
+            format!("{} at {}:{l}:{c}", site.fn_name, sm.name)
+        };
+        if !trail.context.is_empty() {
+            out.push_str("  context (outermost first):\n");
+            for msg in trail.context.iter().rev() {
+                let _ = writeln!(out, "    {msg}");
+            }
+        }
+        let _ = writeln!(out, "  origin: {}", at(&trail.origin));
+        if !trail.propagated.is_empty() {
+            out.push_str("  propagated by `?` in:\n");
+            for site in &trail.propagated {
+                let _ = writeln!(out, "    {}", at(site));
+            }
+        }
+    }
     for note in &err.notes {
         let _ = writeln!(out, "  {note}");
     }

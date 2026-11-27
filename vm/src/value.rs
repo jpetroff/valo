@@ -53,6 +53,7 @@ use std::rc::Rc;
 
 use crate::builtins::NATIVES;
 use crate::chunk::{NativeId, Proto};
+use crate::error::Site;
 
 /// A runtime value.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +69,13 @@ pub enum Value {
     Float(f64),
     /// Immutable UTF-8 text (M7); shared, never copied by `MOVE` (D11).
     Str(Rc<str>),
+    /// The empty value `none` (S9): an optional `T | none` is a plain `T`
+    /// or `none`, with no wrapper (M7).
+    None,
+    /// A successful result `Ok(v)` (S10, M7).
+    Ok(Rc<Value>),
+    /// A failed result `Err(e)` with its history (S10, D26, M7).
+    Err(Rc<ErrVal>),
     /// A function defined in valo (M4).
     Closure(Rc<Closure>),
     /// A built-in function: index into `builtins::NATIVES` (M4).
@@ -78,6 +86,21 @@ pub enum Value {
     /// it with the default before any other code runs; natives replace it
     /// themselves. It never escapes into user code.
     Missing,
+}
+
+/// The inside of an `Err`: the payload plus where it came from (plan D26,
+/// Q21). `context`, `propagated` grow as the value travels (`context(r,
+/// msg)`, `?`); `Rc::make_mut` copies only if the value is shared.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErrVal {
+    /// The error value (MVP: usually a str message).
+    pub payload: Value,
+    /// `context` messages, innermost (first added) first.
+    pub context: Vec<Rc<str>>,
+    /// Where it was created.
+    pub origin: Site,
+    /// Every `?` that propagated it, innermost first.
+    pub propagated: Vec<Site>,
 }
 
 /// A function value: compiled code plus the values it captured (plan D5).
@@ -111,6 +134,8 @@ impl Value {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
             Value::Str(_) => "str",
+            Value::None => "none",
+            Value::Ok(_) | Value::Err(_) => "result",
             Value::Closure(_) | Value::Native(_) => "function",
             Value::Missing => "<missing>",
         }
@@ -125,6 +150,15 @@ impl Value {
         match self {
             Value::Str(s) => quote(s),
             other => other.to_string(),
+        }
+    }
+
+    /// Type and value for error messages: `int (3)`, `str ("a")`, `none`.
+    pub fn describe(&self) -> String {
+        match self {
+            Value::None => "none".to_string(),
+            Value::Unit => "()".to_string(),
+            other => format!("{} ({})", other.type_name(), other.repr()),
         }
     }
 }
@@ -166,6 +200,9 @@ impl fmt::Display for Value {
             // `print("hi")` prints the text itself; inside other values and in
             // messages strings are quoted (`Value::repr`).
             Value::Str(s) => f.write_str(s),
+            Value::None => f.write_str("none"),
+            Value::Ok(v) => write!(f, "Ok({})", v.repr()),
+            Value::Err(e) => write!(f, "Err({})", e.payload.repr()),
             // `<fn fact/1>`: name and number of parameters.
             Value::Closure(c) => write!(f, "<fn {}/{}>", c.proto.name, c.proto.arity),
             Value::Native(id) => match NATIVES.get(id.0 as usize) {

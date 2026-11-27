@@ -157,6 +157,9 @@ pub fn compile(
                 if opts.echo {
                     fs.emit(Instr::abc(OpCode::ECHO, dst, 0, 0), e.span);
                 }
+                // An `Err` must not be dropped silently at the top level
+                // (Q23): the lenient `TRY` (C=1) passes every other value.
+                fs.emit(Instr::abc(OpCode::TRY, dst, dst, 1), e.span);
                 fs.free_to(dst);
             }
             Item::Let(b) => {
@@ -625,6 +628,12 @@ impl<'r> FuncState<'r> {
             ExprKind::Assert(inner) => self.assert(inner, dst),
             ExprKind::Lambda(l) => self.lambda(e, l, None, dst),
             ExprKind::Str(text) => self.load_str(text, dst, e.span),
+            ExprKind::None => self.emit(Instr::abc(OpCode::LOADNONE, dst, 0, 0), e.span),
+            // `e?` (D26): unwrap an Ok, or return the Err from this function.
+            ExprKind::Try(inner) => {
+                self.expr(inner, dst);
+                self.emit(Instr::abc(OpCode::TRY, dst, dst, 0), e.span);
+            }
             ExprKind::Interp(parts) => self.interp(parts, dst, e.span),
         }
     }

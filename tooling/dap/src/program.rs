@@ -329,6 +329,17 @@ impl DapHook<'_> {
                 }
             }
         }
+        // R0601 (M7): the Err's context chain and where it came from.
+        if let Some(trail) = &err.trail {
+            for msg in trail.context.iter().rev() {
+                description.push_str(&format!("\ncontext: {msg}"));
+            }
+            let (l, c) = self.sm.line_col(trail.origin.span.start);
+            description.push_str(&format!(
+                "\norigin: {} at line {l}:{c}",
+                trail.origin.fn_name
+            ));
+        }
         for note in &err.notes {
             description.push('\n');
             description.push_str(note);

@@ -265,6 +265,10 @@ Global style: Python-like, indentation blocks (INDENT/DEDENT/NEWLINE), no `;`, s
 - Escapes: `\n \t \r \0 \" \\ \{ \} \u{…}` (1–6 hex digits); any other `\x` is an error. A lone `}` in string text is a literal `}` (only `{` must be escaped).
 - Raw strings `r"…"` have no escapes at all, so they cannot contain `"`.
 - `print(x, end="\n")`: keyword `end` (Python); strings print without quotes, but show quoted inside other values and in error messages (`left: "a"`).
+- `?` binds like a call (`1 + f(x)?` = `1 + (f(x)?)`); after a pipe stage it applies to the whole stage (S10).
+- A top-level line whose value is an `Err` stops the program (unhandled Err), as if it ended with `?`; other values of top-level lines are discarded.
+- `or_else(x, default)`: `default` when `x` is `none` or an `Err`, the inner value of an `Ok`, else `x`. `unwrap(x)`: inner value of `Ok`, error for `Err`/`none`, else `x`.
+- `parse_int(s)` / `parse_float(s)` ignore surrounding whitespace and return `none` when `s` is not a number. `read_file`/`write_file` errors are `Err("cannot read \"path\": file not found")`-style messages (str payload until the `error` record exists).
 
 ## Composite example (rounds 1–6; builtin names provisional)
 

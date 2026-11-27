@@ -193,7 +193,7 @@ Every milestone checks this table.
 | Milestone | Debugger work |
 |-----------|---------------|
 | ~~M6~~ lambdas, closures, `f(a, _)` | **done**: a **Closure** scope listing captured values (`VmView::captures`, names from `Proto::upvals`; only for frames that captured something; hover finds them too); frames are named `<lambda@l:c>` / `<partial f@l:c>`; stepping into a partial enters the partial's frame, then the callee |
-| M7 strings, `none`, `Ok/Err`, `?`, I/O | quoted strings in Variables (Debug-repr); stdin → D6 `runInTerminal`; logpoint text `"x = {x}"` reuses interpolation; `?` early return shows as a step out |
+| ~~M7~~ strings, `none`, `Ok/Err`, `?`, I/O | **done**: quoted strings in Variables and hover (`Value::repr`); R0601 exception text lists the `Err`'s context and origin; `DapHost` reads/writes files, `read_line` returns `none` (no stdin yet). Still open: stdin → D6 `runInTerminal`; logpoint text `"x = {x}"` reuses interpolation (D5); `?` early return shows as a step out (works through the ordinary depth rule, untested) |
 | M8 lists, `map/filter/reduce`, comprehensions | expandable lists (`indexedVariables`, paged); `<native map>` frames between callbacks; stepping into a lambda passed to `map`; evaluate can call functions (re-entry) |
 | M8b tuples, dicts | `namedVariables` for dict keys / `.field` |
 | M9 diagnostics quality | source snippets in `exceptionInfo.details` |

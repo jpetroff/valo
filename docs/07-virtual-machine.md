@@ -52,6 +52,13 @@ code point), and `CONCAT A B C` builds an interpolated string from
 `R[B..B+C]` in one allocation, each part in its `Display` form. `print`
 shows a string as its text; inside other values and in messages
 (`left: "a"`, the debugger) `Value::repr` quotes and escapes it.
+`None` is the empty value (an optional is a plain value or `none`, no
+wrapper, S9); `Ok(Rc<Value>)` and `Err(Rc<ErrVal>)` are results (S10).
+`ErrVal` holds the payload plus its history — context messages, the
+origin `Site` (function + span) and one `Site` per `?` that passed it on —
+which only grows by `Rc::make_mut`, so passing an unshared `Err` up the
+stack never copies it. Any value may be compared with `none` (`x == none`
+is how an optional is tested); results compare by content.
 Functions are values: `Closure` (compiled code plus captured values,
 M6) and `Native` (a built-in), both of type
 `function`, printed `<fn fact/1>` / `<native print/1>`. Later variants:
@@ -274,6 +281,16 @@ locals can be assigned after a closure captured them. No `Rc` cycle can
 form either: a closure never captures itself (`GETSELF` instead), and a
 lambda that captures its enclosing local fn (`Current`) points *to* it,
 never back.
+
+**`TRY A B C`** (postfix `?`, M7): for `Ok(v)` in `R[B]`, `R[A] = v`.
+For an `Err` it appends the current position to the `Err`'s `propagated`
+list and returns the `Err` from the running frame (the same `do_return`
+as `RETURN`); in `<main>` there is nowhere to return to, so it is R0601
+with the `Err`'s history in `RuntimeError::trail`. Any other value is
+R0208, unless `C = 1` (the lenient form after a top-level line), which
+lets it through. The `Err` built-in takes its origin from
+`Vm::current_site` — natives have no frame, so the innermost frame is the
+one that called `Err(…)`.
 
 Globals start empty except the built-in slots: `run` fills them with
 `Value::Native(id)` from `GlobalDesc::kind` before `<main>` starts.

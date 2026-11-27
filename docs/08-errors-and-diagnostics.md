@@ -28,8 +28,10 @@ it. Codes never change once a golden test uses them.
 | E04xx | types | E0402 unknown type name · E0403 wrong number of type arguments · E0410 missing parameter or return annotation |
 | E042x | arguments | E0421 defaulted parameter passed by position · E0422 keyword arguments to a callee unknown at compile time · E0423 required parameter after a defaulted one · E0424 unknown keyword (+ did-you-mean), or a required parameter passed by name · E0425 keyword given twice |
 | R01xx | arithmetic | R0101 integer overflow · R0102 division/modulo by zero · R0103 float → int out of range · R0104 negative exponent |
-| R02xx | types | R0201 operand type mismatch (incl. int/float mixing) · R0202 not callable · R0203 condition not a bool · R0205 values cannot be ordered / functions compared · R0206 wrong argument type to a built-in · R0207 wrong number of arguments (callee unknown at compile time) |
+| R02xx | types | R0201 operand type mismatch (incl. int/float mixing, str + int) · R0202 not callable · R0203 condition not a bool · R0205 values cannot be ordered / functions compared · R0206 wrong argument type to a built-in · R0207 wrong number of arguments (callee unknown at compile time) · R0208 `?` on a value that is not a result (incl. `none`) |
 | R03xx | resources | R0301 stack overflow (more than 200 000 nested calls) · R0302 global read before it was set (a fn body may refer to a later top-level `let`) |
+| R04xx | data | R0402 `unwrap` of `none` · R0403 `unwrap` of an `Err` |
+| R06xx | results | R0601 unhandled `Err` at the top level (context chain, origin, `?` sites) |
 | R07xx | assertions | R0701 assertion failed |
 | R08xx | interruption | R0801 run stopped from outside (the debugger's Stop; see chapter 13) |
 | R05xx | host | R0501 output write failed |
@@ -103,14 +105,16 @@ File: [`vm/src/error.rs`](../vm/src/error.rs)
 ```rust
 pub enum ErrorKind { IntOverflow, DivisionByZero, FloatToInt, NegativeExponent,
                      TypeMismatch, NotCallable, ConditionNotBool, NotComparable,
-                     NativeArgType, WrongArgCount, StackOverflow, GlobalUninit,
-                     AssertionFailed, HostIo, Internal } // .code() → "R0101", ...
+                     NativeArgType, WrongArgCount, NotResult, UnwrapNone, UnwrapErr,
+                     StackOverflow, GlobalUninit, UnhandledErr, AssertionFailed,
+                     Interrupted, HostIo, Internal } // .code() → "R0101", ...
 
 pub struct RuntimeError {
     pub kind: ErrorKind,
     pub message: String,              // "division by zero: 7 // 0"
     pub notes: Vec<String>,           // extra lines: "left: 4", "help: …"
     pub trace: Vec<TraceEntry>,       // innermost frame first
+    pub trail: Option<Box<ErrTrail>>, // R0601: context chain, origin, `?` sites
 }
 pub struct TraceEntry { pub fn_name: Rc<str>, pub span: SrcSpan, pub tail_calls: u32 }
 ```
@@ -171,6 +175,35 @@ error[R0701]: assertion failed: a + a == 5
 stack trace (most recent call first):
   0: <main> at assert_cmp_fail.vl:2:8
 ```
+
+**Errors as values** (M7). Most failures in valo are not runtime errors at
+all: `read_file` returns `Err("cannot read …")`, and `?` passes it to the
+caller. Each `Err` value remembers where it was made (`Err(…)` or the
+failing built-in) and every `?` that passed it on; `context(r, msg)` adds
+a message to its chain. Only an `Err` that reaches the top level — through
+`?` in `<main>`, or as the value of a top-level line (Q23) — stops the
+program, with R0601 and that history:
+
+```text
+error[R0601]: unhandled Err: "bad port"
+  --> context_chain.vl:9:1
+  context (outermost first):
+    loading config
+    parsing port
+  origin: inner at context_chain.vl:1:29
+  propagated by `?` in:
+    middle at context_chain.vl:3:13
+    outer at context_chain.vl:6:13
+    <main> at context_chain.vl:9:1
+stack trace (most recent call first):
+  0: <main> at context_chain.vl:9:1
+```
+
+This is Zig's *error return trace* idea (plan Q21): the stack trace shows
+only `<main>`, because the frames that produced the error have returned,
+but the `Err` carries its own path. `?` on something that is not a result
+(including `none`) is R0208; `unwrap` of `none` / of an `Err` is R0402 /
+R0403.
 
 M9 adds the source snippet (like compile errors) and unifies both header
 styles: compile errors currently use ariadne's `[E0101] Error:` header,

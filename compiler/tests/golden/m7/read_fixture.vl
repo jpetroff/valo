@@ -1,0 +1,5 @@
+fn main() -> () ! error:
+    let text = read_file("input.txt")?
+    print(trim(text))
+    Ok(())
+main()

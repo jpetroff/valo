@@ -1,0 +1,5 @@
+fn check(n: int) -> () ! error = if n > 0 then Ok(()) else Err("not positive: {n}")
+check(1)
+print("checked 1")
+check(-1)
+print("never")
