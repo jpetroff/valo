@@ -1,0 +1,5 @@
+# List literals: empty, nested, strings shown quoted inside a list.
+print([1, 2, 3])
+print([])
+print([[1], [2, 3]])
+print(["a", "b"])

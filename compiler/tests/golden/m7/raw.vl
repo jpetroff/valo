@@ -1,0 +1,2 @@
+print(r"C:\new\{x}")
+print(r"" == "")

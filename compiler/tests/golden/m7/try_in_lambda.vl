@@ -1,0 +1,10 @@
+# `?` inside a lambda returns from the lambda, not from the enclosing fn.
+fn run() -> str:
+    let double = (s: str) => Ok(unwrap(parse_int(s)) * 2)
+    let attempt = (s: str) =>
+        let n = parse_int(s)
+        let r = if n == none then Err("bad: {s}") else double(s)
+        let v = r?
+        Ok(v + 1)
+    "{attempt("4")} {attempt("x")}"
+print(run())

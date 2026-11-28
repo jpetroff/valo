@@ -1,0 +1,8 @@
+# Number the lines of standard input until read_line() returns none.
+fn loop(n: int) -> ():
+    let line = read_line()
+    if line == none: ()
+    else:
+        print("{n}: {line}")
+        loop(n + 1)
+loop(1)

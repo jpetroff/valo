@@ -280,7 +280,7 @@ constants: (none)
 |---|---|---|
 | E00xx | lexer | E0001 unexpected character, E0002 Int literal out of range, E0003 inconsistent dedent, E0004 unterminated string, E0005 invalid escape, E0006 tab/space mix (per syntax.md), E0007 unterminated interpolation (missing `}`), E0008 empty interpolation `{}`, E0009 reserved syntax not supported yet (backtick cmd, `re"…"`, `=~`; also used by parser/codegen for constructs of later milestones), E0010 malformed number literal (leading zeros, bad `_`, bad suffix) |
 | E01xx | parser | E0101 unexpected token / expected X, E0102 `if` without `else`, E0103 unclosed delimiter, E0104 block ends with a `let` binding (or `fn` definition), E0105 expression nested too deeply |
-| E02xx | resolve | E0201 undefined name (+did-you-mean), E0202 (retired: same-scope rebinding is allowed per Q7=b; keep code unused), E0203 top-level use before definition, E0204 local mutual recursion unsupported (Q16), E0205 wrong number of arguments to known fn (+hint `f(a, _)` partial), E0206 `_` placeholder outside a direct call argument (M2–M4: `_` read as a value), E0207 defined twice (top-level fn, parameter, type variable; M4) |
+| E02xx | resolve | E0201 undefined name (+did-you-mean), E0202 (retired: same-scope rebinding is allowed per Q7=b; keep code unused), E0203 top-level use before definition, E0204 local mutual recursion unsupported (Q16), E0205 wrong number of arguments to known fn (+hint `f(a, _)` partial), E0206 `_` placeholder outside a direct call argument (M2–M4: `_` read as a value), E0207 defined twice (top-level fn, parameter, type variable; M4), E0208 `?` directly inside a comprehension (M8) |
 | E03xx | codegen | E0301 limit exceeded (registers/consts/jump/list literal >255 elems) |
 | E04xx | types | E0401 literal does not match annotation, E0402 unknown type name, E0403 malformed type, E0410 missing fn param/return annotation (`parameter p of fn grade needs a type annotation, e.g. p: int`) |
 | E042x | arguments | E0421 defaulted param passed positionally (`timeout has a default and must be passed by name: timeout=5`), E0422 keyword args to a non-static callee, E0423 required param after defaulted param, E0424 unknown keyword (+did-you-mean), E0425 duplicate keyword; post-MVP: E0420 positional record construction |
@@ -290,6 +290,7 @@ constants: (none)
 | R04xx | data | R0401 index out of range / missing dict key (message: access path + index/key + len), R0402 unwrap on `none`, R0403 unwrap on Err |
 | R06xx | results | R0601 unhandled Err at top level (payload + context chain + origin/propagation sites) |
 | R07xx | assertions | R0701 assertion failed (expr source text, left/right values for a top-level comparison) |
+| R08xx | interruption | R0801 run stopped from outside (debugger Stop/terminate; later Ctrl+C) — never printed by valo-dap |
 | R05xx | host | R0501 stdout/stderr write failure (file errors are `Err` values, not faults) |
 
 Runtime error output (stderr), exact shape from M4, polished in M9:
@@ -482,7 +483,16 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 - Exit: goldens pass; memory stays flat (`/usr/bin/time` max RSS for countdown 10^7 within 2× of 10^3; manual check, note in PR).
 - Out of scope: tail calls across native boundaries.
 
-### M6 — Closures, lambdas, partial application
+### M6 — Closures, lambdas, partial application — DONE 2026-11-27
+
+- Implementation notes (branch `m6-m7`):
+  - Parser: `ExprKind::Lambda(Lambda { params, body, partial_of })`; `IDENT =>` or `( … ) =>` (`paren_lambda_ahead` token scan); body = `branch()` (inline `expr(0)`, or `=>` NEWLINE INDENT block). Lambda params: optional annotations, `=` default → E0101. A block-bodied lambda cannot sit inside brackets (the lexer drops line breaks there): bind it with `let`. `ast::Program.next_id` lets desugar mint ids; `Call.piped` is now `Option<usize>` (index of the piped argument, evaluated first).
+  - Desugar (`Desugar` struct): `_` partial → `Block[let $c = callee (non-name callee only); let $aN = fixed args incl. keyword values (piped one first, then callee, then source order); Lambda($p0.. => call)]` (no block when nothing is fixed). Pipe RHS call with `_` → the FIRST `_` gets the value, more `_` → partial with the piped value fixed (`x |> f(_, _)` ≡ `f(x, _)`).
+  - Resolver: `funcs: Vec<FnScope { scopes: Vec<Scope { names, later_fns }>, captures, self_name }>` replaces the `mem::take` save/restore; `Res::{Upvalue { binding, index }, SelfRef(binding)}`; `lookup_in` recursion = Lua `singlevar`; `Resolved::captures: NodeId → FnCaptures { name, span, list: Vec<Capture { binding, from: CaptureFrom::{Local, Upvalue, SelfFn} }> }` (lambda keyed by its Expr id, local fn by its FnDef id). Local fns are bound before their body (self → `SelfRef`, GETSELF). Lambdas and nested fns get a `FnCtx` too (forward refs to later top-level lets allowed, like fn bodies; nested fns inherit type vars). E0204 = a later sibling local fn used from inside another function (else E0201 + "defined later in this block"). Signatures keyed by `SigKey::{Global, Binding}`; `let g = <lambda | partial block>` gets the lambda's signature (named after `g`), so `inc(1, 2)` is E0205. Lambda param `_` binds nothing. `$` names are kept out of `uses` and did-you-mean. >255 captures → E0301.
+  - Codegen: `compile_function` shared by top-level fns, local fns, lambdas; the parent fills `Proto::upvals` (`FuncState::closure`). D5 deviation: `UpvalDesc { src: UpvalSrc::{Reg, Upval, Current}, name }` — `Current` lets a lambda inside a local fn capture that fn (no cycle: it points to the fn, never back). Upvalue names are debug info (disasm, DAP Closure scope). `$` temporaries get no `LocalInfo`. Disasm: `upvals=N` in the header only when non-zero, `upvals:` table, GETUPVAL/GETSELF comments.
+  - Tooling: DAP Closure scope (`VmView::captures`, `captures_ref(frame) = 3 + 2*frame`, `locals_ref = 2 + 2*frame`; offered only when non-empty; hover searches captures); fixed a race in the `stop_on_entry_then_pause` smoke test. LSP: nothing to wire until L2.
+  - Error test note: R0207 for a partial called with the wrong count is raised at the *caller* (the CALL), so the trace's innermost frame is the caller; the message names `<partial f@l:c>`. E0206 help now also mentions call placeholders (`m2/discard_name` re-blessed).
+  - Extra goldens: `lambda_block`, `local_fn_defaults`, `self_capture`. Memory (release, max RSS): `partial_loop` 10^3 → 10.2 MB, 10^7 → 10.0 MB (0.78 s).
 
 - Goal: first-class functions: nested named fns, lambdas, captures, explicit `_` partials, pipe into placeholder slot.
 - Blocks: lambda (one-line and block body, per syntax.md S3; no defaults), nested `fn` inside `fn` bodies (S21; annotations required like any `fn`; self-recursive via GETSELF), placeholder partial application, pipe into placeholder slot.
@@ -512,7 +522,24 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q4: closure capture — (a) by value at creation, no open upvalues (b) Lua open/closed upvalues. Default (a).
 > Q16: local mutual recursion — (a) unsupported, E0204 (b) letrec groups via shared env record. Default (a).
 
-### M7 — Str, interpolation, text I/O host functions, optional (`none`) and Result with `?`
+### M7 — Str, interpolation, text I/O host functions, optional (`none`) and Result with `?` — DONE 2026-11-27
+
+- Implementation notes, M7a (strings; branch `m6-m7`, committed separately from M7b):
+  - Lexer tokens `StrStart StrText(decoded) InterpStart … InterpEnd StrEnd`; mode stack `Lexer::interps: Vec<Interp { depth, string_start, brace }>` — the `}` whose bracket depth matches the top entry ends the interpolation; `depth` is +1 while one is open. Escapes `\n \t \r \0 \" \\ \{ \} \u{1-6 hex}`, else E0005. A string reaching end of line/file = E0004, but only E0007 when that string sits inside an unclosed `{…}` (`"a {x"`); a line break inside `{…}` = E0007; `{}` / `{ }` = E0008. A lone `}` in text is literal. Raw `r"…"`: no escapes/interpolation, ends at the first `"`. Backtick, `re"`, `=~`, `!~` stay E0009.
+  - AST `ExprKind::Str(String)` (no interpolation) / `ExprKind::Interp(Vec<StrPart::{Text, Expr}>)`; codegen `Const::Str` (deduplicated, `ConstKey::Str(Rc<str>)`), `CONCAT dst base n` over consecutive registers (> 255 parts → E0301).
+  - VM `Value::Str(Rc<str>)` (`type_name` "str"); `Value::repr()` / `value::quote` quote+escape strings for messages, assert `left:`/`right:`, R0206 messages and the debugger; Display is the plain text. `+` on str×str; str + other → R0201 with an interpolation hint; `==`, `<` by code point.
+  - Host: `read_line` (flushes stdout; strips `\n`/`\r\n`), `read_file`, `write_file` on `StdHost`, `TestHost` (scripted `stdin: VecDeque`, in-memory `files`), `DapHost` (files via std::fs, stdin = end of input until D6). The natives that use them land in M7b with `none`/Result.
+  - Natives appended: `str`, `str_len`, `trim`; `print` gained `end` (keyword, default `"\n"`, deferred from M4b) — so `print` displays as `<native print/2>` and a dynamic 2-argument call passes `end` positionally (Q27). Every global index shifted by 3 (snapshots re-accepted, only numbering changed).
+  - Golden runner: `<name>.files/` fixtures copied next to the program (and skipped when collecting tests). DAP Variables/hover show strings quoted. Grammar: `str_len`, `trim` added to the built-in list.
+  - Extra goldens: `print_end`, `str_ops`, `assert_str`.
+- Implementation notes, M7b (`none`, results, `?`):
+  - Parser: `none` → `ExprKind::None`; postfix `?` = Pratt row `Infix::Try` at `CALL_BP` → `ExprKind::Try`. Desugar: `Pipe(x, Try(rhs))` → `Try(pipe(x, rhs))` recursively (`x |> f? |> g(1)??` works). The compile-time error for a literal `none?` (Q19) was skipped: it is R0208 at runtime like any non-result.
+  - Codegen: `LOADNONE`; `e?` → `TRY dst dst 0`; EVERY top-level expression line ends with lenient `TRY dst dst 1` (Q23: static types would be needed to emit it only for results). All `<main>` disassembly snapshots changed by that.
+  - VM: `Value::{None, Ok(Rc<Value>), Err(Rc<ErrVal { payload, context, origin: Site, propagated: Vec<Site> }>)}`; `Site { fn_name, span }` lives in `error.rs`; `type_name` of Ok/Err = "result"; Display `none`, `Ok(1)`, `Err("x")` (payload via repr); `Value::describe()` for messages (`int (3)`, `none`). `none == x` allowed for any x; Ok/Err compare by content. TRY: Err → push the `?` site, `do_return` it; in `<main>` (frames.len() == 1) → R0601 with `RuntimeError::trail: Option<Box<ErrTrail>>` (boxed: clippy large_err). `Vm::current_site()` = innermost frame + span of its current instruction (the `Err` built-in's origin); `Vm::host()` gives natives the host.
+  - Natives appended (12): `Ok Err context is_ok is_err unwrap or_else parse_int parse_float read_line read_file write_file` — global indices shifted again (+12; snapshots: numbering only). `or_else(x, d)`: `none`/`Err` → d, `Ok(v)` → v, else x. `parse_int`/`parse_float` trim whitespace, accept a sign. File errors are values: `Err("cannot read \"p\": file not found")` (platform-neutral reasons via `io_message`); a failing stdin read is R0501.
+  - R0601 rendering (`diagnostic.rs`): `context (outermost first):`, `origin: f at file:l:c`, `propagated by \`?\` in:` list, then the stack trace. DAP exception text adds context + origin; DAP `read_line` returns `none`.
+  - New codes: R0208, R0402, R0403, R0601 (catalogue §5 unchanged; chapter 8 table updated).
+  - Extra goldens: `toplevel_err_discarded`, `try_in_lambda`.
 
 - Goal: text programs: hello world, interpolated output, stdin line processing, file read/write with `?` propagation and context chains.
 - Blocks: string literal (escapes, interpolation `{expr}`, raw strings), string concatenation via `+`, string comparison; `none` literal; Result constructors `Ok`/`Err` (builtins), postfix `?`.
@@ -537,7 +564,19 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q29: auto-wrap of a `T ! error` fn body's final value in `Ok` (syntax Q-S26) — (a) no, explicit `Ok(...)`; R0204 + hint in M10 (b) auto-wrap. Default (a).
 > Q23: top-level expression statement whose value is an Err (discarded) — (a) treat as unhandled → R0601 exit 1 (codegen emits TRY on top-level expression results only when Result, via a lenient TRY flag) (b) silently discarded (Q6). Default (a).
 
-### M8 — Lists and higher-order functions
+### M8 — Lists and higher-order functions — DONE 2026-11-27
+
+- Implementation notes (branch `m6-m7`, two commits: "M8 part 1/2" VM + built-ins, "M8 part 2/2" front end):
+  - VM: `Value::List(Rc<Vec<Value>>)`; NEWLIST moves its element registers; INDEX = List × Int in `0..len`, else R0401 (`RuntimeError::access: Option<Box<Access { index, len }>>`) / R0201 (non-int index, non-list). ADD List×List always builds a new list (operands are borrowed registers; no in-place reuse — deviation from "make_mut when left unique"). `values_equal` recurses into lists; lists have no order (R0205).
+  - Re-entry (D7): `Frame::reentry`; `Vm::call_value` pushes callee+args at stack top, runs a nested `execute`; `do_return` of a re-entry frame truncates to its slot and returns. `native_marks: Vec<(NativeId, frames.len())>` pushed/popped around every native call (left on error); `unwind` emits `<native map>` (`TraceEntry::native`, no span) only for marks that have frames above them — a built-in that fails itself is not listed (its caller's CALL stays the location, existing goldens unchanged). `MAX_REENTRY = 200` → R0301 "more than 200 nested calls through built-ins". Debug builds need > 2 MiB Rust stack for 200 levels, so the CLI (`main.rs`: whole command on a thread) and valo-dap run the VM on a `VM_STACK_BYTES` = 64 MiB thread.
+  - Built-ins appended (14): `len` (list, str scalars), `get` (`none` out of range/negative), `range(a, b?)`, `map`, `filter` (predicate must return bool → R0206), `reduce`, `flat_map` (callback must return a list → R0206), `each`, `contains` (list via `==` rules, or str substring), `append` (`Rc::make_mut`), `reverse`, `lines`, `split` (empty sep → R0206), `join` (str elements only, R0206 names the element). Callbacks iterate shared lists lazily (`for_each_item`, no up-front copy). `big` golden: 0.13 s, 47 MB RSS (release). `builtins::native_id(name)`.
+  - Q26 = (a): `ParamSpec::positional` marks an omittable positional param (`range`'s `b`); resolver `Sig::positional` = params passable by position (no E0421 for them); E0205 says "takes 1 to 2 arguments".
+  - Parser: `[` prefix → `Parser::list` (literal or comprehension, decided by `for` after the first element); postfix `[` at `CALL_BP`; `in` / `not in` rows at `CMP_BP` that do not chain (E0101 "add parentheses"; also after a comparison chain). Comprehension target = NAME only (`(`→ E0009 destructuring). AST: `List`, `Index`, `In`, `Comprehension { elem, clauses: Vec<Clause::{For, If}> }`, `Builtin(u16)`; `Lambda.partial_of` → `origin: LambdaOrigin::{Source, Partial(f), Comprehension}`.
+  - Desugar: `x in xs` → `Call(Builtin(contains), [xs, x], piped: Some(1))` (x first); `not in` → `Not(…)`; comprehension built innermost-out (`map` for the last `for`, `flat_map` around earlier ones, `filter` per `if`); lambdas `<comprehension@l:c>` (all at the `[`). Codegen `Builtin(id)` = `GETGLOBAL id` (native slots never written).
+  - E0208 (resolver, `FnScope::comprehension`): `?` directly inside a comprehension lambda (element, `if`, or a later `for`'s list); the first list and user lambdas inside are fine.
+  - CLI: R0401 header `<base source>[<index>]: index out of range (len N)` (base = INDEX span text minus its last balanced `[…]`; multi-line base joined by spaces); native trace lines print without location.
+  - DAP: `<native map>` label frames (ids from `NATIVE_FRAME_ID_BASE`, odd → no scopes); non-empty lists expand (`LIST_REF_BASE + k`, children `[i]`, registry cleared on resume); `evaluate` returns the reference too.
+  - Extras (user-approved): `not in`, `in` on str, `len` on str. Extra goldens: `not_in`, `str_in_len`, `comp_try`, `list_add_eq`, `join_split_lines`, `join_bad`.
 
 - Goal: list literals, indexing, ranges, comprehensions, map/filter/reduce/flat_map with closures and partials.
 - Blocks: list literal (empty and non-empty), list concatenation, index expression, list comprehension (one or more `for` clauses, optional `if` filters), membership `x in xs` (provisional; desugar to native `contains(xs, x)`).
@@ -678,7 +717,7 @@ syntax.md S1–S4 (round 1) settle no existing Q directly; they removed auto-cur
 | Q23 | discarded top-level Err value | (a) unhandled → R0601 exit 1 / (b) silently discarded | (a) | M7 |
 | Q24 | dict ordering & key types | (a) insertion order (`indexmap`), keys Str/Int/Bool/Tuple / (b) `BTreeMap` sorted, no dep | (a) | M8b |
 | Q25 | non-prelude builtins in MVP (`read_file`, `write_file`, `read_line`, `trim`, `split`, `lines`, `join`, `str_len`…) without imports | (a) flat globals in MVP, moved into modules when imports land (goldens updated then) / (b) builtin module records (`io`, `text`) reachable without import via GETFIELD (needs M8b) / (c) minimal `import` of builtin modules inside MVP | (a) | M7, M8 |
-| Q26 | positional overloads on natives (`range`) | (a) native-only arity range / (b) keyword default / (c) two natives | (a) | M4b, M8 |
+| Q26 | positional overloads on natives (`range`) | RESOLVED (a): native-only arity range (`ParamSpec::positional`, M8) | (a) | M4b, M8 |
 | Q27 | dynamic calls omitting defaulted params | (a) allowed, Missing padding / (b) must pass all positionally | (a) | M4b |
 | Q28 | `validate` nested coercion | (a) dict → nested record per field type (Pydantic) / (b) nested values must already be records | (a) | M13 |
 | Q29 | `T ! error` fn body auto-wraps final value in `Ok` (syntax Q-S26) | (a) no: explicit `Ok(...)` required, R0204 + hint / (b) auto-wrap non-Result values | (a) | M7, M10 |

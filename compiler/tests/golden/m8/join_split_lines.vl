@@ -1,0 +1,9 @@
+let csv = "a,b,,c"
+print(split(csv, ","))
+print(join(split(csv, ","), "|"))
+print(lines("one\r\ntwo\nthree\n"))
+print(join(map([1, 2, 3], str), ", "))
+print(reverse(append([1, 2], 3)))
+print(get([1, 2], 1))
+print(get([1, 2], 5))
+print(get([1, 2], -1))

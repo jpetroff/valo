@@ -1,0 +1,3 @@
+print(str_len("héllo"))
+print(str_len(""))
+print(str_len("😀"))

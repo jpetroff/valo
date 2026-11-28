@@ -191,6 +191,17 @@ pub enum TokenKind {
     Bang,
     /// `?` (error propagation)
     Question,
+    /// Opening `"` (or `r"`) of a string literal (M7). A string is
+    /// `StrStart (StrText | InterpStart <tokens> InterpEnd)* StrEnd`.
+    StrStart,
+    /// Literal text inside a string, escapes already decoded.
+    StrText(String),
+    /// `{` opening an interpolated expression inside a string.
+    InterpStart,
+    /// `}` closing an interpolated expression.
+    InterpEnd,
+    /// Closing `"` of a string literal.
+    StrEnd,
     /// End of a logical line.
     Newline,
     /// Indentation increased.
@@ -209,6 +220,11 @@ impl TokenKind {
             TokenKind::Float(x) => format!("float `{x:?}`"),
             TokenKind::Ident(s) => format!("name `{s}`"),
             TokenKind::Kw(k) => format!("keyword `{}`", k.as_str()),
+            TokenKind::StrStart => "a string".into(),
+            TokenKind::StrText(_) => "string text".into(),
+            TokenKind::InterpStart => "`{` in a string".into(),
+            TokenKind::InterpEnd => "`}` in a string".into(),
+            TokenKind::StrEnd => "end of string".into(),
             TokenKind::Newline => "end of line".into(),
             TokenKind::Indent => "indentation".into(),
             TokenKind::Dedent => "end of indented block".into(),
@@ -224,6 +240,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Int(n) => return write!(f, "{n}"),
             TokenKind::Float(x) => return write!(f, "{x:?}"),
             TokenKind::Ident(s) => return f.write_str(s),
+            TokenKind::StrText(s) => return write!(f, "STR_TEXT({s:?})"),
             TokenKind::Kw(k) => k.as_str(),
             TokenKind::Plus => "+",
             TokenKind::Minus => "-",
@@ -255,6 +272,10 @@ impl fmt::Display for TokenKind {
             TokenKind::Bar => "|",
             TokenKind::Bang => "!",
             TokenKind::Question => "?",
+            TokenKind::StrStart => "STR_START",
+            TokenKind::InterpStart => "INTERP_START",
+            TokenKind::InterpEnd => "INTERP_END",
+            TokenKind::StrEnd => "STR_END",
             TokenKind::Newline => "NEWLINE",
             TokenKind::Indent => "INDENT",
             TokenKind::Dedent => "DEDENT",

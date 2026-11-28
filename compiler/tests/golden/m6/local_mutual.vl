@@ -1,0 +1,5 @@
+fn parity(n: int) -> bool:
+    fn is_even(k: int) -> bool = if k == 0 then true else is_odd(k - 1)
+    fn is_odd(k: int) -> bool = if k == 0 then false else is_even(k - 1)
+    is_even(n)
+print(parity(4))

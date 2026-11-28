@@ -38,10 +38,17 @@
 //! | `*` `/` `//` `%`           | 20      | 21       | left          |
 //! | prefix `-`                 | —       | 30       | prefix        |
 //! | `**`                       | 41      | 40       | right         |
-//! | call `f(args)`             | 50      | —        | postfix       |
+//! | call `f(args)`, `e?`       | 50      | —        | postfix       |
 //!
 //! Comparisons *chain* (Python): `a < b <= c` becomes one `Compare` node
 //! with two links, not `(a < b) <= c` (`Parser::compare_chain`).
+//!
+//! Lambdas (S3, M6) are a prefix form: `x =>` (an identifier followed by
+//! `=>`) or `( … ) =>` (found by scanning to the matching `)`). The body
+//! after `=>` is parsed at the lowest binding power, so it extends as far
+//! as possible; `=>` at the end of a line opens an indented block. Inside
+//! brackets the lexer suppresses line breaks, so a block-bodied lambda
+//! cannot be written directly as a call argument (bind it with `let`).
 //!
 //! ## Layout: lines, blocks and `if` (syntax.md S6)
 //!
@@ -61,8 +68,9 @@
 //! |---------------------------------------------|-------------------------------------------------------|
 //! | add a binary operator / change precedence   | `Parser::expr`, the `match t.kind` table (`Infix`, `l_bp`, `r_bp`) |
 //! | add a prefix form (literals, lambdas)       | `Parser::prefix`                                      |
+//! | change lambda syntax (S3)                   | `paren_lambda_ahead`, `lambda_params`, `lambda_rest`  |
 //! | change `if` syntax                          | `if_expr`, `if_block_rest`, `branch`                  |
-//! | add postfix forms (`.field`, `[i]`, `?`)    | `Parser::expr` loop (calls: `call_args`; the others still report E0009) |
+//! | add postfix forms (`.field`, `[i]`)         | `Parser::expr` loop (calls: `call_args`, `?`: `Infix::Try`; the others still report E0009) |
 //! | change call arguments (keywords, `_`)       | `call_args`                                           |
 //! | change `fn` definitions                     | `fn_def`, `params`                                    |
 //! | add statements (`def`)                      | `Parser::item` (dispatch on the first token; see `let_binding`) |
@@ -85,8 +93,8 @@
 //! - `.clone()` of a token to keep it while advancing (*Ownership and borrowing*).
 
 use crate::ast::{
-    Arg, BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, FnDef, Item, LogicOp, NodeId, Param,
-    Program, TypeExpr, TypeKind, UnaryOp,
+    Arg, BinOp, Binding, Clause, CmpLink, CmpOp, Expr, ExprKind, FnDef, Item, Lambda, LambdaOrigin,
+    LogicOp, NodeId, Param, Program, StrPart, TypeExpr, TypeKind, UnaryOp,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -117,6 +125,11 @@ enum Infix {
     Compare,
     Pipe,
     Call,
+    Try,
+    /// `xs[i]` (M8).
+    Index,
+    /// `x in xs` / `x not in xs` (M8); `true` = `not in`.
+    In(bool),
 }
 
 /// The comparison operator a token spells, if any.
@@ -221,7 +234,10 @@ impl Parser<'_> {
                 },
             }
         }
-        Program { items }
+        Program {
+            items,
+            next_id: self.next_id,
+        }
     }
 
     /// item := (let_binding | fn_def | expr) (NEWLINE | EOF)
@@ -779,12 +795,23 @@ impl Parser<'_> {
                 TokenKind::StarStar => (Infix::Arith(BinOp::Pow), 41, 40),
                 TokenKind::PipeGt => (Infix::Pipe, 1, 2),
                 TokenKind::LParen => (Infix::Call, CALL_BP, 0),
+                // Postfix `?` (S10): as tight as a call, so `f(x)?` and
+                // `x |> f(a)?` (whose `?` the desugaring moves outside the
+                // pipe) apply it to the call.
+                TokenKind::Question => (Infix::Try, CALL_BP, 0),
+                // Postfix index `xs[i]` (M8): as tight as a call.
+                TokenKind::LBracket => (Infix::Index, CALL_BP, 0),
+                // Membership (S14, M8): comparison precedence, no chaining.
+                TokenKind::Kw(Keyword::In) => (Infix::In(false), CMP_BP, CMP_BP + 1),
+                TokenKind::Kw(Keyword::Not)
+                    if self.tokens.get(self.pos + 1).map(|t| &t.kind)
+                        == Some(&TokenKind::Kw(Keyword::In)) =>
+                {
+                    (Infix::In(true), CMP_BP, CMP_BP + 1)
+                }
                 // Known operators of later milestones: say so clearly
                 // instead of a confusing "expected end of line".
-                TokenKind::Kw(Keyword::In)
-                | TokenKind::LBracket
-                | TokenKind::Dot
-                | TokenKind::Question => {
+                TokenKind::Dot => {
                     return Err(self.error(
                         Diagnostic::new(
                             "E0009",
@@ -804,6 +831,50 @@ impl Parser<'_> {
                 lhs = self.compare_chain(lhs)?;
                 continue;
             }
+            if let Infix::Try = op {
+                let q = self.bump();
+                lhs = Expr {
+                    id: self.id(),
+                    span: lhs.span.to(q.span),
+                    kind: ExprKind::Try(Box::new(lhs)),
+                };
+                continue;
+            }
+            if let Infix::Index = op {
+                let open = self.bump();
+                let index = self.expr(0)?;
+                let close = self.close_bracket(open.span, "`]`", "the index")?;
+                lhs = Expr {
+                    id: self.id(),
+                    span: lhs.span.to(close),
+                    kind: ExprKind::Index {
+                        base: Box::new(lhs),
+                        index: Box::new(index),
+                    },
+                };
+                continue;
+            }
+            if let Infix::In(negated) = op {
+                let first = self.bump();
+                let op_span = if negated {
+                    first.span.to(self.bump().span)
+                } else {
+                    first.span
+                };
+                let rhs = self.expr(r_bp)?;
+                self.no_chain_after_in(op_span)?;
+                lhs = Expr {
+                    id: self.id(),
+                    span: lhs.span.to(rhs.span),
+                    kind: ExprKind::In {
+                        op_span,
+                        item: Box::new(lhs),
+                        coll: Box::new(rhs),
+                        negated,
+                    },
+                };
+                continue;
+            }
             if let Infix::Call = op {
                 let open = self.bump();
                 let (args, close) = self.call_args(open.span)?;
@@ -813,7 +884,7 @@ impl Parser<'_> {
                     kind: ExprKind::Call {
                         callee: Box::new(lhs),
                         args,
-                        piped: false,
+                        piped: None,
                     },
                 };
                 continue;
@@ -840,7 +911,9 @@ impl Parser<'_> {
                     lhs: lhs_box,
                     rhs: rhs_box,
                 },
-                Infix::Compare | Infix::Call => unreachable!("handled above"),
+                Infix::Compare | Infix::Call | Infix::Try | Infix::Index | Infix::In(_) => {
+                    unreachable!("handled above")
+                }
             };
             lhs = Expr {
                 id: self.id(),
@@ -934,6 +1007,10 @@ impl Parser<'_> {
             let rhs = self.expr(CMP_BP + 1)?;
             rest.push(CmpLink { op, op_span, rhs });
         }
+        if self.in_ahead() {
+            let at = self.peek().span;
+            return Err(self.error(mixed_in(at)));
+        }
         let span = first
             .span
             .to(rest.last().expect("at least one link").rhs.span);
@@ -943,6 +1020,151 @@ impl Parser<'_> {
             kind: ExprKind::Compare {
                 first: Box::new(first),
                 rest,
+            },
+        })
+    }
+
+    /// Whether the next token starts `in` or `not in`.
+    fn in_ahead(&self) -> bool {
+        match self.peek().kind {
+            TokenKind::Kw(Keyword::In) => true,
+            TokenKind::Kw(Keyword::Not) => {
+                self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Kw(Keyword::In))
+            }
+            _ => false,
+        }
+    }
+
+    /// After `a in b`: another comparison or `in` would chain, which valo
+    /// does not do for `in` (Python does); ask for parentheses (E0101).
+    fn no_chain_after_in(&mut self, op_span: Span) -> PResult<()> {
+        if cmp_op(&self.peek().kind).is_some() || self.in_ahead() {
+            let at = self.peek().span;
+            return Err(self.error(mixed_in(at).with(op_span, "after this membership test")));
+        }
+        Ok(())
+    }
+
+    /// The closing `]` of a bracket opened at `open`: E0103 when the line
+    /// (or file) ends first, else E0101 "expected `what` after `after`".
+    fn close_bracket(&mut self, open: Span, what: &str, after: &str) -> PResult<Span> {
+        let at = self.peek().clone();
+        if at.kind == TokenKind::RBracket {
+            return Ok(self.bump().span);
+        }
+        let d = if matches!(at.kind, TokenKind::Newline | TokenKind::Eof) {
+            Diagnostic::new("E0103", "unclosed `[`", open).label("opened here, never closed")
+        } else {
+            Diagnostic::new(
+                "E0101",
+                format!(
+                    "expected {what} after {after}, found {}",
+                    at.kind.describe()
+                ),
+                at.span,
+            )
+            .label(format!("expected {what} here"))
+            .with(open, "to close this `[`")
+        };
+        Err(self.error(d))
+    }
+
+    /// After `[` (already consumed, at `open`): a list literal or a list
+    /// comprehension (S14, S15).
+    ///
+    /// ```text
+    /// list   := '[' ']' | '[' expr (',' expr)* ','? ']'
+    ///         | '[' expr clause+ ']'
+    /// clause := 'for' NAME 'in' expr | 'if' expr
+    /// ```
+    ///
+    /// Line breaks inside the brackets are ignored (the lexer drops them).
+    fn list(&mut self, open: Span) -> PResult<Expr> {
+        if self.peek().kind == TokenKind::RBracket {
+            let close = self.bump().span;
+            return Ok(Expr {
+                id: self.id(),
+                span: open.to(close),
+                kind: ExprKind::List(Vec::new()),
+            });
+        }
+        let first = self.expr(0)?;
+        if self.peek().kind == TokenKind::Kw(Keyword::For) {
+            return self.comprehension(open, first);
+        }
+        let mut items = vec![first];
+        while self.peek().kind == TokenKind::Comma {
+            self.bump();
+            if self.peek().kind == TokenKind::RBracket {
+                break;
+            }
+            items.push(self.expr(0)?);
+        }
+        let close = self.close_bracket(open, "`,` or `]`", "a list element")?;
+        Ok(Expr {
+            id: self.id(),
+            span: open.to(close),
+            kind: ExprKind::List(items),
+        })
+    }
+
+    /// The clauses of `[elem for x in xs if c …]`, starting at `for`.
+    fn comprehension(&mut self, open: Span, elem: Expr) -> PResult<Expr> {
+        let mut clauses = Vec::new();
+        loop {
+            match self.peek().kind {
+                TokenKind::Kw(Keyword::For) => {
+                    self.bump();
+                    let t = self.bump();
+                    let var = match t.kind {
+                        TokenKind::Ident(name) => name,
+                        TokenKind::LParen => {
+                            return Err(self.error(
+                                Diagnostic::new(
+                                    "E0009",
+                                    "destructuring in a comprehension is not supported yet",
+                                    t.span,
+                                )
+                                .label("not implemented in this version of valo")
+                                .help("loop over one name and index the element instead"),
+                            ));
+                        }
+                        other => {
+                            return Err(self.error(
+                                Diagnostic::new(
+                                    "E0101",
+                                    format!(
+                                        "expected a name after `for`, found {}",
+                                        other.describe()
+                                    ),
+                                    t.span,
+                                )
+                                .label("expected the loop variable here"),
+                            ));
+                        }
+                    };
+                    self.expect(&TokenKind::Kw(Keyword::In), "`in`")?;
+                    let iter = self.expr(0)?;
+                    clauses.push(Clause::For {
+                        var,
+                        var_span: t.span,
+                        iter,
+                    });
+                }
+                TokenKind::Kw(Keyword::If) => {
+                    self.bump();
+                    clauses.push(Clause::If(self.expr(0)?));
+                }
+                _ => break,
+            }
+        }
+        let close = self.close_bracket(open, "`for`, `if` or `]`", "a comprehension clause")?;
+        Ok(Expr {
+            id: self.id(),
+            span: open.to(close),
+            kind: ExprKind::Comprehension {
+                elem: Box::new(elem),
+                clauses,
             },
         })
     }
@@ -1124,9 +1346,170 @@ impl Parser<'_> {
         })
     }
 
+    /// After a `(` (consumed): is this the parameter list of a lambda, i.e.
+    /// is the matching `)` followed by `=>`? A token scan, no backtracking
+    /// of the AST (S3). Brackets do not span lines here: the lexer suppresses
+    /// NEWLINE inside them, so the scan stops at the first NEWLINE/EOF.
+    fn paren_lambda_ahead(&self) -> bool {
+        let mut depth = 1u32;
+        for (i, t) in self.tokens[self.pos..].iter().enumerate() {
+            match t.kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.tokens.get(self.pos + i + 1).map(|t| &t.kind)
+                            == Some(&TokenKind::FatArrow);
+                    }
+                }
+                TokenKind::Newline | TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// ```text
+    /// lambda_params := (lparam (',' lparam)* ','?)? ')'
+    /// lparam := NAME (':' type)?          no defaults in lambdas (S19)
+    /// ```
+    /// (after the `(`; consumes the `)`).
+    fn lambda_params(&mut self) -> PResult<Vec<Param>> {
+        let mut params = Vec::new();
+        loop {
+            if self.peek().kind == TokenKind::RParen {
+                self.bump();
+                return Ok(params);
+            }
+            let t = self.bump();
+            let TokenKind::Ident(name) = t.kind else {
+                return Err(self.error(
+                    Diagnostic::new(
+                        "E0101",
+                        format!("expected a parameter name, found {}", t.kind.describe()),
+                        t.span,
+                    )
+                    .label("expected a parameter name or `)` here"),
+                ));
+            };
+            let ann = if self.peek().kind == TokenKind::Colon {
+                self.bump();
+                Some(self.type_expr()?)
+            } else {
+                None
+            };
+            if self.peek().kind == TokenKind::Eq {
+                let at = self.peek().span;
+                return Err(self.error(
+                    Diagnostic::new("E0101", "lambda parameters cannot have defaults", at)
+                        .label("default value here")
+                        .help("use a named `fn` for a function with keyword parameters"),
+                ));
+            }
+            params.push(Param {
+                id: self.id(),
+                name,
+                span: t.span,
+                ann,
+                default: None,
+            });
+            match self.peek().kind {
+                TokenKind::Comma => {
+                    self.bump();
+                }
+                TokenKind::RParen => {}
+                _ => {
+                    let at = self.peek().clone();
+                    return Err(self.error(
+                        Diagnostic::new(
+                            "E0101",
+                            format!("expected `,` or `)`, found {}", at.kind.describe()),
+                            at.span,
+                        )
+                        .label("expected `,` or `)` here"),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// `'=>' (expr | NEWLINE INDENT block)` after the parameters of a lambda
+    /// that starts at `start`. An inline body extends as far as possible
+    /// (`x => x + 1 |> f` is `x => ((x + 1) |> f)`), like JavaScript arrows.
+    fn lambda_rest(&mut self, start: Span, params: Vec<Param>) -> PResult<Expr> {
+        self.expect(&TokenKind::FatArrow, "`=>`")?;
+        let body = self.branch()?;
+        Ok(Expr {
+            id: self.id(),
+            span: start.to(body.span),
+            kind: ExprKind::Lambda(Box::new(Lambda {
+                params,
+                body,
+                origin: LambdaOrigin::Source,
+            })),
+        })
+    }
+
+    /// The rest of a string literal after `StrStart` (at `open`):
+    ///
+    /// ```text
+    /// string := STR_START (STR_TEXT | INTERP_START expr INTERP_END)* STR_END
+    /// ```
+    ///
+    /// Without interpolation the result is a plain `Str`.
+    fn string(&mut self, open: Span) -> PResult<Expr> {
+        let mut parts = Vec::new();
+        let end = loop {
+            let t = self.bump();
+            match t.kind {
+                TokenKind::StrText(text) => parts.push(StrPart::Text(text)),
+                TokenKind::InterpStart => {
+                    let e = self.expr(0)?;
+                    if self.peek().kind != TokenKind::InterpEnd {
+                        let at = self.peek().clone();
+                        return Err(self.error(
+                            Diagnostic::new(
+                                "E0101",
+                                format!(
+                                    "expected `}}` after the interpolated expression, found {}",
+                                    at.kind.describe()
+                                ),
+                                at.span,
+                            )
+                            .label("expected `}` here")
+                            .with(t.span, "interpolation starts here"),
+                        ));
+                    }
+                    self.bump();
+                    parts.push(StrPart::Expr(e));
+                }
+                TokenKind::StrEnd => break t.span,
+                // The lexer always closes a string; anything else is a bug.
+                other => {
+                    return Err(self.error(Diagnostic::new(
+                        "E0101",
+                        format!("unexpected {} in a string", other.describe()),
+                        t.span,
+                    )));
+                }
+            }
+        };
+        let span = open.to(end);
+        let kind = match parts.as_slice() {
+            [] => ExprKind::Str(String::new()),
+            [StrPart::Text(t)] => ExprKind::Str(t.clone()),
+            _ => ExprKind::Interp(parts),
+        };
+        Ok(Expr {
+            id: self.id(),
+            span,
+            kind,
+        })
+    }
+
     /// Prefix position: literals, `()`, names, `-x`, `not x`, `if`,
-    /// `assert`, parenthesised groups.
-    /// EXTEND: lambdas (M6), strings (M7) and list literals (M8) start here.
+    /// `assert`, parenthesised groups, lambdas.
+    /// EXTEND: strings (M7) and list literals (M8) start here.
     fn prefix(&mut self) -> PResult<Expr> {
         let t = self.bump();
         match t.kind {
@@ -1145,6 +1528,17 @@ impl Parser<'_> {
                 span: t.span,
                 kind: ExprKind::Bool(kw == Keyword::True),
             }),
+            // `x => body`: a one-parameter lambda (S3, 2-token lookahead).
+            TokenKind::Ident(name) if self.peek().kind == TokenKind::FatArrow => {
+                let param = Param {
+                    id: self.id(),
+                    name,
+                    span: t.span,
+                    ann: None,
+                    default: None,
+                };
+                self.lambda_rest(t.span, vec![param])
+            }
             TokenKind::Ident(name) => Ok(Expr {
                 id: self.id(),
                 span: t.span,
@@ -1159,6 +1553,13 @@ impl Parser<'_> {
                 })
             }
             TokenKind::Kw(Keyword::If) => self.if_expr(t),
+            TokenKind::StrStart => self.string(t.span),
+            TokenKind::LBracket => self.list(t.span),
+            TokenKind::Kw(Keyword::None) => Ok(Expr {
+                id: self.id(),
+                span: t.span,
+                kind: ExprKind::None,
+            }),
             // `assert e` (plan D29): an expression of type `()`.
             TokenKind::Kw(Keyword::Assert) => {
                 let e = self.expr(0)?;
@@ -1179,6 +1580,12 @@ impl Parser<'_> {
                         operand: Box::new(operand),
                     },
                 })
+            }
+            // `(a, b) => body`, `() => body`: a lambda (S3). Decided by scanning
+            // to the matching `)` and looking at the token after it.
+            TokenKind::LParen if self.paren_lambda_ahead() => {
+                let params = self.lambda_params()?;
+                self.lambda_rest(t.span, params)
             }
             // `()`: the unit value.
             TokenKind::LParen if self.peek().kind == TokenKind::RParen => {
@@ -1218,16 +1625,13 @@ impl Parser<'_> {
             TokenKind::Kw(
                 Keyword::Def
                 | Keyword::Match
-                | Keyword::None
                 | Keyword::Import
                 | Keyword::From
                 | Keyword::Test
                 | Keyword::Mock,
             )
-            | TokenKind::LBracket
             | TokenKind::LBrace => {
                 let what = match &t.kind {
-                    TokenKind::LBracket => "list literals are".to_string(),
                     TokenKind::LBrace => "dict literals are".to_string(),
                     other => format!("`{other}` is"),
                 };
@@ -1256,6 +1660,17 @@ impl Parser<'_> {
             }
         }
     }
+}
+
+/// E0101 for `in` chained with a comparison or another `in`.
+fn mixed_in(at: Span) -> Diagnostic {
+    Diagnostic::new(
+        "E0101",
+        "`in` cannot be chained with another comparison",
+        at,
+    )
+    .label("add parentheses to say which test comes first")
+    .help("write e.g. `(x in xs) == ok` or `x in xs and xs == ys`")
 }
 
 // Tests: `cargo test -p valo-compiler parser`.
@@ -1292,8 +1707,8 @@ mod tests {
         assert_eq!(parse_codes("1 +\n2 2\n3\n(1"), ["E0101", "E0101", "E0103"]);
         assert_eq!(parse_codes("  1"), ["E0101"]);
         assert_eq!(
-            parse_codes("[1]\nx in y\nx.y\nx?"),
-            ["E0009", "E0009", "E0009", "E0009"]
+            parse_codes("{1}\nx.y\n[a for (a, b) in y]"),
+            ["E0009", "E0009", "E0009"]
         );
         assert_eq!(
             parse_codes("let = 1\nlet x 1\nlet y: = 2\n1 + let"),
@@ -1363,6 +1778,79 @@ mod tests {
              let t: (int, dict[str, (int,)]) = a\na * b"
         ));
         assert_eq!(parse_codes("(1 2)"), ["E0101"]);
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__parser__tests__lambdas_and_local_fns.snap
+    #[test]
+    fn lambdas_and_local_fns() {
+        insta::assert_snapshot!(parse_ok(
+            "x => x + 1\n(a, b: int) => a * b |> f\n() => read_line()\n(x) => (y) => x\n\
+             map(xs, x => x * 2)\n(1 + 2)\n(a)\n\
+             let sq = x =>\n    let y = x * x\n    y\n\
+             fn outer(a: int) -> int:\n    fn inner(b: int) -> int = a + b\n    inner(1)"
+        ));
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__parser__tests__strings.snap
+    #[test]
+    fn strings() {
+        insta::assert_snapshot!(parse_ok(
+            "\"plain\"\n\"\"\n\"{x}\"\n\"a {x + 1} b {f(\"in {y}\")}\"\nr\"{raw}\" + \"s\""
+        ));
+    }
+
+    #[test]
+    fn none_and_try() {
+        // `?` is as tight as a call: it applies to `f(x)`, not to `1 + …`;
+        // in a pipe it ends the stage (moved by desugar.rs).
+        assert_eq!(
+            parse_ok("none\n1 + f(x)?\nx |> f(a)?\nf()?(1)?"),
+            "(expr none)\n(expr (+ 1 (? (call f x))))\n(expr (|> x (? (call f a))))\n\
+             (expr (? (call (? (call f)) 1)))\n"
+        );
+    }
+
+    #[test]
+    fn lists_indexing_membership() {
+        assert_eq!(
+            parse_ok("[]\n[1, 2,]\n[\n  1,\n  [2],\n]\nxs[0][i + 1]\nf(x)[0]?\n-xs[0]"),
+            "(expr (list))\n(expr (list 1 2))\n(expr (list 1 (list 2)))\n\
+             (expr (index (index xs 0) (+ i 1)))\n(expr (? (index (call f x) 0)))\n\
+             (expr (neg (index xs 0)))\n"
+        );
+        // `in` sits at comparison level: below `+`, above `not` and `and`.
+        assert_eq!(
+            parse_ok("x + 1 in xs\nnot x in xs\nx not in xs and y in ys\n(a < b) in c"),
+            "(expr (in (+ x 1) xs))\n(expr (not (in x xs)))\n\
+             (expr (and (not-in x xs) (in y ys)))\n(expr (in (< a b) c))\n"
+        );
+        assert_eq!(
+            parse_ok(
+                "[x * 2 for x in xs]\n[(x, y) => x for x in a if x > 0 if p(x) for y in f(x)]"
+            ),
+            "(expr (comp (* x 2) (for x xs)))\n\
+             (expr (comp (lambda ((x) (y)) x) (for x a) (if (> x 0)) (if (call p x)) (for y (call f x))))\n"
+        );
+    }
+
+    #[test]
+    fn list_errors() {
+        assert_eq!(parse_codes("[1, 2"), ["E0103"]);
+        assert_eq!(parse_codes("[1 2]"), ["E0101"]);
+        assert_eq!(parse_codes("xs[1"), ["E0103"]);
+        assert_eq!(parse_codes("[x for 1 in xs]"), ["E0101"]);
+        assert_eq!(parse_codes("[x for x xs]"), ["E0101"]);
+        // `in` does not chain with comparisons (Python's chaining is not
+        // supported): parentheses are required.
+        assert_eq!(parse_codes("a in b == c"), ["E0101"]);
+        assert_eq!(parse_codes("a < b in c"), ["E0101"]);
+        assert_eq!(parse_codes("a in b in c"), ["E0101"]);
+    }
+
+    #[test]
+    fn lambda_errors() {
+        assert_eq!(parse_codes("(x = 1) => x"), ["E0101"]);
+        assert_eq!(parse_codes("(x, 1) => x"), ["E0101"]);
     }
 
     // Snapshot: src/snapshots/valo_compiler__parser__tests__functions_and_calls.snap

@@ -1,0 +1,9 @@
+[E0206] Error: `_` is not a value
+   ╭─[ placeholder_misuse.vl:1:9 ]
+   │
+ 1 │ let x = _ + 1
+   │         ┬  
+   │         ╰── `_` cannot be read
+   │ 
+   │ Help: `_` discards a value (`let _ = …`) or stands for a missing argument in a call (`f(a, _)`); it is not a variable
+───╯

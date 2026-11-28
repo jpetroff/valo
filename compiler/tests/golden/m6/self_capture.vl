@@ -1,0 +1,7 @@
+# A lambda inside a local fn calls that fn (it captures the fn's closure).
+fn run(n: int) -> int:
+    fn down(k: int) -> int:
+        let step = j => down(j)
+        if k == 0 then 0 else step(k - 1) + 1
+    down(n)
+print(run(5))

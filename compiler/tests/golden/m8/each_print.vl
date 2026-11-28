@@ -1,0 +1,3 @@
+# each calls the function for its effect and returns ().
+let r = each(["a", "b", "c"], s => print("item {s}"))
+print(r)

@@ -1,0 +1,6 @@
+error[R0701]: assertion failed: name == "vala"
+  --> assert_str.vl:2:8
+  left: "valo"
+  right: "vala"
+stack trace (most recent call first):
+  0: <main> at assert_str.vl:2:8

@@ -1,0 +1,4 @@
+fn roundtrip(path: str) -> str ! error:
+    write_file(path, "line 1\nline 2\n")?
+    read_file(path)
+print(unwrap(roundtrip("out.txt")), end="")

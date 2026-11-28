@@ -1,0 +1,23 @@
+---
+source: compiler/src/resolve.rs
+expression: "resolve_src(\"fn outer(a: int) -> int:\\n    fn mid(b: int) -> int:\\n        \\\n                 let f = c => a + b + c + mid(0)\\n        f(1)\\n    mid(10)\").unwrap()"
+---
+natives: global#0..#31 (print int float str str_len trim Ok Err context is_ok is_err unwrap or_else parse_int parse_float read_line read_file write_file len get range map filter reduce flat_map each contains append reverse lines split join)
+globals:
+  global#32  outer        1:4     fn
+locals:
+  local#0   a            1:10
+  local#1   mid          2:8
+  local#2   b            2:12
+  local#3   c            3:17
+  local#4   f            3:13
+captures:
+  mid          2:8     #0 a <- local#0
+  lambda       3:17    #0 a <- upval#0, #1 b <- local#2, #2 mid <- self
+uses:
+  3:22    a -> upval#0 (local#0)
+  3:26    b -> upval#1 (local#2)
+  3:30    c -> local#3
+  3:34    mid -> upval#2 (local#1)
+  4:9     f -> local#4
+  5:5     mid -> local#1

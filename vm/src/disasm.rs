@@ -14,6 +14,9 @@
 //!   0  int 70000
 //! ```
 //!
+//! A function with parameters or `let`s also lists its debug table:
+//! `locals:` with one `R<reg> <name> pc <start>..<end>` line each.
+//!
 //! Columns: instruction index (`pc`), `[line:col]` of the source that produced
 //! it, mnemonic, operands (`A B C`, `A Bx`, …), and an optional `; comment`
 //! (the constant value for `LOADK`, the global's name for `GETGLOBAL` /
@@ -29,6 +32,7 @@
 //! | show a helpful comment for an opcode | `let comment = match op { ... }`|
 //! | print a new kind of constant         | `const_repr`, `const_entry`     |
 //! | change how nested functions print    | end of `proto` (children follow the parent's constants, indented one level) |
+//! | change the `locals:` debug table     | after `constants:` in `proto`   |
 //!
 //! Changing the format changes snapshot files
 //! (`compiler/src/snapshots/*.snap`); re-run tests with `INSTA_UPDATE=always`
@@ -43,7 +47,7 @@
 
 use std::fmt::Write;
 
-use crate::chunk::{Const, Program, Proto};
+use crate::chunk::{Const, Program, Proto, UpvalSrc};
 use crate::opcode::{Format, OpCode};
 
 /// Disassemble a whole program.
@@ -65,9 +69,15 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
     } else {
         format!(" required={}", p.required)
     };
+    // `upvals=` only for closures that capture something (M6).
+    let upvals = if p.upvals.is_empty() {
+        String::new()
+    } else {
+        format!(" upvals={}", p.upvals.len())
+    };
     let _ = writeln!(
         out,
-        "{pad}function {} arity={}{required} regs={} consts={} protos={}   ; {}:{dl}:{dc}",
+        "{pad}function {} arity={}{required} regs={} consts={}{upvals} protos={}   ; {}:{dl}:{dc}",
         p.name,
         p.arity,
         p.num_regs,
@@ -111,6 +121,8 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
                 .protos
                 .get(instr.bx() as usize)
                 .map(|c| format!("<fn {}/{}>", c.name, c.arity)),
+            OpCode::GETUPVAL => p.upvals.get(instr.b() as usize).map(|u| u.name.to_string()),
+            OpCode::GETSELF => Some(p.name.to_string()),
             _ => None,
         };
         let line = format!("{pad}  {pc:04}  {pos:<7} {:<9} {operands:<8}", op.name());
@@ -131,6 +143,30 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
             let _ = writeln!(out, "{pad}  {i}  {}", const_entry(k));
         }
     }
+    // Captures (M6): where the enclosing function's CLOSURE takes each one.
+    if !p.upvals.is_empty() {
+        let _ = writeln!(out, "{pad}upvals:");
+        for (i, u) in p.upvals.iter().enumerate() {
+            let src = match u.src {
+                UpvalSrc::Reg(r) => format!("R{r}"),
+                UpvalSrc::Upval(j) => format!("upval {j}"),
+                UpvalSrc::Current => "self".to_string(),
+            };
+            let _ = writeln!(out, "{pad}  {i:<3} {:<10} <- {src}", u.name);
+        }
+    }
+    // Debug info for the debugger's Variables view (D3); only functions
+    // with parameters or `let`s have any.
+    if !p.locals.is_empty() {
+        let _ = writeln!(out, "{pad}locals:");
+        for l in &p.locals {
+            let _ = writeln!(
+                out,
+                "{pad}  R{:<3} {:<10} pc {:04}..{:04}",
+                l.reg, l.name, l.start_pc, l.end_pc
+            );
+        }
+    }
     for child in &p.protos {
         proto(out, program, child, depth + 1);
     }
@@ -141,6 +177,7 @@ fn const_repr(k: &Const) -> String {
     match k {
         Const::Int(n) => n.to_string(),
         Const::Float(x) => format!("{x:?}"),
+        Const::Str(t) => format!("{t:?}"),
     }
 }
 
@@ -149,5 +186,6 @@ fn const_entry(k: &Const) -> String {
     match k {
         Const::Int(n) => format!("int {n}"),
         Const::Float(x) => format!("float {x:?}"),
+        Const::Str(t) => format!("str {t:?}"),
     }
 }

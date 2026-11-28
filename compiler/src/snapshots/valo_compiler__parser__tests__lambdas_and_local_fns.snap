@@ -1,0 +1,13 @@
+---
+source: compiler/src/parser.rs
+expression: "parse_ok(\"x => x + 1\\n(a, b: int) => a * b |> f\\n() => read_line()\\n(x) => (y) => x\\n\\\n             map(xs, x => x * 2)\\n(1 + 2)\\n(a)\\n\\\n             let sq = x =>\\n    let y = x * x\\n    y\\n\\\n             fn outer(a: int) -> int:\\n    fn inner(b: int) -> int = a + b\\n    inner(1)\")"
+---
+(expr (lambda ((x)) (+ x 1)))
+(expr (lambda ((a) (b : int)) (|> (* a b) f)))
+(expr (lambda () (call read_line)))
+(expr (lambda ((x)) (lambda ((y)) x)))
+(expr (call map xs (lambda ((x)) (* x 2))))
+(expr (+ 1 2))
+(expr a)
+(let sq (lambda ((x)) (block (let y (* x x)) (expr y))))
+(fn outer ((a : int)) -> int (block (fn inner ((b : int)) -> int (+ a b)) (expr (call inner 1))))

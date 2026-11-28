@@ -4,16 +4,17 @@ expression: "disasm(\"fn loop(n: int, acc: int) -> int:\\n    if n == 0: acc\\n 
 ---
 function <main> arity=0 regs=3 consts=0 protos=2   ; t.vl:1:1
   0000  [1:4]   CLOSURE   0 0      ; <fn loop/2>
-  0001  [1:4]   SETGLOBAL 0 3      ; loop
+  0001  [1:4]   SETGLOBAL 0 32     ; loop
   0002  [7:4]   CLOSURE   0 1      ; <fn g/1>
-  0003  [7:4]   SETGLOBAL 0 4      ; g
+  0003  [7:4]   SETGLOBAL 0 33     ; g
   0004  [8:1]   GETGLOBAL 0 0      ; print
-  0005  [8:7]   GETGLOBAL 1 4      ; g
+  0005  [8:7]   GETGLOBAL 1 33     ; g
   0006  [8:9]   LOADI     2 3
   0007  [8:7]   CALL      1 1
   0008  [8:1]   CALL      0 1
-  0009  [8:12]  LOADUNIT  0
-  0010  [8:12]  RETURN    0
+  0009  [8:1]   TRY       0 0 1
+  0010  [8:12]  LOADUNIT  0
+  0011  [8:12]  RETURN    0
 constants: (none)
   function loop arity=2 regs=8 consts=0 protos=0   ; t.vl:1:4
     0000  [2:8]   MOVE      2 0
@@ -28,7 +29,7 @@ constants: (none)
     0009  [3:10]  LT        2 2 3
     0010  [3:10]  TEST      2 0
     0011  [3:10]  JMP       6        ; to 18
-    0012  [3:17]  GETGLOBAL 2 3      ; loop
+    0012  [3:17]  GETGLOBAL 2 32     ; loop
     0013  [3:23]  MOVE      3 0
     0014  [3:22]  NEG       3 3
     0015  [3:26]  MOVE      4 1
@@ -37,7 +38,7 @@ constants: (none)
     0018  [5:17]  MOVE      3 0
     0019  [5:21]  LOADI     4 1
     0020  [5:17]  SUB       3 3 4
-    0021  [6:9]   GETGLOBAL 4 3      ; loop
+    0021  [6:9]   GETGLOBAL 4 32     ; loop
     0022  [6:14]  MOVE      5 3
     0023  [6:17]  MOVE      6 1
     0024  [6:23]  LOADI     7 1
@@ -45,12 +46,18 @@ constants: (none)
     0026  [6:9]   TAILCALL  4 2
     0027  [2:5]   RETURN    2
   constants: (none)
+  locals:
+    R0   n          pc 0000..0028
+    R1   acc        pc 0000..0028
+    R3   m          pc 0021..0027
   function g arity=1 regs=5 consts=0 protos=0   ; t.vl:7:4
     0000  [7:23]  LOADI     1 1
-    0001  [7:27]  GETGLOBAL 2 3      ; loop
+    0001  [7:27]  GETGLOBAL 2 32     ; loop
     0002  [7:32]  MOVE      3 0
     0003  [7:35]  LOADI     4 0
     0004  [7:27]  CALL      2 2
     0005  [7:23]  ADD       1 1 2
     0006  [7:23]  RETURN    1
   constants: (none)
+  locals:
+    R0   n          pc 0000..0007

@@ -17,6 +17,7 @@
 //! | [`host`]        | the door to the outside world (`Host`, `StdHost`, `TestHost`)    | 07-virtual-machine |
 //! | [`error`]       | runtime errors (`RuntimeError`, `ErrorKind`, `R####` codes)      | 08-errors-and-diagnostics |
 //! | [`builtins`]    | native functions (`print`, `int`, `float`)                       | 07-virtual-machine |
+//! | [`debug`]       | debugger hook (`DebugHook`), paused-VM view, line table          | 13-debugger |
 //! | `bin/valo-vm.rs`| standalone bytecode runner (placeholder until M11)               | 09-driver-and-cli |
 //!
 //! ## Comment conventions used in every source file
@@ -33,6 +34,7 @@
 // makes it visible to other crates (the compiler uses `valo_vm::chunk`, ...).
 pub mod builtins;
 pub mod chunk;
+pub mod debug;
 pub mod disasm;
 pub mod error;
 pub mod host;

@@ -46,10 +46,25 @@ pub enum Value {
 Each register holds one `Value`. Rust's `enum` is a tagged union: the tag
 says which variant it is, so the VM can check operand types at runtime
 (**dynamic typing** at the VM level; valo's annotations add checks on top in
-M10). Functions are values: `Closure` (compiled code plus captured values;
-captures stay empty until M6) and `Native` (a built-in), both of type
-`function`, printed `<fn fact/1>` / `<native print/1>`. Later variants:
-strings, `none`, `Ok`/`Err` (M7), lists (M8). Heap values will be shared with
+M10). Strings (M7) are `Str(Rc<str>)`: immutable UTF-8, shared by `MOVE` and
+`LOADK` without copying; `+` joins two strings, `==`/`<` compare them (by
+code point), and `CONCAT A B C` builds an interpolated string from
+`R[B..B+C]` in one allocation, each part in its `Display` form. `print`
+shows a string as its text; inside other values and in messages
+(`left: "a"`, the debugger) `Value::repr` quotes and escapes it.
+`None` is the empty value (an optional is a plain value or `none`, no
+wrapper, S9); `Ok(Rc<Value>)` and `Err(Rc<ErrVal>)` are results (S10).
+`ErrVal` holds the payload plus its history — context messages, the
+origin `Site` (function + span) and one `Site` per `?` that passed it on —
+which only grows by `Rc::make_mut`, so passing an unshared `Err` up the
+stack never copies it. Any value may be compared with `none` (`x == none`
+is how an optional is tested); results compare by content.
+Functions are values: `Closure` (compiled code plus captured values,
+M6) and `Native` (a built-in), both of type
+`function`, printed `<fn fact/1>` / `<native print/1>`.
+`List(Rc<Vec<Value>>)` (M8) is printed `[1, "a"]` (elements in `repr`
+form); `+` joins two lists into a new one, `==` compares element by
+element. Heap values are shared with
 `Rc` — safe because valo values are immutable, and enough for memory
 management because immutable values in a strict language cannot form cycles
 (plan D3, feasibility report "reference counting, not a tracing GC").
@@ -249,6 +264,56 @@ RETURN X (in g):  stack[base'-1] = R'[X]   → the caller finds the result in R[
   finished calls are freed at once (with `Rc`, a value lives as long as a
   stack slot still points to it).
 
+**Closures** (M6). `CLOSURE A Bx` builds `Closure { proto, captures }` for
+child prototype `Bx`, copying one value per entry of the child's
+`Proto::upvals` from where the *running* function has it: a register
+(`UpvalSrc::Reg`), its own captures (`Upval`) or its own closure
+(`Current`). `GETUPVAL A B` reads `captures[B]` of the running closure,
+`GETSELF A` loads the running closure itself (a local fn calling itself).
+
+```text
+fn make_adder(n: int) -> int -> int = x => x + n
+   make_adder(5):  CLOSURE 1 0   ; upvals: n <- R0   → Closure { proto: <lambda>, captures: [5] }
+   add5(3):        GETUPVAL 1 0  ; n = 5, from the closure, not from a register
+```
+
+Because captures are copies of immutable values, there are no open
+upvalues, no `CLOSE`, and no `RefCell`: Lua needs those only because its
+locals can be assigned after a closure captured them. No `Rc` cycle can
+form either: a closure never captures itself (`GETSELF` instead), and a
+lambda that captures its enclosing local fn (`Current`) points *to* it,
+never back.
+
+**`TRY A B C`** (postfix `?`, M7): for `Ok(v)` in `R[B]`, `R[A] = v`.
+For an `Err` it appends the current position to the `Err`'s `propagated`
+list and returns the `Err` from the running frame (the same `do_return`
+as `RETURN`); in `<main>` there is nowhere to return to, so it is R0601
+with the `Err`'s history in `RuntimeError::trail`. Any other value is
+R0208, unless `C = 1` (the lenient form after a top-level line), which
+lets it through. The `Err` built-in takes its origin from
+`Vm::current_site` — natives have no frame, so the innermost frame is the
+one that called `Err(…)`.
+
+**`NEWLIST A B C`** (M8) moves `R[B..B+C]` into a new list in `R[A]`;
+**`INDEX A B C`** reads `R[B][R[C]]` — a list and an int in `0..len`
+(no negative indices). Out of range is R0401, and the error carries the
+index and length in `RuntimeError::access` so the CLI can print
+`rows[1][3]: index out of range (len 2)`.
+
+**Built-ins that call back into valo** (M8, plan D7). `map(xs, f)` must
+run `f`, a closure, from inside Rust code. `Vm::call_value(f, args)` puts
+`f` and its arguments on top of the stack like a `CALL` window, pushes the
+frame with `reentry = true` and runs `execute` *again* — a nested dispatch
+loop — which returns when that frame's `RETURN` runs (`do_return` sees the
+flag). Tail calls inside the callback work as usual (the reused frame keeps
+the flag). Every running built-in is remembered in `Vm::native_marks`
+(its id and the frame depth when it was called), so `unwind` can put a
+`<native map>` line between the callback's frames and its caller. Each
+nesting level is a Rust recursion, so it is capped at `MAX_REENTRY` (200)
+→ R0301, and the CLI and the debugger run the VM on a thread with a 64 MiB
+stack (`VM_STACK_BYTES`). Arguments are owned: a list nothing else holds
+is consumed in place (`append` pushes onto it without copying).
+
 Globals start empty except the built-in slots: `run` fills them with
 `Value::Native(id)` from `GlobalDesc::kind` before `<main>` starts.
 `<main>`'s first instructions create the top-level fns (`CLOSURE` +
@@ -263,6 +328,9 @@ pub trait Host {
     fn write_stdout(&mut self, s: &str) -> io::Result<()>;
     fn write_stderr(&mut self, s: &str) -> io::Result<()>;
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn read_line(&mut self) -> io::Result<Option<String>>;     // M7: None at end of input
+    fn read_file(&mut self, path: &str) -> io::Result<String>;  // M7
+    fn write_file(&mut self, path: &str, content: &str) -> io::Result<()>; // M7
 }
 ```
 
@@ -272,13 +340,17 @@ The VM never touches `std::io` directly. Every effect goes through the
 - `StdHost` — the real process streams (used by `valo run`). Stdout is
   buffered (`BufWriter`): flushed before anything is written to stderr and
   by the CLI when the program ends, normally or with an error;
-- `TestHost` — collects output in two `String`s (used by unit tests).
+- `TestHost` — collects output in two `String`s, serves scripted stdin
+  lines and an in-memory file system (used by unit tests);
+- `DapHost` (`tooling/dap/src/host.rs`) — output becomes Debug Console
+  events; stdin reports end of input until the debugger runs programs in
+  a terminal (D6). `StdHost::read_line` flushes stdout first, so a prompt
+  printed before a read is visible.
 
 This is the seed of a key valo feature from the feasibility report: because
 *all* effects pass through one interface, a different host can log them
 (`--trace`), pretend to perform them (`--dry-run`), record them to a file
-(`--record`) or answer them from a recording (`--replay`). M7 adds stdin and
-file access to the trait.
+(`--record`) or answer them from a recording (`--replay`).
 
 A write failure (e.g. stdout is a closed pipe) becomes R0501 instead of a
 crash.

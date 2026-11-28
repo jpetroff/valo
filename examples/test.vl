@@ -1,0 +1,7 @@
+fn fib(num: int) -> int =
+  if num == 1 or num == 2: 1
+  else: num + fib(num - 1)
+
+
+
+print(fib(1024034))

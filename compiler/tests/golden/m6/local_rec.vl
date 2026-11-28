@@ -1,0 +1,5 @@
+fn fib(n: int) -> int:
+    fn go(k: int) -> int =
+        if k < 2 then k else go(k - 1) + go(k - 2)
+    go(n)
+print(fib(20))

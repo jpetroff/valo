@@ -252,6 +252,34 @@ Global style: Python-like, indentation blocks (INDENT/DEDENT/NEWLINE), no `;`, s
 - A positional argument after a keyword argument is a syntax error (Python).
 - `x |> (y |> f)` calls the computed function `(y |> f)` with `x`; only a plain call on the right of `|>` receives the value as its first argument.
 
+## Implementation notes from M6 (PROVISIONAL, chosen while building; not yet confirmed by the user)
+- A lambda body after `=>` extends as far as possible (lowest precedence, like JS arrows): `x => x + 1 |> f` is `x => ((x + 1) |> f)`. Parenthesise the lambda to stop it earlier.
+- `=>` at the end of a line opens an indented block body (S3). Inside brackets line breaks are ignored, so a block-bodied lambda cannot be written directly as a call argument; bind it with `let` first.
+- Lambda parameters may be `_` (value ignored). Lambda parameters cannot have defaults (E0101).
+- A local `fn` is visible from its own line to the end of its block (not hoisted like top-level fns); using it earlier is E0201, and a local fn using a later local fn is E0204.
+- In a pipe, the value fills the FIRST `_` of the right-hand call; further `_` keep it a partial: `x |> f(_, _)` ≡ `f(x, _)`.
+- A lambda bound by `let` is named after the binding in traces (`<fn sq/1>`); other lambdas `<lambda@line:col>`, partials `<partial f@line:col>`.
+
+## Implementation notes from M7 (PROVISIONAL, chosen while building; not yet confirmed by the user)
+- A string ends on its line (no multi-line `"…"`; triple quotes stay provisional, S12). An interpolation `{…}` must also close on its line.
+- Escapes: `\n \t \r \0 \" \\ \{ \} \u{…}` (1–6 hex digits); any other `\x` is an error. A lone `}` in string text is a literal `}` (only `{` must be escaped).
+- Raw strings `r"…"` have no escapes at all, so they cannot contain `"`.
+- `print(x, end="\n")`: keyword `end` (Python); strings print without quotes, but show quoted inside other values and in error messages (`left: "a"`).
+- `?` binds like a call (`1 + f(x)?` = `1 + (f(x)?)`); after a pipe stage it applies to the whole stage (S10).
+- A top-level line whose value is an `Err` stops the program (unhandled Err), as if it ended with `?`; other values of top-level lines are discarded.
+- `or_else(x, default)`: `default` when `x` is `none` or an `Err`, the inner value of an `Ok`, else `x`. `unwrap(x)`: inner value of `Ok`, error for `Err`/`none`, else `x`.
+- `parse_int(s)` / `parse_float(s)` ignore surrounding whitespace and return `none` when `s` is not a number. `read_file`/`write_file` errors are `Err("cannot read \"path\": file not found")`-style messages (str payload until the `error` record exists).
+
+## Implementation notes from M8 (PROVISIONAL unless marked user-confirmed)
+- Lists: `[1, 2,]` trailing comma allowed; literals and comprehensions may span lines (brackets). `xs[i]` only with `0 <= i < len` (no negative indexing; Q-S22 still open); out of range = runtime error naming the path (`rows[r][3]: index out of range (len 2)`).
+- `+` on lists makes a new list; `==` compares element by element (elements of different types are an error, as outside lists); lists cannot be ordered with `<`.
+- USER-CONFIRMED: `x not in xs` (Python); `in` on strings is a substring test (`"err" in line`); `len(s)` counts characters like `str_len`.
+- `in` / `not in` do not chain with comparisons or each other (`a < b in c`, `a in b == c` are errors asking for parentheses); Python's chaining could be added later.
+- Comprehension loop target is a single name (or `_`); `for (a, b) in …` waits for tuples/patterns.
+- USER-CONFIRMED: `?` directly inside a comprehension (element, `if`, or a later `for`'s list) is a compile error (E0208): it would only leave the comprehension's hidden function. The first `for`'s list is evaluated outside and may use `?`.
+- Comprehensions and `in` call the built-ins `map`/`filter`/`flat_map`/`contains` even if the program rebinds those names.
+- Built-ins (provisional names, data first): `len get range map filter reduce flat_map each contains append reverse lines split join`. `range(n)` / `range(a, b)` (end-exclusive). `get(xs, i)` → element or `none`. `split(s, sep)` like Python's `s.split(sep)` (empty sep = error); `join(xs, sep)` needs a list of str; `lines(s)` drops `\n` / `\r\n` endings.
+
 ## Composite example (rounds 1–6; builtin names provisional)
 
 ```

@@ -1,0 +1,7 @@
+error[R0601]: unhandled Err: "not positive: -1"
+  --> toplevel_err_discarded.vl:4:1
+  origin: check at toplevel_err_discarded.vl:1:60
+  propagated by `?` in:
+    <main> at toplevel_err_discarded.vl:4:1
+stack trace (most recent call first):
+  0: <main> at toplevel_err_discarded.vl:4:1

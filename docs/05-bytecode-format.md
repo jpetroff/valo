@@ -122,7 +122,12 @@ pub struct Proto {
     pub consts: Vec<Const>,     // the constant pool
     pub spans: Vec<SrcSpan>,    // spans[pc] = source of code[pc]   (chapter 2)
     pub def_span: SrcSpan,      // where the function is defined
+    pub protos: Vec<Rc<Proto>>, // nested functions (CLOSURE operand)
+    pub locals: Vec<LocalInfo>, // debug info: register ↔ variable name, per pc range (chapter 13)
+    pub upvals: Vec<UpvalDesc>, // what a closure of this fn captures (M6, chapter 6)
 }
+pub struct UpvalDesc { pub src: UpvalSrc, pub name: Rc<str> }
+pub enum UpvalSrc { Reg(u8), Upval(u8), Current }   // where CLOSURE takes each value
 
 pub enum Const { Int(i64), Float(f64) }     // M7 adds Str
 

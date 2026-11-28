@@ -1,0 +1,6 @@
+let found = parse_int("5")
+let missing = parse_int("five")
+print(found == none)
+print(missing == none)
+print(none == none)
+print(found != none and found > 3)

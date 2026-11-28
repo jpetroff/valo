@@ -1,0 +1,6 @@
+# A tail-recursive loop driven through a partial: the lambda's call to
+# `loop` is a tail call, so the stack stays flat.
+fn loop(acc: int, n: int) -> int =
+    if n == 0 then acc else loop(acc + 1, n - 1)
+let count = loop(0, _)
+print(count(1000000))

@@ -1,0 +1,5 @@
+# Files left out of the packaged .vsix (`npx vsce package`).
+# node_modules/ is kept: vscode-languageclient is needed at runtime.
+samples/**
+*.vsix
+.vscode/**

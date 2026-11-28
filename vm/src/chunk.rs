@@ -17,12 +17,14 @@
 //!
 //! | I want to…                                   | Look at                                      |
 //! |----------------------------------------------|----------------------------------------------|
-//! | add a new kind of constant (string, M7)      | `enum Const`, then `vm.rs` (`LOADK`), `disasm.rs` (`const_repr`, `const_entry`), `codegen.rs` |
-//! | store more per-function data (params, upvalues) | `struct Proto` (+ `ProtoBuilder::new`, `FuncState::new` in codegen) |
+//! | add a new kind of constant                   | `enum Const`, then `vm.rs` (`LOADK`), `disasm.rs` (`const_repr`, `const_entry`), `codegen.rs` |
+//! | store more per-function data (params, types)  | `struct Proto` (+ `ProtoBuilder::new`, `FuncState::new` in codegen) |
+//! | change what closures capture (M6)             | `struct UpvalDesc`, `enum UpvalSrc` (+ `CLOSURE` in `vm.rs`) |
 //! | store more per-program data (types, M10)     | `struct Program` (+ `ProtoBuilder::program`, `codegen::compile`) |
 //! | describe global slots (natives, M4)           | `struct GlobalDesc`, `enum GlobalKind`       |
 //! | add nested functions                          | `Proto::protos` (indexed by `CLOSURE` Bx)    |
 //! | build bytecode by hand in a VM test          | `ProtoBuilder` (see tests in `vm.rs`)       |
+//! | record more debug info per local (types, M10) | `struct LocalInfo` (+ `FuncState::declare_local` in codegen) |
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -61,13 +63,15 @@ impl SrcSpan {
 ///
 /// Small integers are encoded directly in the instruction (`LOADI`); values
 /// that do not fit go into the pool and are loaded with `LOADK index`.
-/// EXTEND: strings (M7) become a new variant here.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Const {
     /// Integer too large for `LOADI`'s 16-bit immediate.
     Int(i64),
     /// Float literal (there is no float immediate form).
     Float(f64),
+    /// String literal, or the text pieces of an interpolated string (M7).
+    /// `LOADK` shares the `Rc`, so loading a string never copies it.
+    Str(Rc<str>),
 }
 
 /// A compiled function.
@@ -100,6 +104,67 @@ pub struct Proto {
     /// creates a closure of `protos[Bx]`. For `<main>` these are the
     /// top-level `fn`s (M4).
     pub protos: Vec<Rc<Proto>>,
+    /// Debug info: which register holds which named local, and when
+    /// (parameters first, then `let`s in the order they are compiled).
+    /// Only the debugger reads it (Variables view, D3).
+    pub locals: Vec<LocalInfo>,
+    /// What a closure of this function captures (M6): `CLOSURE` in the
+    /// *enclosing* function copies one value per entry into
+    /// `Closure::captures`; `GETUPVAL A B` reads `captures[B]`.
+    pub upvals: Vec<UpvalDesc>,
+}
+
+/// One captured value of a closure (Lua's `Upvaldesc` in `lobject.h`).
+///
+/// Captures are copied when the closure is created (plan D5): valo
+/// bindings are immutable, so there are no open upvalues and no `CLOSE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpvalDesc {
+    /// Where the enclosing function finds the value.
+    pub src: UpvalSrc,
+    /// Source name of the captured binding (traces, debugger, disasm).
+    pub name: Rc<str>,
+}
+
+/// Where `CLOSURE` takes a captured value from, relative to the function
+/// that executes the `CLOSURE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpvalSrc {
+    /// Its register `R[i]`.
+    Reg(u8),
+    /// Its own capture `captures[i]`.
+    Upval(u8),
+    /// Its own closure: a lambda inside a local fn that calls that fn.
+    /// (Deviation from Lua's `instack`/`idx` pair; it keeps a closure from
+    /// ever capturing itself, so closures form no `Rc` cycles.)
+    Current,
+}
+
+/// One named local variable of a function: lives in register `reg` while
+/// `start_pc <= pc < end_pc` (Lua's `LocVar` in `lfunc.h`; DWARF location
+/// lists play the same role in native code).
+///
+/// Registers have no names at run time; without this table a debugger
+/// could only show `R0`, `R1`, … A shadowing `let x` gets its own entry;
+/// both may be live at once, and the later one is the visible one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalInfo {
+    /// Source name.
+    pub name: Rc<str>,
+    /// Register (`R[reg]` of the function's frame).
+    pub reg: u8,
+    /// First instruction at which the variable holds its value: `0` for a
+    /// parameter, the instruction after the initialiser for a `let`.
+    pub start_pc: u32,
+    /// First instruction after its scope (the end of its block).
+    pub end_pc: u32,
+}
+
+impl LocalInfo {
+    /// Whether the variable holds its value when instruction `pc` runs.
+    pub fn live_at(&self, pc: usize) -> bool {
+        (self.start_pc as usize..self.end_pc as usize).contains(&pc)
+    }
 }
 
 /// Index of a native function in `builtins::NATIVES`.
@@ -200,6 +265,8 @@ impl ProtoBuilder {
                 spans: Vec::new(),
                 def_span: SrcSpan::default(),
                 protos: Vec::new(),
+                locals: Vec::new(),
+                upvals: Vec::new(),
             },
             globals: Vec::new(),
         }
@@ -230,6 +297,27 @@ impl ProtoBuilder {
     /// Set the number of parameters without a default (after `arity`).
     pub fn required(mut self, n: u8) -> ProtoBuilder {
         self.proto.required = n;
+        self
+    }
+
+    /// Record a named local in register `reg`, live for `start..end`.
+    pub fn local(mut self, name: &str, reg: u8, start: u32, end: u32) -> ProtoBuilder {
+        self.proto.locals.push(LocalInfo {
+            name: name.into(),
+            reg,
+            start_pc: start,
+            end_pc: end,
+        });
+        self
+    }
+
+    /// Declare the next captured value (`captures[i]` of closures of this
+    /// prototype).
+    pub fn upval(mut self, name: &str, src: UpvalSrc) -> ProtoBuilder {
+        self.proto.upvals.push(UpvalDesc {
+            src,
+            name: name.into(),
+        });
         self
     }
 

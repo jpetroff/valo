@@ -1,0 +1,11 @@
+[E0007] Error: unterminated interpolation in a string
+   ╭─[ interp_unterminated.vl:2:15 ]
+   │
+ 2 │ print("value: {x")
+   │       ┬       ┬  
+   │       ╰────────── in the string starting here
+   │               │  
+   │               ╰── this `{` is never closed
+   │ 
+   │ Help: close it with `}` on the same line, or write `\{` for a literal brace
+───╯

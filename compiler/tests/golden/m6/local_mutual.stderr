@@ -1,0 +1,12 @@
+[E0204] Error: `is_odd` is a local fn defined later in this block
+   ╭─[ local_mutual.vl:2:59 ]
+   │
+ 2 │     fn is_even(k: int) -> bool = if k == 0 then true else is_odd(k - 1)
+   │                                                           ───┬──  
+   │                                                              ╰──── used here
+ 3 │     fn is_odd(k: int) -> bool = if k == 0 then false else is_even(k - 1)
+   │        ───┬──  
+   │           ╰──── defined here
+   │ 
+   │ Help: local fns cannot call each other (mutual recursion); define both fns at the top level of the file
+───╯

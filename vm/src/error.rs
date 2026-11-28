@@ -57,12 +57,25 @@ pub enum ErrorKind {
     NativeArgType,
     /// R0207 wrong number of arguments in a call the compiler could not check.
     WrongArgCount,
+    /// R0208 `?` on a value that is not a result (`Ok`/`Err`), incl. `none`.
+    NotResult,
+    /// R0401 list index out of range (M8); later also a missing dict key.
+    IndexOutOfRange,
+    /// R0402 `unwrap` of `none`.
+    UnwrapNone,
+    /// R0403 `unwrap` of an `Err`.
+    UnwrapErr,
+    /// R0601 an `Err` reached the top level unhandled (`?` in `<main>`, or
+    /// a top-level expression whose value is an `Err`, Q23).
+    UnhandledErr,
     /// R0301 too many nested calls.
     StackOverflow,
     /// R0302 global read before its `SETGLOBAL` ran.
     GlobalUninit,
     /// R0701 `assert` failed.
     AssertionFailed,
+    /// R0801 the run was stopped from outside (the debugger's Stop button).
+    Interrupted,
     /// R0501 writing to stdout/stderr failed.
     HostIo,
     /// R0901 malformed bytecode or an opcode this build does not implement.
@@ -83,9 +96,15 @@ impl ErrorKind {
             ErrorKind::NotComparable => "R0205",
             ErrorKind::NativeArgType => "R0206",
             ErrorKind::WrongArgCount => "R0207",
+            ErrorKind::NotResult => "R0208",
+            ErrorKind::IndexOutOfRange => "R0401",
+            ErrorKind::UnwrapNone => "R0402",
+            ErrorKind::UnwrapErr => "R0403",
+            ErrorKind::UnhandledErr => "R0601",
             ErrorKind::StackOverflow => "R0301",
             ErrorKind::GlobalUninit => "R0302",
             ErrorKind::AssertionFailed => "R0701",
+            ErrorKind::Interrupted => "R0801",
             ErrorKind::HostIo => "R0501",
             ErrorKind::Internal => "R0901",
         }
@@ -103,6 +122,41 @@ pub struct TraceEntry {
     /// Frames this one replaced through tail calls (M5); printed as
     /// "(... N tail calls elided ...)".
     pub tail_calls: u32,
+    /// A built-in that was running a callback (`<native map>`, M8): it has
+    /// no source position (`span` is empty).
+    pub native: bool,
+}
+
+/// What an index error (R0401) tried to read, so a renderer that has the
+/// source can name the access path: `rows[1][3]: index out of range (len 2)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Access {
+    /// The index, as written in messages (`repr`).
+    pub index: String,
+    /// Length of the indexed value.
+    pub len: usize,
+}
+
+/// A place in the program: function name and the span of an instruction
+/// (where an `Err` was made, or a `?` passed it on).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Site {
+    /// Function display name.
+    pub fn_name: Rc<str>,
+    /// Source span.
+    pub span: SrcSpan,
+}
+
+/// The history of an unhandled `Err` (R0601, plan D26/Q21): its context
+/// messages and where it was created and propagated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrTrail {
+    /// `context(r, msg)` messages, innermost (first added) first.
+    pub context: Vec<Rc<str>>,
+    /// Where `Err(…)` (or a failing built-in) created it.
+    pub origin: Site,
+    /// Every `?` that passed it on, in order (innermost first).
+    pub propagated: Vec<Site>,
 }
 
 /// A runtime fault.
@@ -120,6 +174,11 @@ pub struct RuntimeError {
     pub notes: Vec<String>,
     /// Stack trace, innermost frame first.
     pub trace: Vec<TraceEntry>,
+    /// For R0601: the `Err`'s context chain and sites (boxed: rare, and it
+    /// would make every `Result<_, RuntimeError>` larger).
+    pub trail: Option<Box<ErrTrail>>,
+    /// For R0401: the index and length (boxed for the same reason).
+    pub access: Option<Box<Access>>,
 }
 
 impl RuntimeError {
@@ -130,6 +189,8 @@ impl RuntimeError {
             message: message.into(),
             notes: Vec::new(),
             trace: Vec::new(),
+            trail: None,
+            access: None,
         }
     }
 

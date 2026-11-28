@@ -1,0 +1,3 @@
+false
+true
+Err("cannot read \"missing.txt\": file not found")

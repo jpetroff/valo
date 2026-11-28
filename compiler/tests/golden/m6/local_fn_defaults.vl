@@ -1,0 +1,4 @@
+fn area(w: int) -> int:
+    fn scaled(x: int, by: int = w) -> int = x * by
+    scaled(2) + scaled(2, by=10)
+print(area(3))

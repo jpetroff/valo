@@ -1,0 +1,10 @@
+fn inner() -> int ! error = Err("bad port")
+fn middle() -> int ! error:
+    let p = inner() |> context("parsing port")?
+    Ok(p)
+fn outer() -> int ! error:
+    let v = middle() |> context("loading config")?
+    Ok(v)
+print("start")
+outer()?
+print("never")

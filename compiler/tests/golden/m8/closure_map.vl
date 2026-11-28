@@ -1,0 +1,4 @@
+# The lambda passed to map captures a local of the enclosing fn.
+fn scale(xs: list[int], k: int) -> list[int] =
+    map(xs, x => x * k)
+print(scale([1, 2, 3], 10))

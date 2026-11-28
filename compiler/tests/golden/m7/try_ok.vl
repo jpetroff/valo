@@ -1,0 +1,9 @@
+fn parse(s: str) -> int ! error:
+    let n = parse_int(s)
+    if n == none then Err("not a number: {s}") else Ok(n)
+fn sum(a: str, b: str) -> int ! error:
+    let x = parse(a)?
+    let y = parse(b)?
+    Ok(x + y)
+print(sum("2", "3"))
+print(unwrap(sum("2", "3")) * 10)

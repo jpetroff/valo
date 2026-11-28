@@ -27,3 +27,7 @@ rustc-ice-*.txt
 
 # valo compiled bytecode
 *.vlc
+
+# VS Code extension (tooling/vscode): npm packages and packaged extensions
+node_modules/
+*.vsix

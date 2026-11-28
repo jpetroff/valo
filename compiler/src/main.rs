@@ -128,6 +128,24 @@ fn main() -> ExitCode {
             };
         }
     };
+    // The VM nests its dispatch loop when built-ins call back into valo
+    // (`map`, …), so it gets a big stack of its own (M8).
+    let worker = std::thread::Builder::new()
+        .stack_size(valo_vm::vm::VM_STACK_BYTES)
+        .spawn(move || command(cli));
+    match worker.map(|h| h.join()) {
+        Ok(Ok(code)) => code,
+        // A panic was already printed by the panic hook.
+        Ok(Err(_)) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: cannot start the interpreter thread: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run one CLI command.
+fn command(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Run {
             file,

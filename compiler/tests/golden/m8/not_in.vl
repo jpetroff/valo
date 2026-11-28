@@ -1,0 +1,5 @@
+let xs = ["a", "b"]
+print("c" not in xs)
+print("a" not in xs)
+print(not "a" in xs)
+print([1] in [[1], [2]])

@@ -1,0 +1,4 @@
+# A million elements through map and reduce: linear time and memory.
+let xs = map(range(1000000), x => x * 2)
+print(len(xs))
+print(reduce(xs, 0, (acc, x) => acc + x))

@@ -1,0 +1,7 @@
+let describe = (n: int) =>
+    let doubled = n * 2
+    let squared = n * n
+    doubled + squared
+print(describe(3))
+print((x => x * x)(9))
+print((() => 7)())

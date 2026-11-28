@@ -4,7 +4,7 @@ valo is a functional, indentation-based scripting language. Source is compiled
 to bytecode and executed by a register-based virtual machine; Lua 5.x is the
 guiding model for the VM and runtime.
 
-Status: early MVP. Bindings, ints, floats, bools, conditionals, functions, calls, keyword arguments and `print` run, with proper tail calls (milestones M0–M5).
+Status: early MVP. Bindings, ints, floats, bools, conditionals, functions, lambdas and closures, calls, keyword arguments, `_` partial application, strings with `{…}` interpolation, `none`, `Ok`/`Err` with `?`, stdin and file I/O, lists with comprehensions and `map`/`filter`/`reduce` run, with proper tail calls (milestones M0–M8).
 
 File extensions (tentative): source files use `.vl`, compiled bytecode uses `.vlc`.
 
@@ -17,8 +17,12 @@ valo/                      Cargo workspace
 │        │
 │        │ depends on (bytecode types)
 │        ▼
-└── vm/        valo-vm         bytecode format, values, interpreter
-    └── bin: valo-vm           runs precompiled .vlc files
+├── vm/        valo-vm         bytecode format, values, interpreter
+│   └── bin: valo-vm           runs precompiled .vlc files
+└── tooling/                   developer tools (see tooling/README.md)
+    ├── lsp/   valo-lsp        language server: errors as you type in any LSP editor
+    ├── dap/   valo-dap        debug adapter: run/debug .vl files from VS Code (DAP)
+    └── vscode/                VS Code extension: highlighting, LSP client, debugger
 ```
 
 The dependency only goes one way: `valo-vm` never depends on the compiler, so
@@ -27,12 +31,21 @@ like Lua running `luac` output).
 
 ## Status
 
-Milestones M0–M5 of `.memory/plan-mvp.md` are done: `let` bindings with shadowing,
+Milestones M0–M8 of `.memory/plan-mvp.md` are done: `let` bindings with shadowing,
 indented blocks, ints, floats, bools, comparisons (chained), `and`/`or`/`not`,
-`if`/`elif`/`else`, `assert`, top-level `fn` definitions (hoisted, annotated), calls with
+`if`/`elif`/`else`, `assert`, `fn` definitions (hoisted at top level, local `fn`s inside
+blocks, annotated), lambdas (`x => x + 1`, `(a, b) => …`) and closures that capture by
+value, `_` partial application (`add(1, _)`, `x |> sub(10, _)`), calls with
 compile-time argument checks, keyword-only parameters with defaults (`f(x, retries=2)`),
 pipes `|>`, proper tail calls (loops as tail recursion run in constant stack space; deep
-non-tail recursion stops with a clean R0301), and the built-ins `print`, `int`, `float`
+non-tail recursion stops with a clean R0301), strings (`"Hello, {name}!"`, escapes, raw
+`r"…"`, `+`, comparisons), `none`, results with `?` and `context` (an unhandled `Err` prints
+its context chain and where it came from), lists (`[1, 2]`, `xs[i]`, `+`, `x in xs`,
+`x not in xs`, comprehensions `[x * 2 for x in xs if x > 0]`), and the built-ins `print`
+(with `end=`), `int`, `float`, `str`, `str_len`, `trim`, `parse_int`, `parse_float`, `Ok`,
+`Err`, `context`, `is_ok`, `is_err`, `unwrap`, `or_else`, `read_line`, `read_file`,
+`write_file`, `len`, `get`, `range`, `map`, `filter`, `reduce`, `flat_map`, `each`,
+`contains`, `append`, `reverse`, `lines`, `split`, `join`
 run end to end (indentation-aware lexer → Pratt parser → desugaring → name resolver →
 register bytecode → VM with call frames and stack traces).
 
@@ -62,6 +75,19 @@ cargo fmt --check
 
 - `valo-compiler` (`compiler/`): turns `.vl` source into bytecode, and provides the `valo` CLI.
 - `valo-vm` (`vm/`): owns the bytecode format and runtime, and provides the `valo-vm` runner.
+- `valo-lsp` (`tooling/lsp/`): language server built on `valo-compiler`
+  (uses `lsp-server`, `lsp-types`, `serde_json`).
+- `valo-dap` (`tooling/dap/`): debug adapter built on `valo-compiler` and
+  `valo-vm` (uses `serde_json`; the protocol framing is hand-written).
+
+## Editor support
+
+`tooling/` holds a VS Code extension (syntax highlighting, indentation), the
+`valo-lsp` language server (compile errors as you type) and the `valo-dap`
+debug adapter (F5 runs a `.vl` file under the debugger, with breakpoints
+the call stack, stepping, variables, and stopping at runtime errors). Install steps: [tooling/README.md](tooling/README.md); how
+they work: [docs/12-editor-tooling.md](docs/12-editor-tooling.md) and
+[docs/13-debugger.md](docs/13-debugger.md).
 
 ## Planned crates
 
@@ -73,7 +99,7 @@ needs it starts:
 - **imbl**: persistent (immutable, structurally shared) collections for runtime
   lists and maps.
 - **regex**: a regular-expression standard library module.
-- **serde_json**: a JSON standard library module.
+- **serde_json**: a JSON standard library module (already used by `valo-lsp`).
 - **comrak**: Markdown rendering for a standard library module or doc tooling.
 - **ureq**: a blocking HTTP client standard library module.
 - **rustyline / reedline**: line editing for an interactive REPL.

@@ -1,0 +1,7 @@
+error[R0102]: division by zero: 10 // 0
+  --> err_in_callback.vl:4:18
+stack trace (most recent call first):
+  0: <lambda@4:13> at err_in_callback.vl:4:18
+  1: <native map>
+  2: halve_all     at err_in_callback.vl:4:5
+  3: <main>        at err_in_callback.vl:6:7

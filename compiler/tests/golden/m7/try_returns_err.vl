@@ -1,0 +1,8 @@
+fn half(n: int) -> int ! error =
+    if n % 2 == 0 then Ok(n // 2) else Err("odd: {n}")
+fn quarter(n: int) -> int ! error:
+    let h = half(n)?
+    half(h)
+print(quarter(8))
+print(quarter(6))
+print(quarter(5))

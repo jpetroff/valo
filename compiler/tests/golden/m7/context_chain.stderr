@@ -1,0 +1,12 @@
+error[R0601]: unhandled Err: "bad port"
+  --> context_chain.vl:9:1
+  context (outermost first):
+    loading config
+    parsing port
+  origin: inner at context_chain.vl:1:29
+  propagated by `?` in:
+    middle at context_chain.vl:3:13
+    outer at context_chain.vl:6:13
+    <main> at context_chain.vl:9:1
+stack trace (most recent call first):
+  0: <main> at context_chain.vl:9:1

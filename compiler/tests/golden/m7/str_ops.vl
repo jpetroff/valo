@@ -1,0 +1,8 @@
+let s = "ab" + "cd"
+print(s)
+print(s == "abcd")
+print("apple" < "banana")
+print("b" <= "a")
+print(trim("  padded \n"))
+print(str(42) + str(1.0) + str(true))
+assert "x" + "y" == "xy"

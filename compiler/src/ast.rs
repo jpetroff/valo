@@ -10,7 +10,7 @@
 //!
 //! **Textbook chapter:** `docs/04-syntax-analysis.md`.
 //!
-//! ## Structure (M4)
+//! ## Structure (M8)
 //!
 //! ```text
 //! Program { items: Vec<Item> }
@@ -34,6 +34,14 @@
 //!         ::Call { callee, args: Vec<Arg>, piped }   `f(a, k=b)`
 //!         ::Pipe { lhs, rhs }                        `x |> f(a)`; rewritten to a
 //!                                                    `Call` by `desugar.rs`
+//!         ::Lambda(Lambda{params, body, origin})     `x => e`, `(a, b) => e` (M6)
+//!         ::Str(String)                              `"text"` (M7)
+//!         ::Interp(Vec<StrPart>)                     `"a {x} b"`: Text / Expr parts (M7)
+//!         ::None | Try(expr)                         `none`, postfix `e?` (M7)
+//!         ::List(Vec<Expr>) | Index { base, index }  `[a, b]`, `xs[i]` (M8)
+//!         ::In { item, coll, negated }               `x in xs`, `x not in xs` (M8)
+//!         ::Comprehension { elem, clauses }          `[e for x in xs if c]` (M8)
+//!         ::Builtin(id)                              a built-in by id (desugar only)
 //! Arg::Positional(Expr) | Keyword { name, value } | Placeholder (`_`, M6)
 //! TypeExpr { span, kind: TypeKind }      annotations (checked from M10)
 //! ```
@@ -71,6 +79,9 @@ pub struct NodeId(pub u32);
 pub struct Program {
     /// Top-level items in source order.
     pub items: Vec<Item>,
+    /// The next unused `NodeId` (every id in the tree is smaller), so
+    /// `desugar.rs` can create new nodes.
+    pub next_id: u32,
 }
 
 /// A top-level item.
@@ -137,6 +148,47 @@ pub enum Arg {
     },
     /// `f(_)`: placeholder for partial application (S1; M6).
     Placeholder(Span),
+}
+
+/// An anonymous function (S3). The enclosing `Expr`'s id keys the
+/// resolver's capture list for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lambda {
+    /// Parameters (annotations optional, never a default).
+    pub params: Vec<Param>,
+    /// Body; its value is the result.
+    pub body: Expr,
+    /// Written in the source, or made by `desugar.rs` (decides its display
+    /// name, plan D23).
+    pub origin: LambdaOrigin,
+}
+
+/// Where a lambda comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LambdaOrigin {
+    /// Written in the source: named after its `let`, else `<lambda@l:c>`.
+    Source,
+    /// A `_` partial of the named function (or `<expr>`): `<partial f@l:c>`.
+    Partial(String),
+    /// A step of a list comprehension (M8): `<comprehension@l:c>`. A `?`
+    /// directly inside one is E0208.
+    Comprehension,
+}
+
+/// One clause of a list comprehension (S15).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Clause {
+    /// `for var in iter`.
+    For {
+        /// Loop variable (`_` allowed).
+        var: String,
+        /// Its span.
+        var_span: Span,
+        /// The list iterated over.
+        iter: Expr,
+    },
+    /// `if cond`: keep only elements for which `cond` is true.
+    If(Expr),
 }
 
 /// `let name (: type)? = init`.
@@ -243,16 +295,28 @@ pub enum ExprKind {
     /// `assert e`: runtime error R0701 if `e` is false; value `()` (D29).
     Assert(Box<Expr>),
     /// A call `callee(args)` (syntax.md S1). `piped` marks calls made from a
-    /// pipe by `desugar.rs`: their first argument is evaluated before the
-    /// callee (Q17).
+    /// pipe by `desugar.rs`: the argument at that index (the piped value) is
+    /// evaluated before the callee and the other arguments (Q17).
     Call {
         /// The function.
         callee: Box<Expr>,
         /// Arguments in source order.
         args: Vec<Arg>,
-        /// Built from `lhs |> …`.
-        piped: bool,
+        /// Built from `lhs |> …`: index of the piped argument.
+        piped: Option<usize>,
     },
+    /// A lambda `x => e`, `(a, b: int) => e`, `() => e` (syntax.md S3; M6).
+    Lambda(Box<Lambda>),
+    /// A string literal without interpolation (escapes decoded; M7).
+    Str(String),
+    /// The empty value `none` (S9, M7).
+    None,
+    /// Postfix `e?` (S10, M7): the value inside an `Ok`, or return the
+    /// `Err` from the enclosing fn or lambda.
+    Try(Box<Expr>),
+    /// An interpolated string `"a {x} b"` (S12, M7): text and expressions
+    /// in order; each expression is converted to text when it runs.
+    Interp(Vec<StrPart>),
     /// `lhs |> rhs` (S1). Only the parser produces it; `desugar.rs`
     /// rewrites it into a `Call` before name resolution.
     Pipe {
@@ -263,6 +327,39 @@ pub enum ExprKind {
         /// A call (the value becomes its first argument) or any function.
         rhs: Box<Expr>,
     },
+    /// A list literal `[a, b, c]` (S14, M8).
+    List(Vec<Expr>),
+    /// `base[index]` (S14, M8).
+    Index {
+        /// The indexed value.
+        base: Box<Expr>,
+        /// The index.
+        index: Box<Expr>,
+    },
+    /// `item in coll` / `item not in coll` (S14, M8); `desugar.rs` turns it
+    /// into a call of the `contains` built-in.
+    In {
+        /// Span of `in` (or `not in`).
+        op_span: Span,
+        /// The value looked for (evaluated first).
+        item: Box<Expr>,
+        /// The list or str searched.
+        coll: Box<Expr>,
+        /// `not in`.
+        negated: bool,
+    },
+    /// `[elem for x in xs if c …]` (S15, M8); `desugar.rs` turns it into
+    /// `map`/`filter`/`flat_map` calls. The first clause is a `For`.
+    Comprehension {
+        /// The element expression.
+        elem: Box<Expr>,
+        /// Clauses in source order.
+        clauses: Vec<Clause>,
+    },
+    /// The built-in `NATIVES[id]`, whatever its name is bound to (only made
+    /// by `desugar.rs`, so user code that shadows `map` cannot break a
+    /// comprehension; plan D14).
+    Builtin(u16),
     /// Prefix operator.
     Unary {
         /// Operator.
@@ -281,6 +378,15 @@ pub enum ExprKind {
         /// Right operand.
         rhs: Box<Expr>,
     },
+}
+
+/// A piece of an interpolated string.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrPart {
+    /// Literal text.
+    Text(String),
+    /// `{expr}`.
+    Expr(Expr),
 }
 
 /// One `op operand` step of a comparison chain.
@@ -389,13 +495,46 @@ impl fmt::Display for Expr {
                 args,
                 piped,
             } => {
-                write!(f, "({} {callee}", if *piped { "pcall" } else { "call" })?;
+                write!(
+                    f,
+                    "({} {callee}",
+                    if piped.is_some() { "pcall" } else { "call" }
+                )?;
                 for a in args {
                     write!(f, " {a}")?;
                 }
                 f.write_str(")")
             }
             ExprKind::Pipe { lhs, rhs, .. } => write!(f, "(|> {lhs} {rhs})"),
+            ExprKind::Str(text) => write!(f, "{text:?}"),
+            ExprKind::None => f.write_str("none"),
+            ExprKind::Try(e) => write!(f, "(? {e})"),
+            ExprKind::Interp(parts) => {
+                f.write_str("(interp")?;
+                for p in parts {
+                    match p {
+                        StrPart::Text(t) => write!(f, " {t:?}")?,
+                        StrPart::Expr(e) => write!(f, " {e}")?,
+                    }
+                }
+                f.write_str(")")
+            }
+            ExprKind::Lambda(l) => {
+                f.write_str("(lambda ")?;
+                match &l.origin {
+                    LambdaOrigin::Source => {}
+                    LambdaOrigin::Partial(n) => write!(f, "partial:{n} ")?,
+                    LambdaOrigin::Comprehension => f.write_str("comp ")?,
+                }
+                f.write_str("(")?;
+                for (i, p) in l.params.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(f, "{p}")?;
+                }
+                write!(f, ") {})", l.body)
+            }
             ExprKind::Not(e) => write!(f, "(not {e})"),
             ExprKind::Logic { op, lhs, rhs, .. } => {
                 let op = match op {
@@ -434,6 +573,40 @@ impl fmt::Display for Expr {
                 operand,
             } => write!(f, "(neg {operand})"),
             ExprKind::Binary { op, lhs, rhs, .. } => write!(f, "({} {lhs} {rhs})", op.as_str()),
+            ExprKind::List(items) => {
+                f.write_str("(list")?;
+                for i in items {
+                    write!(f, " {i}")?;
+                }
+                f.write_str(")")
+            }
+            ExprKind::Index { base, index } => write!(f, "(index {base} {index})"),
+            ExprKind::In {
+                item,
+                coll,
+                negated,
+                ..
+            } => write!(
+                f,
+                "({} {item} {coll})",
+                if *negated { "not-in" } else { "in" }
+            ),
+            ExprKind::Comprehension { elem, clauses } => {
+                write!(f, "(comp {elem}")?;
+                for c in clauses {
+                    match c {
+                        Clause::For { var, iter, .. } => write!(f, " (for {var} {iter})")?,
+                        Clause::If(cond) => write!(f, " (if {cond})")?,
+                    }
+                }
+                f.write_str(")")
+            }
+            ExprKind::Builtin(id) => {
+                let name = valo_vm::builtins::NATIVES
+                    .get(*id as usize)
+                    .map_or("?", |n| n.name);
+                write!(f, "(builtin {name})")
+            }
         }
     }
 }

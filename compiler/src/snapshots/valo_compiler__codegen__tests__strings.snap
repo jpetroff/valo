@@ -1,0 +1,29 @@
+---
+source: compiler/src/codegen.rs
+expression: "disasm(\"let n = 2\\nprint(\\\"a\\\")\\nprint(\\\"n = {n}, next {n + 1}, a\\\")\")"
+---
+function <main> arity=0 regs=7 consts=4 protos=0   ; t.vl:1:1
+  0000  [1:9]   LOADI     0 2
+  0001  [1:5]   SETGLOBAL 0 32     ; n
+  0002  [2:1]   GETGLOBAL 0 0      ; print
+  0003  [2:7]   LOADK     1 0      ; "a"
+  0004  [2:1]   CALL      0 1
+  0005  [2:1]   TRY       0 0 1
+  0006  [3:1]   GETGLOBAL 0 0      ; print
+  0007  [3:7]   LOADK     2 1      ; "n = "
+  0008  [3:13]  GETGLOBAL 3 32     ; n
+  0009  [3:7]   LOADK     4 2      ; ", next "
+  0010  [3:23]  GETGLOBAL 5 32     ; n
+  0011  [3:27]  LOADI     6 1
+  0012  [3:23]  ADD       5 5 6
+  0013  [3:7]   LOADK     6 3      ; ", a"
+  0014  [3:7]   CONCAT    1 2 5
+  0015  [3:1]   CALL      0 1
+  0016  [3:1]   TRY       0 0 1
+  0017  [3:34]  LOADUNIT  0
+  0018  [3:34]  RETURN    0
+constants:
+  0  str "a"
+  1  str "n = "
+  2  str ", next "
+  3  str ", a"
