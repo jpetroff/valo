@@ -1,0 +1,15 @@
+[E0207] Error: fn `f` is defined twice
+   ╭─[ dup_fn.vl:2:4 ]
+   │
+ 2 │ fn f() -> int = 2
+   │    ┬  
+   │    ╰── second definition
+   │
+   ├─[ dup_fn.vl:2:4 ]
+   │
+ 1 │ fn f() -> int = 1
+   │    ┬  
+   │    ╰── first defined here
+   │ 
+   │ Help: top-level fns are visible in the whole file, so each name can be defined only once; rename one of them
+───╯

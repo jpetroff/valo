@@ -1,0 +1,5 @@
+print(int(-2.7))
+print(int(3))
+print(float(3))
+print(float(0.5))
+print(int(1e308 * 10.0))

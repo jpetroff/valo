@@ -1,0 +1,15 @@
+[E0424] Error: `run` has no parameter named `timeuot`
+   ╭─[ unknown_kw.vl:2:14 ]
+   │
+ 2 │ print(run(1, timeuot=5))
+   │              ───┬───  
+   │                 ╰───── unknown keyword
+   │
+   ├─[ unknown_kw.vl:2:14 ]
+   │
+ 1 │ fn run(cmd: int, timeout: int = 30, retries: int = 0) -> int = cmd
+   │    ─┬─  
+   │     ╰─── defined here
+   │ 
+   │ Help: did you mean `timeout`?
+───╯

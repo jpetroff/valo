@@ -1,0 +1,27 @@
+---
+source: compiler/src/resolve.rs
+expression: "resolve_src(\"let a = twice(2)\\nfn twice(x: int) -> int = x * 2\\n\\\n                 fn scaled(x: int) -> int = x * limit\\nlet limit = 10\\n\\\n                 fn inc(x: int) -> int = x + 1\\nlet inc2 = inc\\nlet inc = 5\\nprint(inc2(inc))\").unwrap()"
+---
+natives: global#0..#2 (print int float)
+globals:
+  global#3   a            1:5
+  global#4   twice        2:4     fn
+  global#5   scaled       3:4     fn
+  global#6   limit        4:5
+  global#7   inc          5:4     fn
+  global#8   inc2         6:5
+  global#9   inc          7:5
+locals:
+  local#0   x            2:10
+  local#1   x            3:11
+  local#2   x            5:8
+uses:
+  1:9     twice -> global#4
+  2:27    x -> local#0
+  3:28    x -> local#1
+  3:32    limit -> global#6
+  5:25    x -> local#2
+  6:12    inc -> global#7
+  8:1     print -> global#0
+  8:7     inc2 -> global#8
+  8:12    inc -> global#9

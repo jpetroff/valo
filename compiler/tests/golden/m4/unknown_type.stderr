@@ -1,0 +1,9 @@
+[E0402] Error: unknown type `integer`
+   ╭─[ unknown_type.vl:1:13 ]
+   │
+ 1 │ fn grade(p: integer) -> int = 1
+   │             ───┬───  
+   │                ╰───── not a type
+   │ 
+   │ Help: the types are int, float, bool, str, none, any, error, list[T], dict[K, V], tuple[…]
+───╯

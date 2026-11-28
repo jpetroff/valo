@@ -1,0 +1,4 @@
+fn scale(x: int, by: int = 2, offset: int = 0) -> int = x * by + offset
+
+5 |> scale |> print
+5 |> scale(offset=1) |> scale(by=10) |> print

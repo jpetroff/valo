@@ -1,0 +1,3 @@
+fn greet(n: int, times: int = 3) -> int = n * times
+fn apply(f: (int) -> int, x: int) -> int = f(x, times=2)
+print(apply(greet, 7))

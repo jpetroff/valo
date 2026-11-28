@@ -1,0 +1,4 @@
+error[R0202]: cannot call a value of type int
+  --> not_callable.vl:2:7
+stack trace (most recent call first):
+  0: <main> at not_callable.vl:2:7

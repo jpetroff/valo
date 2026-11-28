@@ -1,0 +1,41 @@
+---
+source: compiler/src/codegen.rs
+expression: "disasm(\"fn f(a: int, b: int = 1, c: int = a * 2) -> int = a + b + c\\n\\\n             f(1, c=3, b=4)\\nf(1, c=3)\\nf(1)\\n5 |> f(b=0)\")"
+---
+function <main> arity=0 regs=4 consts=0 protos=1   ; t.vl:1:1
+  0000  [1:4]   CLOSURE   0 0      ; <fn f/3>
+  0001  [1:4]   SETGLOBAL 0 3      ; f
+  0002  [2:1]   GETGLOBAL 0 3      ; f
+  0003  [2:3]   LOADI     1 1
+  0004  [2:8]   LOADI     3 3
+  0005  [2:13]  LOADI     2 4
+  0006  [2:1]   CALL      0 3
+  0007  [3:1]   GETGLOBAL 0 3      ; f
+  0008  [3:3]   LOADI     1 1
+  0009  [3:8]   LOADI     3 3
+  0010  [3:1]   LOADMISSING 2
+  0011  [3:1]   CALL      0 3
+  0012  [4:1]   GETGLOBAL 0 3      ; f
+  0013  [4:3]   LOADI     1 1
+  0014  [4:1]   CALL      0 1
+  0015  [5:1]   LOADI     1 5
+  0016  [5:6]   GETGLOBAL 0 3      ; f
+  0017  [5:10]  LOADI     2 0
+  0018  [5:1]   CALL      0 2
+  0019  [5:12]  LOADUNIT  0
+  0020  [5:12]  RETURN    0
+constants: (none)
+  function f arity=3 required=1 regs=5 consts=0 protos=0   ; t.vl:1:4
+    0000  [1:14]  JMPIFSET  1 1      ; to 2 if passed
+    0001  [1:23]  LOADI     1 1
+    0002  [1:26]  JMPIFSET  2 3      ; to 6 if passed
+    0003  [1:35]  MOVE      2 0
+    0004  [1:39]  LOADI     3 2
+    0005  [1:35]  MUL       2 2 3
+    0006  [1:51]  MOVE      3 0
+    0007  [1:55]  MOVE      4 1
+    0008  [1:51]  ADD       3 3 4
+    0009  [1:59]  MOVE      4 2
+    0010  [1:51]  ADD       3 3 4
+    0011  [1:51]  RETURN    3
+  constants: (none)

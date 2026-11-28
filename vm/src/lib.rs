@@ -16,7 +16,7 @@
 //! | [`vm`]          | the interpreter loop (`Vm`), arithmetic semantics                | 07-virtual-machine |
 //! | [`host`]        | the door to the outside world (`Host`, `StdHost`, `TestHost`)    | 07-virtual-machine |
 //! | [`error`]       | runtime errors (`RuntimeError`, `ErrorKind`, `R####` codes)      | 08-errors-and-diagnostics |
-//! | [`builtins`]    | native functions (empty until M4)                                | 11-roadmap |
+//! | [`builtins`]    | native functions (`print`, `int`, `float`)                       | 07-virtual-machine |
 //! | `bin/valo-vm.rs`| standalone bytecode runner (placeholder until M11)               | 09-driver-and-cli |
 //!
 //! ## Comment conventions used in every source file

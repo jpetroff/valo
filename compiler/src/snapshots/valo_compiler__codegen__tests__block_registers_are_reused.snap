@@ -2,7 +2,7 @@
 source: compiler/src/codegen.rs
 expression: d
 ---
-function <main> arity=0 regs=4 consts=0   ; t.vl:1:1
+function <main> arity=0 regs=4 consts=0 protos=0   ; t.vl:1:1
   0000  [1:4]   LOADBOOL  0 1
   0001  [1:4]   TEST      0 0
   0002  [1:4]   JMP       6        ; to 9

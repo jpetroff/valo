@@ -1,0 +1,7 @@
+# The piped value is evaluated before the callee and the other arguments.
+fn show(x: int) -> int:
+    print(x)
+    x
+
+fn sub(a: int, b: int) -> int = a - b
+print(show(1) |> sub(show(2)))

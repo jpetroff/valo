@@ -7,8 +7,8 @@
 //! ## The pipeline (plan §1.1)
 //!
 //! ```text
-//!  source text ──lexer──▶ tokens ──parser──▶ AST ──resolve──▶ (names) ──codegen──▶ Program
-//!   span.rs      lexer.rs  token.rs  parser.rs ast.rs  resolve.rs           codegen.rs   (valo_vm)
+//!  source text ──lexer──▶ tokens ──parser──▶ AST ──desugar──▶ AST ──resolve──▶ (names) ──codegen──▶ Program
+//!   span.rs      lexer.rs  token.rs  parser.rs ast.rs desugar.rs     resolve.rs           codegen.rs   (valo_vm)
 //!                   └──────────── errors: diagnostic.rs (Diagnostic, E#### codes) ───────────┘
 //! ```
 //!
@@ -25,6 +25,7 @@
 //! | [`lexer`]         | text → tokens, indentation → INDENT/DEDENT                    | 03-lexical-analysis |
 //! | [`ast`]           | syntax tree (`Program`, `Item`, `Expr`, `BinOp`)              | 04-syntax-analysis |
 //! | [`parser`]        | tokens → AST (recursive descent + Pratt)                     | 04-syntax-analysis |
+//! | [`desugar`]       | rewrites pipes into calls                                    | 04-syntax-analysis |
 //! | [`resolve`]       | names and scopes: which binding a name refers to             | 11-roadmap |
 //! | [`codegen`]       | AST → register bytecode                                      | 06-code-generation |
 //! | [`diagnostic`]    | error type and pretty printing                               | 08-errors-and-diagnostics |
@@ -36,6 +37,7 @@
 
 pub mod ast;
 pub mod codegen;
+pub mod desugar;
 pub mod diagnostic;
 pub mod lexer;
 pub mod parser;
@@ -76,11 +78,11 @@ pub fn parse_source(sm: &SourceMap) -> Result<ast::Program, Vec<Diagnostic>> {
     Ok(program)
 }
 
-/// Lex, parse and resolve names (used by `--dump resolved`).
+/// Lex, parse, desugar and resolve names (used by `--dump resolved`).
 pub fn resolve_source(
     sm: &SourceMap,
 ) -> Result<(ast::Program, resolve::Resolved), Vec<Diagnostic>> {
-    let program = parse_source(sm)?;
+    let program = desugar::desugar(parse_source(sm)?);
     let resolved = resolve::resolve(&program)?;
     Ok((program, resolved))
 }

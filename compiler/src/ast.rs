@@ -10,15 +10,18 @@
 //!
 //! **Textbook chapter:** `docs/04-syntax-analysis.md`.
 //!
-//! ## Structure (M3)
+//! ## Structure (M4)
 //!
 //! ```text
 //! Program { items: Vec<Item> }
 //! Item::Expr(Expr)                       an expression line
 //!     ::Let(Binding)                     `let name (: type)? = init`
+//!     ::Fn(FnDef)                        `fn name[T](p: type, …) -> type: body`
 //! Binding { id, name, name_span, ann: Option<TypeExpr>, init: Expr }
+//! FnDef { id, name, type_params, params: Vec<Param>, ret, body: Expr, span }
+//! Param { id, name, span, ann: Option<TypeExpr>, default: Option<Expr> }
 //! Expr { id: NodeId, span: Span, kind: ExprKind }
-//! ExprKind::Int(i64) | Float(f64) | Bool(bool)
+//! ExprKind::Int(i64) | Float(f64) | Bool(bool) | Unit
 //!         ::Name(String)                 a reference to a binding
 //!         ::Unary  { op: UnaryOp, operand }          `-x`
 //!         ::Not(operand)                             `not x`
@@ -28,6 +31,10 @@
 //!         ::If { cond, then_br, else_br }            both forms; `elif` = nested If
 //!         ::Block(Vec<Item>)                         indented block; last item is an Expr
 //!         ::Assert(expr)                             `assert e`, value `()`
+//!         ::Call { callee, args: Vec<Arg>, piped }   `f(a, k=b)`
+//!         ::Pipe { lhs, rhs }                        `x |> f(a)`; rewritten to a
+//!                                                    `Call` by `desugar.rs`
+//! Arg::Positional(Expr) | Keyword { name, value } | Placeholder (`_`, M6)
 //! TypeExpr { span, kind: TypeKind }      annotations (checked from M10)
 //! ```
 //!
@@ -74,6 +81,62 @@ pub enum Item {
     Expr(Expr),
     /// An immutable binding (syntax.md S5).
     Let(Binding),
+    /// A named function definition (syntax.md S2).
+    Fn(FnDef),
+}
+
+/// `fn name[T, …](params) -> ret` followed by `: body` or `= expr`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnDef {
+    /// Node id; the resolver records the function's global slot under it.
+    pub id: NodeId,
+    /// Function name.
+    pub name: String,
+    /// Span of the name.
+    pub name_span: Span,
+    /// Declared type variables (S20), with their spans.
+    pub type_params: Vec<(String, Span)>,
+    /// Parameters in order.
+    pub params: Vec<Param>,
+    /// Return type. Required (S13); `None` only after E0410 was reported.
+    pub ret: Option<TypeExpr>,
+    /// Body; its value is the function's result.
+    pub body: Expr,
+    /// From `fn` to the end of the body.
+    pub span: Span,
+}
+
+/// One function parameter `name: type (= default)?`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Param {
+    /// Node id; the resolver records the parameter's local binding under it.
+    pub id: NodeId,
+    /// Name.
+    pub name: String,
+    /// Span of the name.
+    pub span: Span,
+    /// Type. Required (S13); `None` only after E0410 was reported.
+    pub ann: Option<TypeExpr>,
+    /// Default value (keyword-only parameter, S19; M4b).
+    pub default: Option<Expr>,
+}
+
+/// One argument of a call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Arg {
+    /// `f(x)`.
+    Positional(Expr),
+    /// `f(name=x)` (S19; M4b).
+    Keyword {
+        /// Parameter name.
+        name: String,
+        /// Span of the name.
+        name_span: Span,
+        /// Value.
+        value: Expr,
+    },
+    /// `f(_)`: placeholder for partial application (S1; M6).
+    Placeholder(Span),
 }
 
 /// `let name (: type)? = init`.
@@ -139,6 +202,8 @@ pub enum ExprKind {
     Float(f64),
     /// `true` / `false`.
     Bool(bool),
+    /// The unit value `()`.
+    Unit,
     /// A name reference (resolved by `resolve.rs`).
     Name(String),
     /// `not x` (bool only).
@@ -177,6 +242,27 @@ pub enum ExprKind {
     Block(Vec<Item>),
     /// `assert e`: runtime error R0701 if `e` is false; value `()` (D29).
     Assert(Box<Expr>),
+    /// A call `callee(args)` (syntax.md S1). `piped` marks calls made from a
+    /// pipe by `desugar.rs`: their first argument is evaluated before the
+    /// callee (Q17).
+    Call {
+        /// The function.
+        callee: Box<Expr>,
+        /// Arguments in source order.
+        args: Vec<Arg>,
+        /// Built from `lhs |> …`.
+        piped: bool,
+    },
+    /// `lhs |> rhs` (S1). Only the parser produces it; `desugar.rs`
+    /// rewrites it into a `Call` before name resolution.
+    Pipe {
+        /// Span of the `|>` token.
+        op_span: Span,
+        /// The value fed in.
+        lhs: Box<Expr>,
+        /// A call (the value becomes its first argument) or any function.
+        rhs: Box<Expr>,
+    },
     /// Prefix operator.
     Unary {
         /// Operator.
@@ -296,7 +382,20 @@ impl fmt::Display for Expr {
             ExprKind::Int(n) => write!(f, "{n}"),
             ExprKind::Float(x) => write!(f, "{x:?}"),
             ExprKind::Bool(b) => write!(f, "{b}"),
+            ExprKind::Unit => f.write_str("()"),
             ExprKind::Name(n) => f.write_str(n),
+            ExprKind::Call {
+                callee,
+                args,
+                piped,
+            } => {
+                write!(f, "({} {callee}", if *piped { "pcall" } else { "call" })?;
+                for a in args {
+                    write!(f, " {a}")?;
+                }
+                f.write_str(")")
+            }
+            ExprKind::Pipe { lhs, rhs, .. } => write!(f, "(|> {lhs} {rhs})"),
             ExprKind::Not(e) => write!(f, "(not {e})"),
             ExprKind::Logic { op, lhs, rhs, .. } => {
                 let op = match op {
@@ -375,11 +474,60 @@ impl fmt::Display for TypeExpr {
     }
 }
 
+impl fmt::Display for Arg {
+    /// `x`, `name=x` or `_`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Arg::Positional(e) => write!(f, "{e}"),
+            Arg::Keyword { name, value, .. } => write!(f, "{name}={value}"),
+            Arg::Placeholder(_) => f.write_str("_"),
+        }
+    }
+}
+
+impl fmt::Display for Param {
+    /// `(x : int)`, `(x : int = 1)`, `(x)` when the type is missing.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({}", self.name)?;
+        if let Some(t) = &self.ann {
+            write!(f, " : {t}")?;
+        }
+        if let Some(d) = &self.default {
+            write!(f, " = {d}")?;
+        }
+        f.write_str(")")
+    }
+}
+
+impl fmt::Display for FnDef {
+    /// `(fn name [T] ((x : int)) -> int body)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(fn {}", self.name)?;
+        if !self.type_params.is_empty() {
+            let names: Vec<&str> = self.type_params.iter().map(|(n, _)| n.as_str()).collect();
+            write!(f, " [{}]", names.join(" "))?;
+        }
+        f.write_str(" (")?;
+        for (i, p) in self.params.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{p}")?;
+        }
+        f.write_str(")")?;
+        if let Some(r) = &self.ret {
+            write!(f, " -> {r}")?;
+        }
+        write!(f, " {})", self.body)
+    }
+}
+
 impl fmt::Display for Item {
-    /// `(expr …)` or `(let name : type init)`.
+    /// `(expr …)`, `(let name : type init)` or `(fn …)`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Item::Expr(e) => write!(f, "(expr {e})"),
+            Item::Fn(d) => write!(f, "{d}"),
             Item::Let(b) => match &b.ann {
                 Some(t) => write!(f, "(let {} : {t} {})", b.name, b.init),
                 None => write!(f, "(let {} {})", b.name, b.init),

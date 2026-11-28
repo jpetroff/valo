@@ -88,8 +88,8 @@ isJ  |                 sJ (i24, 2's complement)      |    opcode     |
 | NOT A B | ABC | R[A] = !R[B] (Bool only) | M3 |
 | TEST A B | ABC | Bool required (R0203); if R[A] != Bool(B) then pc++ (next instr is the JMP taken when R[A]==B; Lua TEST A k) | M3 |
 | JMP sJ | sJ | pc += sJ | M3 |
-| CALL A B | ABC | R[A] = R[A](R[A+1..=A+B]); B = nargs ≥ 0; must satisfy `required ≤ B ≤ arity` else R0207; VM pads missing trailing params with Missing (M4b) | M4 |
-| TAILCALL A B | ABC | as CALL, reusing current frame | M5 |
+| CALL A B | AB | R[A] = R[A](R[A+1..=A+B]); B = nargs ≥ 0; must satisfy `required ≤ B ≤ arity` else R0207; VM pads missing trailing params with Missing (M4b) | M4 |
+| TAILCALL A B | AB | as CALL, reusing current frame | M5 |
 | CLOSURE A Bx | ABx | R[A] = closure(protos[Bx]) capturing per `upvals` (D5) | M4 (captures: M6) |
 | GETUPVAL A B | ABC | R[A] = captures[B] | M6 |
 | GETSELF A | ABC | R[A] = current closure (stack[base-1]) — local self-recursion | M6 |
@@ -279,8 +279,8 @@ constants: (none)
 | range | stage | MVP codes |
 |---|---|---|
 | E00xx | lexer | E0001 unexpected character, E0002 Int literal out of range, E0003 inconsistent dedent, E0004 unterminated string, E0005 invalid escape, E0006 tab/space mix (per syntax.md), E0007 unterminated interpolation (missing `}`), E0008 empty interpolation `{}`, E0009 reserved syntax not supported yet (backtick cmd, `re"…"`, `=~`; also used by parser/codegen for constructs of later milestones), E0010 malformed number literal (leading zeros, bad `_`, bad suffix) |
-| E01xx | parser | E0101 unexpected token / expected X, E0102 `if` without `else`, E0103 unclosed delimiter, E0104 block ends with a `let` binding, E0105 expression nested too deeply |
-| E02xx | resolve | E0201 undefined name (+did-you-mean), E0202 (retired: same-scope rebinding is allowed per Q7=b; keep code unused), E0203 top-level use before definition, E0204 local mutual recursion unsupported (Q16), E0205 wrong number of arguments to known fn (+hint `f(a, _)` partial), E0206 `_` placeholder outside a direct call argument |
+| E01xx | parser | E0101 unexpected token / expected X, E0102 `if` without `else`, E0103 unclosed delimiter, E0104 block ends with a `let` binding (or `fn` definition), E0105 expression nested too deeply |
+| E02xx | resolve | E0201 undefined name (+did-you-mean), E0202 (retired: same-scope rebinding is allowed per Q7=b; keep code unused), E0203 top-level use before definition, E0204 local mutual recursion unsupported (Q16), E0205 wrong number of arguments to known fn (+hint `f(a, _)` partial), E0206 `_` placeholder outside a direct call argument (M2–M4: `_` read as a value), E0207 defined twice (top-level fn, parameter, type variable; M4) |
 | E03xx | codegen | E0301 limit exceeded (registers/consts/jump/list literal >255 elems) |
 | E04xx | types | E0401 literal does not match annotation, E0402 unknown type name, E0403 malformed type, E0410 missing fn param/return annotation (`parameter p of fn grade needs a type annotation, e.g. p: int`) |
 | E042x | arguments | E0421 defaulted param passed positionally (`timeout has a default and must be passed by name: timeout=5`), E0422 keyword args to a non-static callee, E0423 required param after defaulted param, E0424 unknown keyword (+did-you-mean), E0425 duplicate keyword; post-MVP: E0420 positional record construction |
@@ -401,7 +401,17 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q30: `assert` in non-test code — (a) yes from M3, R0701 (b) only in `test` blocks (post-MVP). Default (a).
 > Q20: division/modulo by zero — (a) R0102 for Int and Float (Python) (b) R0102 for Int, IEEE inf/NaN for Float. Default (a).
 
-### M4 — Functions, calls, frames, natives, print
+### M4 — Functions, calls, frames, natives, print — DONE 2026-11-27
+
+- Implementation notes (branch `m4-m5`):
+  - User decisions: top-level fn/let names follow the Rust item rule (fn hoisted and visible in the whole file; a later `let` shadows it from its line on; two top-level fns with one name → new E0207, also used for duplicate params/type vars). A fn body sees the top-level binding in effect where the fn is written, else the first later `let` of that name (forward reference → R0302 at runtime if read too early). All global slots are numbered in a resolver pre-pass: natives `0..N`, then top-level fns and lets in source order.
+  - Pipe desugaring lives in a new `compiler/src/desugar.rs` (between parse and resolve); `--dump ast` shows the pre-desugar tree (`|>` nodes), desugared calls print as `pcall`. `x |> (y |> f)` calls the computed function with `x`.
+  - Codegen call protocol: the whole window `[base, base+n]` is reserved before evaluation, so a piped argument is evaluated before the callee (Q17) and M4b keyword args can go straight into their slots. `base = dst` when dst is the top register.
+  - VM: `Frame.closure: Rc<Closure>` (main too); RETURN truncates the stack to the caller's window (frees callee values at once); MAX_FRAMES/MAX_STACK → R0301 already checked in CALL (golden in M5). Natives: `NativeDef { name, params: &[ParamSpec], effect, f }`, args moved off the stack; `int`/`float` accept their own type unchanged, other types R0206. Functions compared with `==` → R0205. `StdHost` buffers stdout (`BufWriter`), flushed before stderr writes and by the CLI after `run`.
+  - E0205 help names the params: "use a partial: `add(a, _)`". E0402 suggests a type-var declaration only for capitalised names inside a fn, else lists the known types. Type namespace: `int float bool str none any error`, `list[1]`, `dict[2]`, `tuple[1+]`; E0403 for wrong type-arg counts or a generic used bare. `let` annotations are checked too.
+  - Keyword args and `_` arguments are parsed (`Arg::{Keyword, Placeholder}`) and rejected with E0009 by the resolver until M4b/M6; nested `fn` → E0009 until M6. Trailing commas allowed in params/args; `()` is a unit expression; `fn … =` body may continue on one indented line.
+  - Disasm header gains `protos=N`; nested protos print indented after their parent's constants; resolved dump prints the natives on one line and marks fn globals. Existing snapshots changed only by these and by global indices shifting by 3 (natives).
+  - Test change vs. the plan: `m4/fact_overflow` overflows in the *outermost* multiplication, so its trace has 2 entries, not 21; the deep trace is covered by the new `m4/deep_trace` (error at the bottom of a 20-deep recursion → 22 entries; re-blessed in M5 when truncation lands). Extra goldens: `global_uninit`, `dup_fn`, `let_shadows_fn`, `conversions`.
 
 - Goal: top-level named functions (arity ≥ 0), arity-exact calls (static + dynamic check), native registry, real output via `print`, pipe into calls; multi-frame runtime traces.
 - Blocks: function definition (top-level, named, 0..n params, param + return annotations REQUIRED per S13, optional type params `[T, …]` (PEP 695, S20; declared before use, undeclared type name → E0402; outer-shape checking only, M10)), call (incl. nullary), pipe (first-argument form only; placeholder form in M6), Unit literal.
@@ -427,7 +437,15 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q14: RESOLVED hybrid (S16) — prelude flat (`print len map filter reduce flat_map range get int float str Ok Err context …`), everything else module-qualified once imports exist (post-MVP). See Q25 for non-prelude builtins in MVP.
 > Q15: RESOLVED (a) — unit displays `()` (syntax.md S9); functions `<fn f/n>`.
 
-### M4b — Keyword arguments and defaults
+### M4b — Keyword arguments and defaults — DONE 2026-11-27
+
+- Implementation notes (branch `m4-m5`):
+  - Resolver `plan_call` produces `Resolved::calls: NodeId → CallPlan { slots: Vec<Slot::{Arg(i), Missing}> }` for every call to a known signature (natives and fns share `Sig { params: Vec<(name, has_default)> }`). Trailing omitted slots are dropped: CALL passes fewer args and the VM pads `Missing`; gaps get `LOADMISSING`. Codegen evaluates args in source order straight into their declaration-order slots (window reserved first), so `f(c=show(3), b=show(2))` prints 3 then 2.
+  - User decision: a required param passed by name → E0424 "pass `x` by position" (S19 provisional item deferred); it counts as supplied so E0205 is not reported twice. E0421 per positional arg landing on a defaulted param; E0205 only for missing required / too many positional; E0425 shows both occurrences; E0422 on every keyword arg of a dynamic call.
+  - Defaults are resolved param by param (a default sees only earlier params) and compiled callee-side: `JMPIFSET i +n; <default → Ri>` per defaulted param (sBx offset, E0301 beyond 32767 instrs). `Proto.required`; disasm adds `required=K` only when K ≠ arity; JMPIFSET comment `; to N if passed`.
+  - `Value::Missing` displays `<missing>` (only visible via `--trace-exec`; no debug_assert so tracing a prologue cannot panic). Natives get `args` padded with `Missing` to `params.len()`.
+  - Native keyword default (`print(x, end="\n")`) deferred to M7 (needs Str); the native path is the same `Sig` path (unit test: `print(1, end=2)` → E0424).
+  - Extra goldens: `kw_order` (source-order evaluation), `kw_required` (E0424).
 
 - Goal: S19 call protocol (D28) for user fns and natives; may merge into M4 if small.
 - Blocks: parameter default, keyword argument at call site.
@@ -445,7 +463,14 @@ Format per milestone: Goal · Blocks · Tasks (by module) · Opcodes · Data · 
 > Q26: positional overloads on natives (`range(n)` / `range(a, b)`) — (a) keep arity ranges as a native-only exception (b) `range(stop, start=0)`-style keyword default (breaks Python reading) (c) two natives (`range`, `range_from`). Default (a).
 > Q27: dynamic calls omitting defaulted params — (a) allowed, VM pads Missing (b) dynamic calls must supply every param positionally. Default (a).
 
-### M5 — Recursion depth and proper tail calls
+### M5 — Recursion depth and proper tail calls — DONE 2026-11-27
+
+- Implementation notes (branch `m4-m5`):
+  - Codegen: `FuncState::expr_at(e, dst, tail)`; tail positions = fn body, both `if` branches in tail position, last line of a block in tail position. TAILCALL emits no trailing MOVE (dead code); the function's final `RETURN dst` stays for non-call branches.
+  - VM: `tail_call` moves callee+args to `base-1..`, truncates the stack to `base+nargs`, resizes to the new window, pads `Missing` (M4b defaults work through tail calls), replaces `frame.closure`, `tail_calls += 1`. Native in tail position: CALL path then shared `do_return`. MAX_FRAMES/MAX_STACK checks were already in CALL (M4); R0301 carries a `help:` note about accumulators.
+  - Trace rendering (in `diagnostic.rs`, VM keeps the full trace): `(... N tail calls elided ...)` under the frame; > 15 entries → first 10, `... N frames omitted ...`, last 5; trace indices are right-aligned to the widest index (existing short traces unchanged).
+  - Goldens: no strings yet, so `m5/countdown` prints `0` instead of `done`; extra `m5/tail_native`. `m4/deep_trace` re-blessed (truncated). All m5 goldens together take ~1.5 s in a debug build.
+  - Memory check (release, max RSS via getrusage): countdown 10^3 → 9.9 MB, 10^7 → 9.6 MB (0.54 s); non-tail depth 150 000 → 14.3 MB.
 
 - Goal: loops via tail recursion in O(1) stack; clean overflow error for deep non-tail recursion.
 - Blocks: tail position (no new syntax).

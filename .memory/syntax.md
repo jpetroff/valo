@@ -241,6 +241,17 @@ Global style: Python-like, indentation blocks (INDENT/DEDENT/NEWLINE), no `;`, s
 - `let _ = expr` evaluates and discards; `_` used as a value is an error (E0206).
 - `assert expr` is an expression of type `()` usable anywhere an expression is (plan D29).
 
+## Implementation notes from M4–M5 (PROVISIONAL unless marked user-confirmed)
+- USER-CONFIRMED: a top-level `fn` is visible in the whole file (hoisted); a later top-level `let` of the same name shadows it from that line on; two top-level `fn`s with the same name are an error (E0207).
+- USER-CONFIRMED: a fn body sees the top-level binding in effect where the `fn` is written; if there is none yet, the first later `let` of that name (forward reference; reading it before it runs is a runtime error).
+- USER-CONFIRMED (for now): required params cannot be passed by name (S19 provisional item deferred); a keyword naming a required param is an error with the hint "pass `x` by position".
+- Trailing commas allowed in parameter lists, argument lists and type-variable lists (Python).
+- `()` is the unit expression as well as the unit type.
+- One-liner `fn f(…) -> T =` may put its single expression on the next, indented line (S2 provisional, as in the composite example's `sum_sq_even`).
+- `int(x)` / `float(x)` return a value of their own type unchanged; `int` truncates toward zero.
+- A positional argument after a keyword argument is a syntax error (Python).
+- `x |> (y |> f)` calls the computed function `(y |> f)` with `x`; only a plain call on the right of `|>` receives the value as its first argument.
+
 ## Composite example (rounds 1–6; builtin names provisional)
 
 ```

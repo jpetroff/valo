@@ -20,7 +20,7 @@ valo --help | --version
 
 | Flag | Effect |
 |------|--------|
-| `--echo` | print the value of every top-level expression line, not `let` lines (until `print` exists in M4) |
+| `--echo` | print the value of every top-level expression line, not `let` or `fn` lines (debugging aid; programs use `print`) |
 | `--trace-exec` | trace every executed instruction to stderr (chapter 7) |
 | `--dump tokens` | token list (chapter 3) |
 | `--dump ast` | syntax tree as S-expressions (chapter 4) |

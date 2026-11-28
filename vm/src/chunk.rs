@@ -20,7 +20,8 @@
 //! | add a new kind of constant (string, M7)      | `enum Const`, then `vm.rs` (`LOADK`), `disasm.rs` (`const_repr`, `const_entry`), `codegen.rs` |
 //! | store more per-function data (params, upvalues) | `struct Proto` (+ `ProtoBuilder::new`, `FuncState::new` in codegen) |
 //! | store more per-program data (types, M10)     | `struct Program` (+ `ProtoBuilder::program`, `codegen::compile`) |
-//! | describe global slots (natives in M4)        | `struct GlobalDesc`                          |
+//! | describe global slots (natives, M4)           | `struct GlobalDesc`, `enum GlobalKind`       |
+//! | add nested functions                          | `Proto::protos` (indexed by `CLOSURE` Bx)    |
 //! | build bytecode by hand in a VM test          | `ProtoBuilder` (see tests in `vm.rs`)       |
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
@@ -80,6 +81,10 @@ pub struct Proto {
     pub name: Rc<str>,
     /// Number of parameters.
     pub arity: u8,
+    /// Number of parameters without a default (`required <= arity`; M4b).
+    /// A call may pass `required..=arity` arguments; the VM fills the rest
+    /// with `Value::Missing`, and the prologue computes their defaults.
+    pub required: u8,
     /// Number of registers the frame needs.
     pub num_regs: u8,
     /// Instructions.
@@ -91,16 +96,35 @@ pub struct Proto {
     pub spans: Vec<SrcSpan>,
     /// Span of the whole definition.
     pub def_span: SrcSpan,
+    /// Functions defined inside this one, in definition order. `CLOSURE A Bx`
+    /// creates a closure of `protos[Bx]`. For `<main>` these are the
+    /// top-level `fn`s (M4).
+    pub protos: Vec<Rc<Proto>>,
 }
 
-/// Description of one global slot (plan D4). Top-level `let` bindings live
-/// in globals; `GETGLOBAL`/`SETGLOBAL` address them by index (`Bx`).
-/// EXTEND (M4): a `kind: Native(NativeId) | User` field for builtins.
+/// Index of a native function in `builtins::NATIVES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NativeId(pub u16);
+
+/// What a global slot holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalKind {
+    /// A top-level `let` or `fn`, set by `SETGLOBAL`.
+    User,
+    /// A built-in function; the VM fills the slot before running `<main>`.
+    Native(NativeId),
+}
+
+/// Description of one global slot (plan D4). Built-in functions, top-level
+/// `fn`s and top-level `let` bindings live in globals;
+/// `GETGLOBAL`/`SETGLOBAL` address them by index (`Bx`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalDesc {
     /// Source name (shadowed top-level names get one slot each, so names may
     /// repeat). Used in error messages and the disassembly.
     pub name: Rc<str>,
+    /// User slot or built-in.
+    pub kind: GlobalKind,
 }
 
 /// A complete compiled program.
@@ -169,11 +193,13 @@ impl ProtoBuilder {
                 // standard `From` trait); the target type is inferred.
                 name: name.into(),
                 arity: 0,
+                required: 0,
                 num_regs,
                 code: Vec::new(),
                 consts: Vec::new(),
                 spans: Vec::new(),
                 def_span: SrcSpan::default(),
+                protos: Vec::new(),
             },
             globals: Vec::new(),
         }
@@ -194,9 +220,43 @@ impl ProtoBuilder {
         self
     }
 
+    /// Set the number of parameters (all required).
+    pub fn arity(mut self, n: u8) -> ProtoBuilder {
+        self.proto.arity = n;
+        self.proto.required = n;
+        self
+    }
+
+    /// Set the number of parameters without a default (after `arity`).
+    pub fn required(mut self, n: u8) -> ProtoBuilder {
+        self.proto.required = n;
+        self
+    }
+
+    /// Add a nested prototype (the next `CLOSURE` index).
+    pub fn proto(mut self, child: Proto) -> ProtoBuilder {
+        self.proto.protos.push(Rc::new(child));
+        self
+    }
+
     /// Declare the next global slot (used by `program`).
     pub fn global(mut self, name: &str) -> ProtoBuilder {
-        self.globals.push(GlobalDesc { name: name.into() });
+        self.globals.push(GlobalDesc {
+            name: name.into(),
+            kind: GlobalKind::User,
+        });
+        self
+    }
+
+    /// Declare the next global slot as the built-in `NATIVES[id]`.
+    pub fn native_global(mut self, id: u16) -> ProtoBuilder {
+        let name = crate::builtins::NATIVES
+            .get(id as usize)
+            .map_or("<native>", |n| n.name);
+        self.globals.push(GlobalDesc {
+            name: name.into(),
+            kind: GlobalKind::Native(NativeId(id)),
+        });
         self
     }
 

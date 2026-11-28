@@ -18,7 +18,7 @@
 //! |----------------------------------------------|--------------------------------------------------|
 //! | create an error in a compiler stage          | `Diagnostic::new(code, message, span)` + `.label()`, `.with()`, `.help()` |
 //! | change how compile errors look               | `render` (ariadne `Config`, labels)              |
-//! | change how runtime errors look               | `render_runtime`                                  |
+//! | change how runtime errors look               | `render_runtime` (trace truncation: `TRACE_HEAD`, `TRACE_TAIL`) |
 //! | change when colours are used                 | `stderr_color`                                    |
 //!
 //! Compile errors currently use ariadne's own header (`[E0101] Error: …`)
@@ -147,8 +147,15 @@ fn clamp(sm: &SourceMap, s: Span) -> Span {
     }
 }
 
+/// Innermost stack-trace entries shown for a long trace.
+const TRACE_HEAD: usize = 10;
+/// Outermost stack-trace entries shown for a long trace.
+const TRACE_TAIL: usize = 5;
+
 /// Render a runtime error: header, location, notes and stack trace
-/// (plan §5). The source snippet is added in M9.
+/// (plan §5). The source snippet is added in M9. A trace longer than 15
+/// entries shows the innermost 10 and the outermost 5; a frame that made
+/// tail calls (M5) is followed by `(... N tail calls elided ...)`.
 ///
 /// ```text
 /// error[R0701]: assertion failed: a == b
@@ -177,16 +184,42 @@ pub fn render_runtime(sm: &SourceMap, err: &RuntimeError) -> String {
     }
     if !err.trace.is_empty() {
         out.push_str("stack trace (most recent call first):\n");
-        // Align the "at" column: width of the longest function name.
-        let width = err
-            .trace
+        // Long traces (deep recursion) keep the innermost `TRACE_HEAD` and
+        // the outermost `TRACE_TAIL` entries.
+        let n = err.trace.len();
+        let shown: Vec<usize> = if n > TRACE_HEAD + TRACE_TAIL {
+            (0..TRACE_HEAD).chain(n - TRACE_TAIL..n).collect()
+        } else {
+            (0..n).collect()
+        };
+        // Align the "at" column: width of the longest function name shown,
+        // and of the largest index.
+        let width = shown
             .iter()
-            .map(|t| t.fn_name.chars().count())
+            .map(|&i| err.trace[i].fn_name.chars().count())
             .max()
             .unwrap_or(0);
-        for (i, t) in err.trace.iter().enumerate() {
+        let iw = (n - 1).to_string().len();
+        for (k, &i) in shown.iter().enumerate() {
+            if k > 0 && shown[k - 1] + 1 != i {
+                let omitted = i - shown[k - 1] - 1;
+                let _ = writeln!(out, "  {:iw$}  ... {omitted} frames omitted ...", "");
+            }
+            let t = &err.trace[i];
             let (l, c) = sm.line_col(t.span.start);
-            let _ = writeln!(out, "  {i}: {:<width$} at {}:{l}:{c}", t.fn_name, sm.name);
+            let _ = writeln!(
+                out,
+                "  {i:>iw$}: {:<width$} at {}:{l}:{c}",
+                t.fn_name, sm.name
+            );
+            if t.tail_calls > 0 {
+                let s = if t.tail_calls == 1 { "" } else { "s" };
+                let _ = writeln!(
+                    out,
+                    "  {:iw$}  (... {} tail call{s} elided ...)",
+                    "", t.tail_calls
+                );
+            }
         }
     }
     out

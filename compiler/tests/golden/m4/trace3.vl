@@ -1,0 +1,7 @@
+fn inner(x: int) -> int = 10 // x
+fn middle(x: int) -> int = inner(x - 1) + 1
+fn outer(x: int) -> int:
+    let y = middle(x)
+    y * 2
+
+print(outer(1))

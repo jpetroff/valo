@@ -1,0 +1,3 @@
+# A tail call to a built-in.
+fn show(x: int) -> () = print(x * 2)
+print(show(21))

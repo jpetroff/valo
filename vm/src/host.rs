@@ -25,7 +25,7 @@
 //! - `&mut dyn Host` in `vm.rs` — "some value implementing Host", chosen at runtime.
 //! - `io::Result<()>` — success with no value, or an I/O error (*Option and Result*).
 
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 
 /// Side effects the VM may perform.
 pub trait Host {
@@ -33,24 +33,52 @@ pub trait Host {
     fn write_stdout(&mut self, s: &str) -> io::Result<()>;
     /// Write text to standard error (diagnostic output such as `--trace-exec`).
     fn write_stderr(&mut self, s: &str) -> io::Result<()>;
+    /// Push buffered output out. The CLI calls it when the program ends,
+    /// normally or with an error.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
-/// The real process streams.
-// RUST: a "unit struct" — a type with no fields; it exists only to carry the
-// `Host` implementation.
-#[derive(Debug, Default)]
-pub struct StdHost;
+/// The real process streams. Standard output is buffered (one system call
+/// per few kilobytes instead of one per `print`), so it must be flushed:
+/// before anything goes to stderr (keeps a terminal readable) and at exit.
+#[derive(Debug)]
+pub struct StdHost {
+    // RUST: `BufWriter` collects writes in memory and passes them on in
+    // large chunks.
+    out: BufWriter<io::Stdout>,
+}
+
+impl StdHost {
+    /// A host writing to this process's stdout/stderr.
+    pub fn new() -> StdHost {
+        StdHost {
+            out: BufWriter::new(io::stdout()),
+        }
+    }
+}
+
+impl Default for StdHost {
+    fn default() -> StdHost {
+        StdHost::new()
+    }
+}
 
 impl Host for StdHost {
     fn write_stdout(&mut self, s: &str) -> io::Result<()> {
-        // `lock()` gives exclusive access to stdout for this write;
         // `write_all` returns `Err` if the pipe is closed, which the VM
         // reports as R0501.
-        io::stdout().lock().write_all(s.as_bytes())
+        self.out.write_all(s.as_bytes())
     }
 
     fn write_stderr(&mut self, s: &str) -> io::Result<()> {
+        self.out.flush()?;
         io::stderr().lock().write_all(s.as_bytes())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
     }
 }
 

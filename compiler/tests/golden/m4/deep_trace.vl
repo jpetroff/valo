@@ -1,0 +1,6 @@
+# The error happens at the bottom of the recursion: every frame is in the trace.
+fn down(n: int) -> int:
+    if n == 0: 1 // n
+    else: down(n - 1) + 1
+
+print(down(20))

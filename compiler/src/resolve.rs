@@ -13,30 +13,60 @@
 //! **Textbook chapter:** `docs/11-roadmap.md` (M2) — a chapter of its own
 //! follows once functions and closures (M4, M6) make it interesting.
 //!
-//! ## Rules (plan D4, syntax.md S5)
+//! ## Rules (plan D4, D14, syntax.md S5, S13, S19)
 //!
-//! - Top-level `let` bindings are **globals** (one slot each, indexed at
-//!   compile time); `let` inside a block (an indented `if` branch, later a
-//!   `fn` body) is a **local**, visible until the end of its block.
+//! - **Global slots** are numbered before anything is resolved: first the
+//!   built-ins (`vm::builtins::NATIVES`, slots `0..N`, the *prelude*), then
+//!   every top-level `fn` and every top-level `let` in source order.
+//! - **Top-level `fn`s are hoisted** (Rust item rule): visible in the whole
+//!   file. A top-level `let` with the same name shadows the fn from its line
+//!   on. Two top-level fns with the same name: E0207.
+//! - `let` inside a block or fn body is a **local**, visible until the end
+//!   of its block. Parameters are locals of their fn.
 //! - Shadowing is allowed in the same scope (Q7=b): every `let` makes a new
 //!   binding. The initialiser is resolved *before* the new name is added, so
 //!   `let x = x + 1` reads the previous `x`.
-//! - Scopes are a stack; lookup searches innermost first and, inside a
-//!   scope, newest first.
+//! - Lookup order: locals (innermost block first, newest first), then
+//!   top-level `let`s seen so far (newest first), then top-level fns, then
+//!   the prelude.
+//! - **Inside a fn body** "top-level `let`s seen so far" means: those before
+//!   the `fn`. If the name is still not found, the first *later* top-level
+//!   `let` of that name is used (a forward reference; reading it before it
+//!   is set is the runtime error R0302).
+//! - **Signatures**: top-level fns and natives have a known signature, and so
+//!   do bindings initialised with one of them (`let g = f`). Calls to a known
+//!   signature are checked here (E0205) instead of at runtime (R0207).
+//! - **Types** in annotations live in their own namespace: `int float bool
+//!   str none any error`, `list[T]`, `dict[K, V]`, `tuple[…]` and the fn's
+//!   type variables (E0402 unknown name, E0403 wrong number of type
+//!   arguments). They are only checked for existence here; values are
+//!   checked at runtime from M10.
 //! - Errors: E0201 undefined name (+ did-you-mean), E0203 top-level name used
-//!   before its definition, E0206 `_` used as a value.
+//!   before its definition, E0205 wrong number of arguments, E0206 `_` used
+//!   as a value, E0207 defined twice, E0402/E0403 bad type, E0421 defaulted
+//!   parameter passed by position, E0422 keyword arguments to an unknown
+//!   callee, E0424 unknown keyword / required parameter passed by name,
+//!   E0425 keyword given twice, E0009 construct of a later milestone (nested
+//!   `fn`, `_` placeholder).
+//! - **Keyword arguments** (S19, plan D28): for a call to a known signature,
+//!   `plan_call` records which argument fills each parameter
+//!   (`Resolved::calls`, a `CallPlan`); omitted defaulted parameters become
+//!   `Slot::Missing`. Defaults are resolved in a scope holding only the
+//!   earlier parameters.
 //!
 //! ## Where to change things
 //!
 //! | I want to…                                | Look at                                     |
 //! |-------------------------------------------|---------------------------------------------|
 //! | resolve a new expression kind             | `Resolver::expr` (recurse into children)     |
-//! | add a scope-introducing construct         | `push_scope` / `pop_scope` around it         |
+//! | add a scope-introducing construct         | push/pop `Resolver::locals` around it (see `ExprKind::Block`, `fn_def`) |
+//! | change the lookup order                   | `Resolver::lookup`                           |
 //! | change undefined-name messages            | `Resolver::undefined`, `suggest`             |
+//! | change argument checks of calls           | `Resolver::call`, `plan_call`, `wrong_count` |
+//! | add a builtin type name                   | `SCALAR_TYPES`, `GENERIC_TYPES`, `Resolver::check_type` |
 //! | change the `--dump resolved` format       | `dump`                                       |
 //!
-//! EXTEND: M4 adds functions (params as locals, hoisted top-level fns,
-//! natives seeded as globals 0..N, arity checks); M6 adds capture analysis.
+//! EXTEND: M6 adds capture analysis for nested fns and lambdas.
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -44,11 +74,14 @@
 //! - `.iter().rev().find_map(..)` — search from the end (*Closures and iterators*).
 //! - newtypes `BindingId(u32)`, `GlobalId(u32)` so the two kinds of index
 //!   cannot be mixed up (*Structs*).
+//! - `std::mem::take` to save and restore a field around a nested walk (*Ownership and borrowing*).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use crate::ast::{Binding, Expr, ExprKind, Item, NodeId, Program};
+use valo_vm::builtins::NATIVES;
+
+use crate::ast::{Arg, Binding, Expr, ExprKind, FnDef, Item, NodeId, Program, TypeExpr, TypeKind};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceMap, Span};
 
@@ -69,13 +102,35 @@ pub enum Res {
     Global(GlobalId),
 }
 
-/// A declared global or local, for diagnostics and dumps.
+/// A declared local, for diagnostics and dumps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefInfo {
     /// Source name.
     pub name: String,
-    /// Span of the name in its `let`.
+    /// Span of the name where it is defined.
     pub span: Span,
+}
+
+/// What a global slot holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalSlot {
+    /// Built-in `NATIVES[i]`.
+    Native(u16),
+    /// A top-level `fn`.
+    Fn,
+    /// A top-level `let`.
+    Let,
+}
+
+/// A global slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalInfo {
+    /// Source name.
+    pub name: String,
+    /// Span of the defining name (empty for built-ins).
+    pub span: Span,
+    /// Kind of slot.
+    pub slot: GlobalSlot,
 }
 
 /// One resolved name use, in source order (for `--dump resolved`).
@@ -94,33 +149,73 @@ pub struct Use {
 pub struct Resolved {
     /// `ExprKind::Name` node → its target.
     pub names: HashMap<NodeId, Res>,
-    /// `Binding` node → the slot it defines (`None` for `let _`).
+    /// Defining node → the slot it defines: `Binding` (`None` for `let _`),
+    /// `Param` (a local) and `FnDef` (a global).
     pub lets: HashMap<NodeId, Option<Res>>,
-    /// Global slots, indexed by `GlobalId`.
-    pub globals: Vec<DefInfo>,
+    /// Global slots, indexed by `GlobalId` (built-ins first).
+    pub globals: Vec<GlobalInfo>,
     /// Local bindings, indexed by `BindingId`.
     pub locals: Vec<DefInfo>,
     /// Every name use, in source order.
     pub uses: Vec<Use>,
+    /// Calls to a statically known callee: which argument fills each
+    /// parameter (M4b). Calls not listed pass their arguments as written.
+    pub calls: HashMap<NodeId, CallPlan>,
+}
+
+/// How a call's arguments map onto the callee's parameters, in declaration
+/// order (keyword arguments normalised, plan D28).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallPlan {
+    /// One entry per parameter, up to the last one that is passed; omitted
+    /// trailing defaulted parameters are left out (the VM fills them with
+    /// `Missing`).
+    pub slots: Vec<Slot>,
+}
+
+/// What fills one parameter slot of a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// `args[i]` of the call (source order).
+    Arg(usize),
+    /// Nothing: the callee computes the default (`LOADMISSING`).
+    Missing,
+}
+
+/// Scalar type names (S4, S9, S10, S13).
+const SCALAR_TYPES: &[&str] = &["int", "float", "bool", "str", "none", "any", "error"];
+/// Generic type names and their number of type arguments (`None` = one or more).
+const GENERIC_TYPES: &[(&str, Option<usize>)] =
+    &[("list", Some(1)), ("dict", Some(2)), ("tuple", None)];
+
+/// Parameters of a statically known callee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Sig {
+    /// Display name.
+    name: String,
+    /// Parameter names in order, and whether each has a default.
+    params: Vec<(String, bool)>,
+    /// Where it is defined (`None` for built-ins).
+    def: Option<Span>,
 }
 
 /// Resolve every name in `program`.
 pub fn resolve(program: &Program) -> Result<Resolved, Vec<Diagnostic>> {
     let mut r = Resolver {
-        scopes: vec![Vec::new()],
-        toplevel: program
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                Item::Let(b) if b.name != "_" => Some((b.name.clone(), b.name_span)),
-                _ => None,
-            })
-            .collect(),
+        prelude: Vec::new(),
+        items: Vec::new(),
+        all_lets: Vec::new(),
+        lets_done: 0,
+        locals: Vec::new(),
+        fn_ctx: None,
+        sigs: Vec::new(),
+        known: HashMap::new(),
         out: Resolved::default(),
         diags: Vec::new(),
     };
+    r.declare_globals(program);
     for item in &program.items {
-        r.item(item);
+        r.item(item, true);
     }
     if r.diags.is_empty() {
         Ok(r.out)
@@ -129,53 +224,244 @@ pub fn resolve(program: &Program) -> Result<Resolved, Vec<Diagnostic>> {
     }
 }
 
+/// While resolving a fn body: what the fn may see.
+#[derive(Debug, Clone)]
+struct FnCtx {
+    /// Number of top-level `let`s before the fn (`all_lets[..top_len]`).
+    top_len: usize,
+    /// Declared type variables.
+    type_params: Vec<String>,
+}
+
 struct Resolver {
-    /// Scope stack; `scopes[0]` is the top level (globals).
-    scopes: Vec<Vec<(String, Res)>>,
-    /// Every top-level `let` name, for E0203.
-    toplevel: Vec<(String, Span)>,
+    /// Built-ins (global slots `0..N`).
+    prelude: Vec<(String, GlobalId)>,
+    /// Top-level fns (hoisted: visible everywhere).
+    items: Vec<(String, GlobalId)>,
+    /// Every top-level `let` (not `_`) in source order.
+    all_lets: Vec<(String, Span, GlobalId)>,
+    /// How many of `all_lets` the top-level walk has passed.
+    lets_done: usize,
+    /// Local scopes of the code being resolved (block scopes at top level,
+    /// the fn's own scopes inside a fn body); innermost last.
+    locals: Vec<Vec<(String, BindingId)>>,
+    /// Set while resolving a fn body.
+    fn_ctx: Option<FnCtx>,
+    /// Known signatures.
+    sigs: Vec<Sig>,
+    /// Name target → index into `sigs`.
+    known: HashMap<Res, usize>,
     out: Resolved,
     diags: Vec<Diagnostic>,
 }
 
 impl Resolver {
-    fn item(&mut self, item: &Item) {
-        match item {
-            Item::Expr(e) => self.expr(e),
-            Item::Let(b) => self.binding(b),
+    /// Pre-pass: number every global slot (built-ins, top-level fns and
+    /// lets) and record the signatures of fns and built-ins.
+    fn declare_globals(&mut self, program: &Program) {
+        for (i, n) in NATIVES.iter().enumerate() {
+            let g = self.new_global(n.name, Span::default(), GlobalSlot::Native(i as u16));
+            self.prelude.push((n.name.to_string(), g));
+            self.add_sig(
+                Res::Global(g),
+                Sig {
+                    name: n.name.to_string(),
+                    params: n
+                        .params
+                        .iter()
+                        .map(|p| (p.name.to_string(), p.has_default))
+                        .collect(),
+                    def: None,
+                },
+            );
+        }
+        for item in &program.items {
+            match item {
+                Item::Let(b) if b.name != "_" => {
+                    let g = self.new_global(&b.name, b.name_span, GlobalSlot::Let);
+                    self.all_lets.push((b.name.clone(), b.name_span, g));
+                }
+                Item::Fn(d) => self.declare_fn(d),
+                _ => {}
+            }
         }
     }
 
-    /// `let`: initialiser first (it sees the *previous* binding of the
-    /// same name), then the new binding.
-    fn binding(&mut self, b: &Binding) {
+    fn declare_fn(&mut self, d: &FnDef) {
+        if let Some((_, first)) = self.items.iter().find(|(n, _)| *n == d.name) {
+            let first_span = self.out.globals[first.0 as usize].span;
+            self.diags.push(
+                Diagnostic::new(
+                    "E0207",
+                    format!("fn `{}` is defined twice", d.name),
+                    d.name_span,
+                )
+                .label("second definition")
+                .with(first_span, "first defined here")
+                .help("top-level fns are visible in the whole file, so each name can be defined only once; rename one of them"),
+            );
+            return;
+        }
+        let g = self.new_global(&d.name, d.name_span, GlobalSlot::Fn);
+        self.out.lets.insert(d.id, Some(Res::Global(g)));
+        self.items.push((d.name.clone(), g));
+        self.add_sig(
+            Res::Global(g),
+            Sig {
+                name: d.name.clone(),
+                params: d
+                    .params
+                    .iter()
+                    .map(|p| (p.name.clone(), p.default.is_some()))
+                    .collect(),
+                def: Some(d.name_span),
+            },
+        );
+    }
+
+    fn new_global(&mut self, name: &str, span: Span, slot: GlobalSlot) -> GlobalId {
+        self.out.globals.push(GlobalInfo {
+            name: name.to_string(),
+            span,
+            slot,
+        });
+        GlobalId(self.out.globals.len() as u32 - 1)
+    }
+
+    fn add_sig(&mut self, res: Res, sig: Sig) {
+        self.sigs.push(sig);
+        self.known.insert(res, self.sigs.len() - 1);
+    }
+
+    fn new_local(&mut self, name: &str, span: Span) -> BindingId {
+        self.out.locals.push(DefInfo {
+            name: name.to_string(),
+            span,
+        });
+        BindingId(self.out.locals.len() as u32 - 1)
+    }
+
+    /// `top_level`: the item is a line of the file itself, not of a block.
+    fn item(&mut self, item: &Item, top_level: bool) {
+        match item {
+            Item::Expr(e) => self.expr(e),
+            Item::Let(b) => self.binding(b, top_level),
+            Item::Fn(d) if top_level => self.fn_def(d),
+            Item::Fn(d) => self.diags.push(
+                Diagnostic::new(
+                    "E0009",
+                    "nested functions are not supported yet",
+                    d.name_span,
+                )
+                .label("not implemented in this version of valo")
+                .help("define the fn at the top level of the file"),
+            ),
+        }
+    }
+
+    /// `let`: annotation and initialiser first (the initialiser sees the
+    /// *previous* binding of the same name), then the new binding.
+    fn binding(&mut self, b: &Binding, top_level: bool) {
+        if let Some(t) = &b.ann {
+            self.check_type(t);
+        }
         self.expr(&b.init);
+        // `let g = f` gives `g` the signature of `f`.
+        let sig = match &b.init.kind {
+            ExprKind::Name(_) => self
+                .out
+                .names
+                .get(&b.init.id)
+                .and_then(|r| self.known.get(r))
+                .copied(),
+            _ => None,
+        };
         if b.name == "_" {
             self.out.lets.insert(b.id, None);
             return;
         }
-        let info = DefInfo {
-            name: b.name.clone(),
-            span: b.name_span,
-        };
-        let res = if self.scopes.len() == 1 {
-            self.out.globals.push(info);
-            Res::Global(GlobalId(self.out.globals.len() as u32 - 1))
+        let res = if top_level {
+            let (_, _, g) = self.all_lets[self.lets_done];
+            self.lets_done += 1;
+            Res::Global(g)
         } else {
-            self.out.locals.push(info);
-            Res::Local(BindingId(self.out.locals.len() as u32 - 1))
+            let id = self.new_local(&b.name, b.name_span);
+            self.locals
+                .last_mut()
+                .expect("a block has a scope")
+                .push((b.name.clone(), id));
+            Res::Local(id)
         };
         self.out.lets.insert(b.id, Some(res));
-        self.scopes
-            .last_mut()
-            .expect("scope stack is never empty")
-            .push((b.name.clone(), res));
+        if let Some(i) = sig {
+            self.known.insert(res, i);
+        }
+    }
+
+    /// A top-level fn: parameters become locals of a fresh scope stack; the
+    /// body sees the top-level `let`s defined before the fn (plus later
+    /// ones as forward references, see `lookup`).
+    fn fn_def(&mut self, d: &FnDef) {
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_ctx = self.fn_ctx.replace(FnCtx {
+            top_len: self.lets_done,
+            type_params: d.type_params.iter().map(|(n, _)| n.clone()).collect(),
+        });
+        for (i, (name, span)) in d.type_params.iter().enumerate() {
+            if let Some((_, first)) = d.type_params[..i].iter().find(|(n, _)| n == name) {
+                self.diags.push(
+                    Diagnostic::new(
+                        "E0207",
+                        format!("type variable `{name}` is declared twice"),
+                        *span,
+                    )
+                    .label("second declaration")
+                    .with(*first, "first declared here"),
+                );
+            }
+        }
+        // Parameters are added one by one, so a default sees only the
+        // parameters before it (S19).
+        self.locals.push(Vec::new());
+        for p in &d.params {
+            if let Some(t) = &p.ann {
+                self.check_type(t);
+            }
+            if let Some(default) = &p.default {
+                self.expr(default);
+            }
+            let scope = self.locals.last().expect("pushed above");
+            if let Some((_, first)) = scope.iter().find(|(n, _)| *n == p.name) {
+                let first_span = self.out.locals[first.0 as usize].span;
+                self.diags.push(
+                    Diagnostic::new(
+                        "E0207",
+                        format!("parameter `{}` is defined twice in fn `{}`", p.name, d.name),
+                        p.span,
+                    )
+                    .label("second definition")
+                    .with(first_span, "first defined here"),
+                );
+            }
+            let id = self.new_local(&p.name, p.span);
+            self.out.lets.insert(p.id, Some(Res::Local(id)));
+            self.locals
+                .last_mut()
+                .expect("pushed above")
+                .push((p.name.clone(), id));
+        }
+        if let Some(t) = &d.ret {
+            self.check_type(t);
+        }
+        self.expr(&d.body);
+        self.locals = saved_locals;
+        self.fn_ctx = saved_ctx;
     }
 
     /// EXTEND: every new `ExprKind` with children recurses here.
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Unit => {}
             ExprKind::Name(name) => self.name(e, name),
             ExprKind::Unary { operand, .. }
             | ExprKind::Not(operand)
@@ -200,13 +486,225 @@ impl Resolver {
                 self.expr(else_br);
             }
             ExprKind::Block(items) => {
-                self.scopes.push(Vec::new());
+                self.locals.push(Vec::new());
                 for item in items {
-                    self.item(item);
+                    self.item(item, false);
                 }
-                self.scopes.pop();
+                self.locals.pop();
+            }
+            ExprKind::Call { callee, args, .. } => self.call(e, callee, args),
+            ExprKind::Pipe { .. } => unreachable!("pipes are removed by desugar.rs"),
+        }
+    }
+
+    /// A call: resolve callee and arguments. When the callee has a known
+    /// signature, check the arguments against it and record how they map
+    /// onto the parameters (`Resolved::calls`); otherwise only positional
+    /// arguments are allowed (E0422).
+    fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg]) {
+        self.expr(callee);
+        for a in args {
+            match a {
+                Arg::Positional(x) | Arg::Keyword { value: x, .. } => self.expr(x),
+                Arg::Placeholder(span) => {
+                    self.diags.push(
+                        Diagnostic::new(
+                            "E0009",
+                            "partial application with `_` is not supported yet",
+                            *span,
+                        )
+                        .label("not implemented in this version of valo"),
+                    );
+                    return;
+                }
             }
         }
+        let sig = match callee.kind {
+            ExprKind::Name(_) => self
+                .out
+                .names
+                .get(&callee.id)
+                .and_then(|r| self.known.get(r))
+                .copied(),
+            _ => None,
+        };
+        match sig {
+            Some(i) => {
+                if let Some(plan) = self.plan_call(e, i, args) {
+                    self.out.calls.insert(e.id, plan);
+                }
+            }
+            None => {
+                for a in args {
+                    if let Arg::Keyword { name_span, .. } = a {
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0422",
+                                "keyword arguments need a function known at compile time",
+                                *name_span,
+                            )
+                            .label("the callee here is a computed value")
+                            .help("call a top-level fn or a built-in by its name, or pass the arguments by position"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Match `args` against signature `sigs[i]` (S19): positional arguments
+    /// fill the required parameters in order, keyword arguments name the
+    /// defaulted ones. Reports E0205, E0421, E0424, E0425; `None` on error.
+    fn plan_call(&mut self, e: &Expr, i: usize, args: &[Arg]) -> Option<CallPlan> {
+        let sig = self.sigs[i].clone();
+        let required = sig.params.iter().filter(|(_, d)| !d).count();
+        let mut slots: Vec<Option<usize>> = vec![None; sig.params.len()];
+        let mut positional = 0;
+        // Required parameters wrongly passed by name (E0424) still count as
+        // supplied, so the same mistake is not also reported as E0205.
+        let mut named_required = 0;
+        let mut ok = true;
+        for (j, a) in args.iter().enumerate() {
+            match a {
+                Arg::Positional(x) => {
+                    positional += 1;
+                    let k = positional - 1;
+                    if k >= required && k < sig.params.len() {
+                        let name = &sig.params[k].0;
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0421",
+                                format!("`{name}` has a default and must be passed by name"),
+                                x.span,
+                            )
+                            .label(format!("passed by position as parameter {}", k + 1))
+                            .help(format!(
+                                "write `{name}=…`: parameters with a default are keyword-only"
+                            )),
+                        );
+                        ok = false;
+                    } else if k < sig.params.len() {
+                        slots[k] = Some(j);
+                    }
+                }
+                Arg::Keyword {
+                    name, name_span, ..
+                } => match sig.params.iter().position(|(p, _)| p == name) {
+                    None => {
+                        let names: Vec<&str> = sig
+                            .params
+                            .iter()
+                            .filter(|(_, d)| *d)
+                            .map(|(p, _)| p.as_str())
+                            .collect();
+                        let mut d = Diagnostic::new(
+                            "E0424",
+                            format!("`{}` has no parameter named `{name}`", sig.name),
+                            *name_span,
+                        )
+                        .label("unknown keyword");
+                        if let Some(def) = sig.def {
+                            d = d.with(def, "defined here");
+                        }
+                        d = match suggest(name, &names) {
+                            Some(s) => d.help(format!("did you mean `{s}`?")),
+                            None if names.is_empty() => {
+                                d.help(format!("`{}` takes no keyword arguments", sig.name))
+                            }
+                            None => {
+                                d.help(format!("the keyword parameters are: {}", names.join(", ")))
+                            }
+                        };
+                        self.diags.push(d);
+                        ok = false;
+                    }
+                    Some(k) if !sig.params[k].1 => {
+                        named_required += 1;
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0424",
+                                format!("`{name}` is a required parameter of `{}`", sig.name),
+                                *name_span,
+                            )
+                            .label("passed by name")
+                            .help(format!(
+                                "pass `{name}` by position; only parameters with a default are passed by name"
+                            )),
+                        );
+                        ok = false;
+                    }
+                    Some(k) if slots[k].is_some() => {
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0425",
+                                format!("keyword argument `{name}` is given twice"),
+                                *name_span,
+                            )
+                            .label("second time")
+                            .with(arg_span(&args[slots[k].unwrap_or(0)]), "first time"),
+                        );
+                        ok = false;
+                    }
+                    Some(k) => slots[k] = Some(j),
+                },
+                Arg::Placeholder(_) => return None,
+            }
+        }
+        let supplied = positional + named_required;
+        if supplied < required || positional > sig.params.len() {
+            self.wrong_count(e, &sig, required, positional);
+            return None;
+        }
+        if !ok {
+            return None;
+        }
+        // Trailing omitted parameters are padded by the VM.
+        while slots.last() == Some(&None) {
+            slots.pop();
+        }
+        Some(CallPlan {
+            slots: slots
+                .into_iter()
+                .map(|s| s.map_or(Slot::Missing, Slot::Arg))
+                .collect(),
+        })
+    }
+
+    /// E0205: wrong number of positional arguments to a known callee.
+    fn wrong_count(&mut self, e: &Expr, sig: &Sig, want: usize, given: usize) {
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let what = if want == sig.params.len() {
+            "argument"
+        } else {
+            "positional argument"
+        };
+        let mut d = Diagnostic::new(
+            "E0205",
+            format!(
+                "`{}` takes {want} {what}{} but {given} {} given",
+                sig.name,
+                plural(want),
+                if given == 1 { "was" } else { "were" }
+            ),
+            e.span,
+        )
+        .label(format!("called with {given} {what}{}", plural(given)));
+        if let Some(def) = sig.def {
+            d = d.with(def, "defined here");
+        }
+        if given < want {
+            let shown: Vec<&str> = sig.params[..want]
+                .iter()
+                .enumerate()
+                .map(|(j, (p, _))| if j < given { p.as_str() } else { "_" })
+                .collect();
+            d = d.help(format!(
+                "to fix only some arguments, use a partial: `{}({})`",
+                sig.name,
+                shown.join(", ")
+            ));
+        }
+        self.diags.push(d);
     }
 
     fn name(&mut self, e: &Expr, name: &str) {
@@ -218,13 +716,7 @@ impl Resolver {
             );
             return;
         }
-        // RUST: `find_map` returns the first `Some` produced by the closure.
-        let found = self
-            .scopes
-            .iter()
-            .rev()
-            .find_map(|s| s.iter().rev().find(|(n, _)| n == name).map(|(_, r)| *r));
-        match found {
+        match self.lookup(name) {
             Some(res) => {
                 self.out.names.insert(e.id, res);
                 self.out.uses.push(Use {
@@ -237,9 +729,49 @@ impl Resolver {
         }
     }
 
+    /// Find what `name` refers to here (order: see the module docs).
+    fn lookup(&self, name: &str) -> Option<Res> {
+        // RUST: `find_map` returns the first `Some` produced by the closure.
+        let local = self
+            .locals
+            .iter()
+            .rev()
+            .find_map(|s| s.iter().rev().find(|(n, _)| n == name).map(|(_, b)| *b));
+        if let Some(b) = local {
+            return Some(Res::Local(b));
+        }
+        let visible = self.fn_ctx.as_ref().map_or(self.lets_done, |c| c.top_len);
+        let global = self.all_lets[..visible]
+            .iter()
+            .rev()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, _, g)| *g)
+            .or_else(|| self.items.iter().find(|(n, _)| n == name).map(|(_, g)| *g))
+            .or_else(|| {
+                self.prelude
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, g)| *g)
+            });
+        if let Some(g) = global {
+            return Some(Res::Global(g));
+        }
+        // Forward reference from a fn body to a later top-level `let`.
+        if self.fn_ctx.is_some() {
+            return self.all_lets[visible..]
+                .iter()
+                .find(|(n, _, _)| n == name)
+                .map(|(_, _, g)| Res::Global(*g));
+        }
+        None
+    }
+
     /// E0203 if a top-level `let` of this name comes later, else E0201.
     fn undefined(&mut self, span: Span, name: &str) {
-        if let Some((_, def)) = self.toplevel.iter().find(|(n, _)| n == name) {
+        if let Some((_, def, _)) = self.all_lets[self.lets_done..]
+            .iter()
+            .find(|(n, _, _)| n == name)
+        {
             self.diags.push(
                 Diagnostic::new(
                     "E0203",
@@ -252,10 +784,18 @@ impl Resolver {
             );
             return;
         }
+        let visible_lets = self.fn_ctx.as_ref().map_or(self.lets_done, |c| c.top_len);
         let visible: Vec<&str> = self
-            .scopes
+            .prelude
             .iter()
-            .flat_map(|s| s.iter().map(|(n, _)| n.as_str()))
+            .chain(&self.items)
+            .map(|(n, _)| n.as_str())
+            .chain(
+                self.all_lets[..visible_lets]
+                    .iter()
+                    .map(|(n, _, _)| n.as_str()),
+            )
+            .chain(self.locals.iter().flatten().map(|(n, _)| n.as_str()))
             .collect();
         let mut d = Diagnostic::new("E0201", format!("undefined name `{name}`"), span)
             .label("not found in this scope");
@@ -263,6 +803,126 @@ impl Resolver {
             d = d.help(format!("did you mean `{s}`?"));
         }
         self.diags.push(d);
+    }
+
+    /// Check that every name in an annotation is a type (E0402) used with
+    /// the right number of type arguments (E0403).
+    fn check_type(&mut self, t: &TypeExpr) {
+        match &t.kind {
+            TypeKind::Unit => {}
+            TypeKind::Name(n) => {
+                if SCALAR_TYPES.contains(&n.as_str()) || self.is_type_var(n) {
+                    return;
+                }
+                if let Some((_, count)) = GENERIC_TYPES.iter().find(|(g, _)| g == n) {
+                    let example = match count {
+                        Some(2) => "dict[str, int]",
+                        Some(_) => "list[int]",
+                        None => "tuple[int, str]",
+                    };
+                    self.diags.push(
+                        Diagnostic::new(
+                            "E0403",
+                            format!("`{n}` needs type arguments, e.g. {example}"),
+                            t.span,
+                        )
+                        .label("missing `[…]`"),
+                    );
+                    return;
+                }
+                self.unknown_type(t.span, n);
+            }
+            TypeKind::Generic(n, args) => {
+                match GENERIC_TYPES.iter().find(|(g, _)| g == n) {
+                    Some((_, Some(want))) if *want != args.len() => {
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0403",
+                                format!(
+                                    "`{n}` takes {want} type argument{}, found {}",
+                                    if *want == 1 { "" } else { "s" },
+                                    args.len()
+                                ),
+                                t.span,
+                            )
+                            .label("wrong number of type arguments"),
+                        );
+                    }
+                    Some(_) => {}
+                    None if SCALAR_TYPES.contains(&n.as_str()) || self.is_type_var(n) => {
+                        self.diags.push(
+                            Diagnostic::new(
+                                "E0403",
+                                format!("`{n}` takes no type arguments"),
+                                t.span,
+                            )
+                            .label("remove the `[…]`"),
+                        );
+                    }
+                    None => self.unknown_type(t.span, n),
+                }
+                for a in args {
+                    self.check_type(a);
+                }
+            }
+            TypeKind::Tuple(ts) => {
+                for x in ts {
+                    self.check_type(x);
+                }
+            }
+            TypeKind::Union(a, b) | TypeKind::Result(a, b) => {
+                self.check_type(a);
+                self.check_type(b);
+            }
+            TypeKind::Fn(params, ret) => {
+                for x in params {
+                    self.check_type(x);
+                }
+                self.check_type(ret);
+            }
+        }
+    }
+
+    fn is_type_var(&self, n: &str) -> bool {
+        self.fn_ctx
+            .as_ref()
+            .is_some_and(|c| c.type_params.iter().any(|t| t == n))
+    }
+
+    fn unknown_type(&mut self, span: Span, name: &str) {
+        let mut candidates: Vec<&str> = SCALAR_TYPES
+            .iter()
+            .copied()
+            .chain(GENERIC_TYPES.iter().map(|(g, _)| *g))
+            .collect();
+        if let Some(c) = &self.fn_ctx {
+            candidates.extend(c.type_params.iter().map(String::as_str));
+        }
+        let mut d =
+            Diagnostic::new("E0402", format!("unknown type `{name}`"), span).label("not a type");
+        let capitalised = name.starts_with(|c: char| c.is_uppercase());
+        match suggest(name, &candidates) {
+            Some(s) => d = d.help(format!("did you mean `{s}`?")),
+            None if capitalised && self.fn_ctx.is_some() => {
+                d = d.help(format!(
+                    "a type variable must be declared after the fn name: `fn f[{name}](…)`"
+                ));
+            }
+            None => {
+                d = d.help(
+                    "the types are int, float, bool, str, none, any, error, list[T], dict[K, V], tuple[…]",
+                );
+            }
+        }
+        self.diags.push(d);
+    }
+}
+
+/// Source span of a call argument.
+fn arg_span(a: &Arg) -> Span {
+    match a {
+        Arg::Positional(x) | Arg::Keyword { value: x, .. } => x.span,
+        Arg::Placeholder(s) => *s,
     }
 }
 
@@ -316,23 +976,51 @@ fn res_str(r: Res) -> String {
     }
 }
 
-/// Text form for `--dump resolved`: declared globals and locals, then every
-/// name use with its target.
+/// Text form for `--dump resolved`: built-ins, declared globals and locals,
+/// then every name use with its target.
 pub fn dump(r: &Resolved, sm: &SourceMap) -> String {
     let mut out = String::new();
-    let table = |out: &mut String, title: &str, prefix: &str, defs: &[DefInfo]| {
-        if defs.is_empty() {
-            let _ = writeln!(out, "{title}: (none)");
-            return;
+    let natives: Vec<&str> = r
+        .globals
+        .iter()
+        .filter(|g| matches!(g.slot, GlobalSlot::Native(_)))
+        .map(|g| g.name.as_str())
+        .collect();
+    let _ = writeln!(
+        out,
+        "natives: global#0..#{} ({})",
+        natives.len().saturating_sub(1),
+        natives.join(" ")
+    );
+    let user: Vec<(usize, &GlobalInfo)> = r
+        .globals
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| !matches!(g.slot, GlobalSlot::Native(_)))
+        .collect();
+    if user.is_empty() {
+        out.push_str("globals: (none)\n");
+    } else {
+        out.push_str("globals:\n");
+        for (i, g) in user {
+            let (l, c) = sm.line_col(g.span.start);
+            let pos = format!("{l}:{c}");
+            if g.slot == GlobalSlot::Fn {
+                let _ = writeln!(out, "  global#{i:<3} {:<12} {pos:<7} fn", g.name);
+            } else {
+                let _ = writeln!(out, "  global#{i:<3} {:<12} {pos}", g.name);
+            }
         }
-        let _ = writeln!(out, "{title}:");
-        for (i, d) in defs.iter().enumerate() {
+    }
+    if r.locals.is_empty() {
+        out.push_str("locals: (none)\n");
+    } else {
+        out.push_str("locals:\n");
+        for (i, d) in r.locals.iter().enumerate() {
             let (l, c) = sm.line_col(d.span.start);
-            let _ = writeln!(out, "  {prefix}#{i:<3} {:<12} {l}:{c}", d.name);
+            let _ = writeln!(out, "  local#{i:<3} {:<12} {l}:{c}", d.name);
         }
-    };
-    table(&mut out, "globals", "global", &r.globals);
-    table(&mut out, "locals", "local", &r.locals);
+    }
     if r.uses.is_empty() {
         out.push_str("uses: (none)\n");
     } else {
@@ -354,7 +1042,7 @@ mod tests {
 
     fn resolve_src(src: &str) -> Result<String, Vec<&'static str>> {
         let sm = SourceMap::new("t.vl", src);
-        let p = parse_source(&sm).expect("parses");
+        let p = crate::desugar::desugar(parse_source(&sm).expect("parses"));
         resolve(&p)
             .map(|r| dump(&r, &sm))
             .map_err(|ds| ds.iter().map(|d| d.code).collect())
@@ -404,5 +1092,90 @@ mod tests {
         assert_eq!(suggest("total", &["x", "y"]), None);
         assert_eq!(edit_distance("kitten", "sitting"), 3);
         assert_eq!(edit_distance("ab", "ba"), 1);
+    }
+
+    // Snapshot: src/snapshots/valo_compiler__resolve__tests__functions_and_globals.snap
+    #[test]
+    fn functions_and_globals() {
+        // `twice` is used before its definition (hoisting); `limit` inside
+        // `scaled` is a forward reference to a later `let`; `inc` is
+        // shadowed by a `let` from line 6 on, and `inc2` keeps the fn's
+        // signature.
+        insta::assert_snapshot!(
+            resolve_src(
+                "let a = twice(2)\nfn twice(x: int) -> int = x * 2\n\
+                 fn scaled(x: int) -> int = x * limit\nlet limit = 10\n\
+                 fn inc(x: int) -> int = x + 1\nlet inc2 = inc\nlet inc = 5\nprint(inc2(inc))"
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn fn_bodies_see_globals_as_at_definition() {
+        let src = "let x = 1\nfn f() -> int = x\nlet x = 2\nf()";
+        let d = resolve_src(src).unwrap();
+        assert!(d.contains("2:17    x -> global#3"), "{d}");
+    }
+
+    #[test]
+    fn keyword_arguments() {
+        let codes = |s: &str| -> Vec<&'static str> { resolve_src(s).unwrap_err() };
+        let f = "fn f(a: int, b: int = 1, c: int = 2) -> int = a + b + c\n";
+        assert!(resolve_src(&format!("{f}f(1)\nf(1, c=3)\nf(1, c=3, b=4)\n5 |> f(b=1)")).is_ok());
+        assert_eq!(codes(&format!("{f}f(1, 2)")), ["E0421"]);
+        assert_eq!(codes(&format!("{f}f(1, 2, 3)")), ["E0421", "E0421"]);
+        assert_eq!(codes(&format!("{f}f(1, d=2)")), ["E0424"]);
+        assert_eq!(codes(&format!("{f}f(1, a=2)")), ["E0424"]);
+        assert_eq!(codes(&format!("{f}f(1, b=2, b=3)")), ["E0425"]);
+        assert_eq!(codes(&format!("{f}f(b=2)")), ["E0205"]);
+        assert_eq!(
+            codes(&format!("{f}let h = if true then f else f\nh(1, b=2)")),
+            ["E0422"]
+        );
+        // Defaults see earlier parameters only.
+        assert_eq!(codes("fn g(a: int = b, b: int = 1) -> int = a"), ["E0201"]);
+        assert!(resolve_src("fn g(a: int, b: int = a * 2) -> int = b").is_ok());
+        // Built-ins go through the same signature check.
+        assert_eq!(codes("print(1, end=2)"), ["E0424"]);
+    }
+
+    #[test]
+    fn function_errors() {
+        let codes = |s| resolve_src(s).unwrap_err();
+        assert_eq!(codes("fn f() -> int = 1\nfn f() -> int = 2"), ["E0207"]);
+        assert_eq!(codes("fn f(x: int, x: int) -> int = x"), ["E0207"]);
+        assert_eq!(codes("fn f[T, T](x: T) -> T = x"), ["E0207"]);
+        assert_eq!(codes("fn f(x: int) -> int = x\nf()"), ["E0205"]);
+        assert_eq!(
+            codes("fn f(x: int) -> int = x\nlet g = f\ng(1, 2)"),
+            ["E0205"]
+        );
+        assert_eq!(codes("print()"), ["E0205"]);
+        assert_eq!(codes("fn f(x: itn) -> int = x"), ["E0402"]);
+        assert_eq!(codes("fn f(x: T) -> int = 1"), ["E0402"]);
+        assert_eq!(
+            codes("fn f[T](x: list[T]) -> T | none = none_value"),
+            ["E0201"]
+        );
+        assert_eq!(codes("let x: list = 1"), ["E0403"]);
+        assert_eq!(codes("let x: int[str] = 1"), ["E0403"]);
+        assert_eq!(codes("let x: dict[str] = 1"), ["E0403"]);
+        assert_eq!(
+            codes("let v = if true:\n    fn g() -> int = 1\n    g()\nelse: 0"),
+            ["E0009", "E0201"]
+        );
+        assert_eq!(codes("fn f(x: int) -> int = x\nf(_)"), ["E0009"]);
+        assert_eq!(codes("fn f(x: int) -> int = x\nf(x=1)"), ["E0424"]);
+        // In main, a later `let` is still E0203; from a fn body it is fine.
+        assert_eq!(codes("print(y)\nlet y = 1"), ["E0203"]);
+        assert!(resolve_src("fn f() -> int = y\nlet y = 1").is_ok());
+        // Fine: dynamic callee, and correct counts.
+        assert!(
+            resolve_src("fn f(x: int) -> int = x\nlet h = if true then f else f\nh(1, 2)").is_ok()
+        );
+        assert!(
+            resolve_src("fn f[T](x: T, d: dict[str, list[T]]) -> (T, any) ! error = x").is_ok()
+        );
     }
 }

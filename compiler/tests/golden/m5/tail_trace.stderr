@@ -1,0 +1,7 @@
+error[R0102]: division by zero: 1 // 0
+  --> tail_trace.vl:1:41
+stack trace (most recent call first):
+  0: down   at tail_trace.vl:1:41
+     (... 5 tail calls elided ...)
+  1: start  at tail_trace.vl:3:13
+  2: <main> at tail_trace.vl:6:7

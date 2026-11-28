@@ -1,0 +1,3 @@
+# Not a tail call: `1 + depth(...)` needs the result. A clean R0301, no crash.
+fn depth(n: int) -> int = if n == 0 then 0 else 1 + depth(n - 1)
+print(depth(1_000_000))

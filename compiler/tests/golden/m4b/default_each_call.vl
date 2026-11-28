@@ -1,0 +1,9 @@
+# A default is evaluated at each call that omits it, never when passed.
+fn tick() -> int:
+    print(0)
+    1
+
+fn f(x: int, step: int = tick()) -> int = x + step
+print(f(1))
+print(f(2))
+print(f(3, step=5))

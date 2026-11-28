@@ -204,7 +204,81 @@ These are *peephole-style* decisions made locally while emitting. Anything
 more (constant folding of whole expressions, dead code removal) would be the
 job of a separate pass, not planned for the MVP.
 
-## 6.8 What codegen does *not* do
+## 6.8 Functions and calls
+
+**One `FuncState` per function.** `compile_fn` compiles a `fn` into its own
+`Proto`: each parameter gets the next register (`R0…R(arity-1)`, recorded in
+`FuncState::locals` like a `let`), the body goes into the next register, and
+`RETURN` returns it. The finished prototype becomes a child of `<main>`
+(`Proto::protos`); `CLOSURE r k` turns child `k` into a function value at
+runtime.
+
+**Hoisting.** Before any top-level line, `<main>` creates every top-level fn
+and stores it in its global slot, so a call may appear above the definition
+and fns may call each other in any order:
+
+```text
+0000  CLOSURE   0 0    ; <fn sq/1>
+0001  SETGLOBAL 0 3    ; sq          (slots 0..2 are the built-ins)
+```
+
+**The call window.** For `f(a, b)` into `dst`, `FuncState::call` first
+reserves consecutive registers `base, base+1, base+2` (callee and arguments;
+`base = dst` when `dst` is the topmost register, which saves a `MOVE`), then
+evaluates into them, then emits `CALL base 2`. Reserving first means the
+pieces can be evaluated in any order without moving values afterwards: a
+call made from a pipe (`x |> f(a)`, rewritten by `desugar.rs` to `f(x, a)`
+with `piped = true`) evaluates `x` *before* `f` (Q17); keyword arguments
+(M4b) will be evaluated in source order straight into the slots of their
+parameters.
+
+**Keyword arguments and defaults** (M4b, plan D28). Parameters with a
+default are passed by name. For a call to a known fn the resolver records a
+`CallPlan`: which argument fills which parameter. `call` then makes window
+slot `k` parameter `k`, evaluates the arguments *in source order* into their
+slots, and puts `LOADMISSING` into a slot nobody filled; trailing omitted
+parameters are not passed at all (the VM pads them). The callee computes a
+missing value itself, in a prologue before its body:
+
+```text
+fn f(a: int, b: int = 1, c: int = a * 2)      f(1, c=3)
+  JMPIFSET  1 +1   ; b passed? skip              GETGLOBAL 0 f
+  LOADI     1 1                                  LOADI     1 1      a
+  JMPIFSET  2 +3   ; c passed? skip              LOADI     3 3      c (slot 3)
+  MOVE 2 0; LOADI 3 2; MUL 2 2 3                 LOADMISSING 2      b omitted
+  … body …                                       CALL      0 3
+```
+
+Defaults are compiled callee-side (not copied to every call site) because
+they may use earlier parameters, must work for calls through a function
+value, and are evaluated anew at each call.
+
+```text
+print(sq(3))             5 |> add(1)  into R0
+  GETGLOBAL 0 print        LOADI     1 5      piped value first
+  GETGLOBAL 1 sq           GETGLOBAL 0 add    then the callee
+  LOADI     2 3            LOADI     2 1      then the other arguments
+  CALL      1 1            CALL      0 2
+  CALL      0 1
+```
+
+**Tail calls** (M5). `FuncState::expr_at(e, dst, tail)` carries one more
+fact: whether `e`'s value is the function's result. That holds for the fn
+body, for both branches of an `if` in tail position and for the last line
+of a block in tail position — not for `and`/`or` operands, comparisons or
+anything in `<main>`. A call in tail position is emitted as `TAILCALL`,
+which makes the callee *replace* the current frame:
+
+```text
+fn loop(n: int, acc: int) -> int =                 GETGLOBAL 2 loop
+    if n == 0 then acc else loop(n - 1, acc + n)   … arguments …
+                                                   TAILCALL  2 2
+```
+
+So a loop written as recursion runs in one frame; `1 + loop(…)` is not a
+tail call (the addition still needs the result) and stays `CALL`.
+
+## 6.9 What codegen does *not* do
 
 - It does not check types: `1 + 2.0` compiles, and the VM reports R0201
   (`arith`, chapter 7). Type errors are found at runtime until static checks
@@ -212,7 +286,7 @@ job of a separate pass, not planned for the MVP.
 - It does not decide *meaning* of operators: `IDIV` is emitted for `//`; what
   `//` does with negative numbers is defined once, in the VM.
 
-## 6.9 Where to change things
+## 6.10 Where to change things
 
 | Task | Where |
 |------|-------|
@@ -221,10 +295,11 @@ job of a separate pass, not planned for the MVP.
 | how names are loaded | `FuncState::name` (`GETGLOBAL` / `MOVE`); what they mean: `resolve.rs` |
 | a new branching construct | `emit_jmp` + `patch_here`; see `if_expr`, `logic`, `compare` |
 | register lifetime of locals | `FuncState::block` |
-| functions (M4) | a stack of `FuncState`s; `CLOSURE` in the parent |
+| how a fn is compiled | `compile_fn` (parameters, body, `RETURN`) |
+| how calls are compiled | `FuncState::call` (the argument window) |
 | point runtime errors at the operator | pass `*op_span` instead of `e.span` to the arithmetic `emit` |
 
-## 6.10 Exercises
+## 6.11 Exercises
 
 1. Compile `1 + (2 + (3 + 4))` and `((1 + 2) + 3) + 4` with
    `valo check f.vl --dump bytecode`. Compare `regs=`. Why do they differ?
@@ -236,7 +311,7 @@ job of a separate pass, not planned for the MVP.
    `Binary` arm so that an operand which is a local is used from its own
    register (`ADD 0 1 2`). Which snapshot changes?
 
-## 6.11 Further reading
+## 6.12 Further reading
 
 - *The Implementation of Lua 5.0*, §6 (register allocation in the compiler).
 - Lua 5.4 source: `lcode.c` — `luaK_exp2nextreg`, `freereg`, `luaK_code`.

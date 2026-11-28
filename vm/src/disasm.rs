@@ -6,7 +6,7 @@
 //! tests compare it.
 //!
 //! ```text
-//! function <main> arity=0 regs=2 consts=1   ; file.vl:1:1
+//! function <main> arity=0 regs=2 consts=1 protos=0   ; file.vl:1:1
 //!   0000  [1:1]   LOADI     0 2
 //!   0001  [1:5]   LOADK     1 0        ; 70000
 //!   0002  [1:1]   ADD       0 0 1
@@ -28,7 +28,7 @@
 //! |--------------------------------------|---------------------------------|
 //! | show a helpful comment for an opcode | `let comment = match op { ... }`|
 //! | print a new kind of constant         | `const_repr`, `const_entry`     |
-//! | print nested functions (M4)          | `proto` already takes a `depth` for indentation |
+//! | change how nested functions print    | end of `proto` (children follow the parent's constants, indented one level) |
 //!
 //! Changing the format changes snapshot files
 //! (`compiler/src/snapshots/*.snap`); re-run tests with `INSTA_UPDATE=always`
@@ -59,13 +59,20 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
     let (dl, dc) = program.line_col(p.def_span.start);
     // RUST: writing into a String cannot fail, but `writeln!` still returns a
     // `Result`; `let _ =` explicitly ignores it.
+    // `required=` only when some parameters have defaults (M4b).
+    let required = if p.required == p.arity {
+        String::new()
+    } else {
+        format!(" required={}", p.required)
+    };
     let _ = writeln!(
         out,
-        "{pad}function {} arity={} regs={} consts={}   ; {}:{dl}:{dc}",
+        "{pad}function {} arity={}{required} regs={} consts={} protos={}   ; {}:{dl}:{dc}",
         p.name,
         p.arity,
         p.num_regs,
         p.consts.len(),
+        p.protos.len(),
         program.source_name
     );
     // Walk instructions and their spans side by side.
@@ -96,6 +103,14 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
                 .get(instr.bx() as usize)
                 .map(|g| g.name.to_string()),
             OpCode::JMP => Some(format!("to {}", pc as i64 + 1 + instr.sj_offset() as i64)),
+            OpCode::JMPIFSET => Some(format!(
+                "to {} if passed",
+                pc as i64 + 1 + instr.sbx() as i64
+            )),
+            OpCode::CLOSURE => p
+                .protos
+                .get(instr.bx() as usize)
+                .map(|c| format!("<fn {}/{}>", c.name, c.arity)),
             _ => None,
         };
         let line = format!("{pad}  {pc:04}  {pos:<7} {:<9} {operands:<8}", op.name());
@@ -115,6 +130,9 @@ fn proto(out: &mut String, program: &Program, p: &Proto, depth: usize) {
         for (i, k) in p.consts.iter().enumerate() {
             let _ = writeln!(out, "{pad}  {i}  {}", const_entry(k));
         }
+    }
+    for child in &p.protos {
+        proto(out, program, child, depth + 1);
     }
 }
 

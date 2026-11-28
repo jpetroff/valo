@@ -19,15 +19,17 @@ where a debugger is rarely available, so the error message *is* the debugger.
 Every error has a stable code, so tests, documentation and users can refer to
 it. Codes never change once a golden test uses them.
 
-| Range | Stage | Codes in use (M3) |
+| Range | Stage | Codes in use (M4b) |
 |-------|-------|-------------------|
 | E00xx | lexer | E0001 unexpected character · E0002 int literal out of range · E0003 bad dedent · E0006 tab in indentation · E0009 not supported yet · E0010 malformed number |
-| E01xx | parser | E0101 unexpected token · E0102 `if` without `else` · E0103 unclosed `(` · E0104 block ends with a `let` · E0105 nested too deeply |
-| E02xx | resolve | E0201 undefined name (+ did-you-mean) · E0203 top-level name used before its definition · E0206 `_` used as a value |
+| E01xx | parser | E0101 unexpected token · E0102 `if` without `else` · E0103 unclosed `(` · E0104 block ends with a `let`/`fn` · E0105 nested too deeply |
+| E02xx | resolve | E0201 undefined name (+ did-you-mean) · E0203 top-level name used before its definition · E0205 wrong number of arguments to a known fn · E0206 `_` used as a value · E0207 defined twice (fn, parameter, type variable) |
 | E03xx | codegen | E0301 too many registers / constants |
-| R01xx | arithmetic | R0101 integer overflow · R0102 division/modulo by zero · R0104 negative exponent |
-| R02xx | types | R0201 operand type mismatch (incl. int/float mixing) · R0203 condition not a bool · R0205 values cannot be ordered |
-| R03xx | resources | R0302 global read before it was set (unreachable from `<main>`; from M4 a function can run before a binding it reads) |
+| E04xx | types | E0402 unknown type name · E0403 wrong number of type arguments · E0410 missing parameter or return annotation |
+| E042x | arguments | E0421 defaulted parameter passed by position · E0422 keyword arguments to a callee unknown at compile time · E0423 required parameter after a defaulted one · E0424 unknown keyword (+ did-you-mean), or a required parameter passed by name · E0425 keyword given twice |
+| R01xx | arithmetic | R0101 integer overflow · R0102 division/modulo by zero · R0103 float → int out of range · R0104 negative exponent |
+| R02xx | types | R0201 operand type mismatch (incl. int/float mixing) · R0202 not callable · R0203 condition not a bool · R0205 values cannot be ordered / functions compared · R0206 wrong argument type to a built-in · R0207 wrong number of arguments (callee unknown at compile time) |
+| R03xx | resources | R0301 stack overflow (more than 200 000 nested calls) · R0302 global read before it was set (a fn body may refer to a later top-level `let`) |
 | R07xx | assertions | R0701 assertion failed |
 | R05xx | host | R0501 output write failed |
 | R09xx | internal | R0901 bad bytecode / unimplemented opcode |
@@ -98,9 +100,10 @@ Details:
 File: [`vm/src/error.rs`](../vm/src/error.rs)
 
 ```rust
-pub enum ErrorKind { IntOverflow, DivisionByZero, NegativeExponent,
-                     TypeMismatch, ConditionNotBool, NotComparable,
-                     GlobalUninit, AssertionFailed, HostIo, Internal } // .code() → "R0101", ...
+pub enum ErrorKind { IntOverflow, DivisionByZero, FloatToInt, NegativeExponent,
+                     TypeMismatch, NotCallable, ConditionNotBool, NotComparable,
+                     NativeArgType, WrongArgCount, StackOverflow, GlobalUninit,
+                     AssertionFailed, HostIo, Internal } // .code() → "R0101", ...
 
 pub struct RuntimeError {
     pub kind: ErrorKind,
@@ -108,7 +111,7 @@ pub struct RuntimeError {
     pub notes: Vec<String>,           // extra lines: "left: 4", "help: …"
     pub trace: Vec<TraceEntry>,       // innermost frame first
 }
-pub struct TraceEntry { pub fn_name: Rc<str>, pub span: SrcSpan }
+pub struct TraceEntry { pub fn_name: Rc<str>, pub span: SrcSpan, pub tail_calls: u32 }
 ```
 
 The VM creates the error at the failing instruction (`RuntimeError::new`);
@@ -123,6 +126,36 @@ error[R0101]: integer overflow: 9223372036854775807 + 1
   --> overflow.vl:1:1
 stack trace (most recent call first):
   0: <main> at overflow.vl:1:1
+```
+
+The trace has one line per active call, innermost first. For a caller the
+span is the call it is waiting on, so the list reads like a path from the
+failure back to the top level:
+
+```text
+error[R0102]: division by zero: 10 // 0
+  --> trace3.vl:1:27
+stack trace (most recent call first):
+  0: inner  at trace3.vl:1:27
+  1: middle at trace3.vl:2:28
+  2: outer  at trace3.vl:4:13
+  3: <main> at trace3.vl:7:7
+```
+
+Two things keep traces readable after deep recursion (M5): a frame that
+replaced itself by tail calls shows one line plus `(... N tail calls
+elided ...)`, and a trace longer than 15 entries shows the innermost 10, a
+`... N frames omitted ...` line and the outermost 5 (`TRACE_HEAD`,
+`TRACE_TAIL` in `diagnostic.rs`; the VM keeps the full trace):
+
+```text
+error[R0102]: division by zero: 1 // 0
+  --> tail_trace.vl:1:41
+stack trace (most recent call first):
+  0: down   at tail_trace.vl:1:41
+     (... 5 tail calls elided ...)
+  1: start  at tail_trace.vl:3:13
+  2: <main> at tail_trace.vl:6:7
 ```
 
 Notes follow the location line. A failed `assert` also quotes the asserted

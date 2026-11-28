@@ -1,0 +1,6 @@
+fn hello() -> ():
+    print(42)
+
+hello()
+hello()
+print(hello)

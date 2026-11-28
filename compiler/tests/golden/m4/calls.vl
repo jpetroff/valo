@@ -1,0 +1,5 @@
+fn double(x: int) -> int = x * 2
+fn inc(x: int) -> int = x + 1
+fn both(x: int) -> int = inc(double(x))
+print(both(20))
+print(double(inc(both(1))))

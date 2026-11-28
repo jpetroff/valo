@@ -1,0 +1,9 @@
+[E0424] Error: `cmd` is a required parameter of `run`
+   ╭─[ kw_required.vl:2:11 ]
+   │
+ 2 │ print(run(cmd=1))
+   │           ─┬─  
+   │            ╰─── passed by name
+   │ 
+   │ Help: pass `cmd` by position; only parameters with a default are passed by name
+───╯

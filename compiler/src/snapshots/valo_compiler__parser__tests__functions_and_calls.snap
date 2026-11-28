@@ -1,0 +1,15 @@
+---
+source: compiler/src/parser.rs
+expression: "parse_ok(\"fn add(x: int, y: int) -> int = x + y\\n\\\n             fn fact(n: int) -> int:\\n    if n <= 1: 1\\n    else: n * fact(n - 1)\\n\\\n             fn first[T, U](xs: list[T], f: T -> U,) -> T | none =\\n    g(xs)\\n\\\n             fn unit() -> () = ()\\n\\\n             f()\\nf(1)(2, 3,)\\n-f(x) ** 2\\nadd(\\n    1,\\n    2,\\n)\\n\\\n             x |> f |> g(1) |> h(k=2)\\n\\\n             1 + 2 |> f\\n  |> g\\n\\\n             f(a, _, b=1)\")"
+---
+(fn add ((x : int) (y : int)) -> int (+ x y))
+(fn fact ((n : int)) -> int (block (expr (if (<= n 1) 1 (* n (call fact (- n 1)))))))
+(fn first [T U] ((xs : (list T)) (f : (-> (T) U))) -> (| T none) (call g xs))
+(fn unit () -> () ())
+(expr (call f))
+(expr (call (call f 1) 2 3))
+(expr (neg (** (call f x) 2)))
+(expr (call add 1 2))
+(expr (|> (|> (|> x f) (call g 1)) (call h k=2)))
+(expr (|> (|> (+ 1 2) f) g))
+(expr (call f a _ b=1))

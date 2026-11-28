@@ -2,17 +2,17 @@
 source: compiler/src/codegen.rs
 expression: "disasm(\"let n = 5\\nif n < 0: -1\\nelif n == 0: 0\\nelse: 1\\nif n > 2 then 1.5 else 2.5\")"
 ---
-function <main> arity=0 regs=2 consts=2   ; t.vl:1:1
+function <main> arity=0 regs=2 consts=2 protos=0   ; t.vl:1:1
   0000  [1:9]   LOADI     0 5
-  0001  [1:5]   SETGLOBAL 0 0      ; n
-  0002  [2:4]   GETGLOBAL 0 0      ; n
+  0001  [1:5]   SETGLOBAL 0 3      ; n
+  0002  [2:4]   GETGLOBAL 0 3      ; n
   0003  [2:8]   LOADI     1 0
   0004  [2:4]   LT        0 0 1
   0005  [2:4]   TEST      0 0
   0006  [2:4]   JMP       2        ; to 9
   0007  [2:11]  LOADI     0 -1
   0008  [2:1]   JMP       8        ; to 17
-  0009  [3:6]   GETGLOBAL 0 0      ; n
+  0009  [3:6]   GETGLOBAL 0 3      ; n
   0010  [3:11]  LOADI     1 0
   0011  [3:6]   EQ        0 0 1
   0012  [3:6]   TEST      0 0
@@ -20,7 +20,7 @@ function <main> arity=0 regs=2 consts=2   ; t.vl:1:1
   0014  [3:14]  LOADI     0 0
   0015  [3:1]   JMP       1        ; to 17
   0016  [4:7]   LOADI     0 1
-  0017  [5:4]   GETGLOBAL 0 0      ; n
+  0017  [5:4]   GETGLOBAL 0 3      ; n
   0018  [5:8]   LOADI     1 2
   0019  [5:4]   LT        0 1 0
   0020  [5:4]   TEST      0 0

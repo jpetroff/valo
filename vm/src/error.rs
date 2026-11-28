@@ -40,14 +40,25 @@ pub enum ErrorKind {
     IntOverflow,
     /// R0102 division or modulo by zero.
     DivisionByZero,
+    /// R0103 float → int conversion of NaN, an infinity or an out-of-range value.
+    FloatToInt,
     /// R0104 negative integer exponent.
     NegativeExponent,
     /// R0201 operand type mismatch.
     TypeMismatch,
+    /// R0202 calling a value that is not a function.
+    NotCallable,
     /// R0203 a condition (`if`, `and`/`or` operand, `assert`) is not a bool.
     ConditionNotBool,
-    /// R0205 values of this type have no order (`<` on bools).
+    /// R0205 values of this type have no order (`<` on bools), or cannot be
+    /// compared at all (functions).
     NotComparable,
+    /// R0206 a built-in function got an argument of the wrong type.
+    NativeArgType,
+    /// R0207 wrong number of arguments in a call the compiler could not check.
+    WrongArgCount,
+    /// R0301 too many nested calls.
+    StackOverflow,
     /// R0302 global read before its `SETGLOBAL` ran.
     GlobalUninit,
     /// R0701 `assert` failed.
@@ -64,10 +75,15 @@ impl ErrorKind {
         match self {
             ErrorKind::IntOverflow => "R0101",
             ErrorKind::DivisionByZero => "R0102",
+            ErrorKind::FloatToInt => "R0103",
             ErrorKind::NegativeExponent => "R0104",
             ErrorKind::TypeMismatch => "R0201",
+            ErrorKind::NotCallable => "R0202",
             ErrorKind::ConditionNotBool => "R0203",
             ErrorKind::NotComparable => "R0205",
+            ErrorKind::NativeArgType => "R0206",
+            ErrorKind::WrongArgCount => "R0207",
+            ErrorKind::StackOverflow => "R0301",
             ErrorKind::GlobalUninit => "R0302",
             ErrorKind::AssertionFailed => "R0701",
             ErrorKind::HostIo => "R0501",
@@ -81,8 +97,12 @@ impl ErrorKind {
 pub struct TraceEntry {
     /// Function display name.
     pub fn_name: Rc<str>,
-    /// Span of the instruction executing in this frame.
+    /// Span of the instruction executing in this frame (for a caller: the
+    /// call it is waiting on).
     pub span: SrcSpan,
+    /// Frames this one replaced through tail calls (M5); printed as
+    /// "(... N tail calls elided ...)".
+    pub tail_calls: u32,
 }
 
 /// A runtime fault.

@@ -1,0 +1,2 @@
+fn run(cmd: int, timeout: int = 30) -> int = cmd + timeout
+print(run(1, 5))

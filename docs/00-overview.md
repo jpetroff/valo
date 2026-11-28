@@ -162,7 +162,7 @@ valo/
 │       ├── vm.rs           Vm, int_arith                          (ch. 7)
 │       ├── host.rs         Host, StdHost, TestHost                (ch. 7)
 │       ├── error.rs        RuntimeError, ErrorKind                (ch. 8)
-│       ├── builtins.rs     native functions (empty until M4)
+│       ├── builtins.rs     native functions (`print`, `int`, `float`)
 │       └── bin/valo-vm.rs  standalone runner (placeholder)
 ├── docs/                   this textbook
 ├── .memory/                plan-mvp.md, syntax.md (design documents)
