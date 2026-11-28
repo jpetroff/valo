@@ -25,8 +25,8 @@ now read. The authoritative plan is `.memory/plan-mvp.md`; syntax is in
 | ~~M7~~ (done) | strings `"…{x}…"`, file/stdin I/O, `none`, `Ok/Err`, `?` | string scanner with a mode stack | `Str`/`Interp`, `None`, postfix `Try` | pipe + `?` rewriting | `CONCAT`, `LOADNONE`, `TRY` (lenient after top-level lines) | `Value::{Str, None, Ok, Err}`, `Host` gains stdin/files, R0601 with the `Err`'s history |
 | ~~M8~~ (done) | lists, indexing, `map/filter/reduce`, comprehensions, `in` | — | `List`, postfix `Index`, `Comprehension`, `In` | comprehension and `in` rewriting to built-ins by id (`ExprKind::Builtin`), E0208 | `NEWLIST`, `INDEX` | `Value::List`, `Vm::call_value` (nested loop, `<native map>` in traces), R0401 |
 | **M8b** | tuples, dicts, `.key` | — | dict/tuple literals | — | `NEWTUPLE`, `NEWDICT`, `GETFIELD` | `Value::Dict` |
-| **M9** | diagnostics quality | — | multi-error recovery, did-you-mean | — | — | source snippets in runtime errors |
-| **M10** | runtime type checks for annotations | — | — | — | `CHECKTYPE` | type checks with precise paths |
+| ~~M9~~ (done) | diagnostics quality | — | per-line recovery, 20-error cap | did-you-mean | — | `error[CODE]:` header and source box for runtime errors too, messages in `error.rs` constructors, `--color` |
+| ~~M10~~ (done) | runtime type checks for annotations | — | — | E0009 for dict/tuple types | `lower_type`, `CHECKTYPE` per param/`let`, `Proto::ret_type`, E0401 for literals | `chunk::Type`, `find_mismatch` (deep `list[T]` paths), return checks kept through tail calls, R0204 |
 
 After the MVP: bytecode files (`valo build`, `valo-vm`, M11), `match` (M12),
 records and unions (M13), commands and the OS layer (M14), regex (M15), test

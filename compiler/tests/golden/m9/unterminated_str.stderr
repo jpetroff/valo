@@ -1,0 +1,9 @@
+error[E0004]: unterminated string
+   ╭─[ unterminated_str.vl:1:7 ]
+   │
+ 1 │ print("abc)
+   │       ──┬──  
+   │         ╰──── this string has no closing `"` on its line
+   │ 
+   │ Help: strings end on the line where they start; write `\n` for a line break
+───╯

@@ -1,0 +1,5 @@
+fn read_port(text: str) -> int:
+    let n = parse_int(text)
+    if n == none then Err("bad port") else n
+print(read_port("80"))
+print(read_port("x"))

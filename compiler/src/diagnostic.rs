@@ -19,10 +19,12 @@
 //! | create an error in a compiler stage          | `Diagnostic::new(code, message, span)` + `.label()`, `.with()`, `.help()` |
 //! | change how compile errors look               | `render` (ariadne `Config`, labels)              |
 //! | change how runtime errors look               | `render_runtime` (trace truncation: `TRACE_HEAD`, `TRACE_TAIL`) |
-//! | change when colours are used                 | `stderr_color`                                    |
+//! | change when colours are used                 | `ColorChoice` (`--color`)                         |
 //!
-//! Compile errors currently use ariadne's own header (`[E0101] Error: …`)
-//! while runtime errors use `error[R0101]: …`; unifying them is part of M9.
+//! Compile and runtime errors share one layout (M9): our own rustc-style
+//! header `error[CODE]: message`, then an ariadne box with the source line
+//! (its first line `╭─[ file:line:col ]` is the location). ariadne always
+//! starts a report with its own `Error: …` header line; `snippet` drops it.
 //!
 //! ## Rust features used here (see `docs/01-rust-primer.md`)
 //!
@@ -37,6 +39,60 @@ use valo_vm::chunk::SrcSpan;
 use valo_vm::error::{ErrorKind, RuntimeError};
 
 use crate::span::{SourceMap, Span};
+
+/// Catalogue of compile-time error codes (plan §5): code and meaning.
+/// Codes are stable once a golden test uses them; `compiler/tests/codes.rs`
+/// checks that every live code here has a golden test.
+pub const E_CODES: &[(&str, &str)] = &[
+    // lexer
+    ("E0001", "unexpected character"),
+    ("E0002", "integer literal out of range"),
+    ("E0003", "inconsistent dedent"),
+    ("E0004", "unterminated string"),
+    ("E0005", "invalid escape"),
+    ("E0006", "tab in indentation"),
+    ("E0007", "unterminated interpolation (missing `}`)"),
+    ("E0008", "empty interpolation `{}`"),
+    ("E0009", "syntax not supported yet"),
+    ("E0010", "malformed number literal"),
+    // parser
+    ("E0101", "unexpected token"),
+    ("E0102", "`if` without `else`"),
+    ("E0103", "unclosed delimiter"),
+    ("E0104", "block ends with a `let` or `fn`"),
+    ("E0105", "expression nested too deeply"),
+    // resolver
+    ("E0201", "undefined name"),
+    ("E0202", "retired (same-scope rebinding is allowed)"),
+    ("E0203", "top-level name used before its definition"),
+    ("E0204", "local mutual recursion"),
+    ("E0205", "wrong number of arguments to a known function"),
+    ("E0206", "`_` used as a value"),
+    ("E0207", "defined twice"),
+    ("E0208", "`?` directly inside a comprehension"),
+    // code generation
+    (
+        "E0301",
+        "limit exceeded (registers, constants, jumps, elements)",
+    ),
+    // types
+    ("E0401", "literal does not match its annotation"),
+    ("E0402", "unknown type name"),
+    ("E0403", "malformed type"),
+    ("E0410", "missing parameter or return annotation"),
+    // arguments
+    ("E0421", "defaulted parameter passed by position"),
+    (
+        "E0422",
+        "keyword arguments to a function not known at compile time",
+    ),
+    ("E0423", "required parameter after a defaulted one"),
+    ("E0424", "unknown keyword argument"),
+    ("E0425", "duplicate keyword argument"),
+];
+
+/// Codes in `E_CODES` that are no longer produced.
+pub const E_RETIRED: &[&str] = &["E0202"];
 
 /// A compile-time error with a stable `E####` code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +123,7 @@ impl Diagnostic {
     /// assert_eq!(d.code, "E0101");
     /// ```
     pub fn new(code: &'static str, message: impl Into<String>, primary: Span) -> Diagnostic {
+        debug_assert!(primary.start <= primary.end, "inverted span in {code}");
         Diagnostic {
             code,
             message: message.into(),
@@ -96,48 +153,123 @@ impl Diagnostic {
     }
 }
 
-/// Whether diagnostics on stderr should be coloured: stderr is a terminal and
-/// `NO_COLOR` is unset (plan D15). Golden tests set `NO_COLOR=1`.
-pub fn stderr_color() -> bool {
-    use std::io::IsTerminal;
-    std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+/// When to colour diagnostics (`--color`, plan D15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorChoice {
+    /// Colour when stderr is a terminal and `NO_COLOR` is unset.
+    #[default]
+    Auto,
+    /// Always colour.
+    Always,
+    /// Never colour (golden tests set `NO_COLOR=1` and use `Auto`).
+    Never,
 }
 
-/// Render compile diagnostics, one report each.
-pub fn render(sm: &SourceMap, diags: &[Diagnostic], color: bool) -> String {
-    let mut out = Vec::new();
+impl ColorChoice {
+    /// Whether output to stderr should be coloured.
+    pub fn stderr(self) -> bool {
+        use std::io::IsTerminal;
+        match self {
+            ColorChoice::Always => true,
+            ColorChoice::Never => false,
+            ColorChoice::Auto => {
+                std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+            }
+        }
+    }
+}
+
+/// The header line shared by compile and runtime errors:
+/// `error[E0101]: message` (bold red `error[…]` when coloured).
+fn header(out: &mut String, code: &str, message: &str, color: bool) {
+    if color {
+        let _ = writeln!(
+            out,
+            "\x1b[1;31merror[{code}]\x1b[0m\x1b[1m: {message}\x1b[0m"
+        );
+    } else {
+        let _ = writeln!(out, "error[{code}]: {message}");
+    }
+}
+
+/// An ariadne source box for `primary` (+ `secondary` labels and `help:`
+/// lines), without ariadne's own header line.
+fn snippet(
+    sm: &SourceMap,
+    primary: Span,
+    label: &str,
+    secondary: &[(Span, String)],
+    help: &[String],
+    color: bool,
+) -> String {
     // Byte-based indices, because our spans are byte offsets.
     let config = Config::default()
         .with_color(color)
         .with_index_type(IndexType::Byte);
     let name = sm.name.as_str();
-    for d in diags {
-        let primary = clamp(sm, d.primary);
-        // ariadne draws no marker for a label without text, so always add one.
-        let text = if d.label.is_empty() {
-            "here"
-        } else {
-            d.label.as_str()
-        };
-        let label = Label::new((name, primary.range())).with_message(text);
-        let mut report = Report::build(ReportKind::Error, (name, primary.range()))
-            .with_config(config)
-            .with_code(d.code)
-            .with_message(&d.message)
-            .with_label(label);
-        for (span, text) in &d.secondary {
-            report =
-                report.with_label(Label::new((name, clamp(sm, *span).range())).with_message(text));
-        }
-        for h in &d.help {
-            report = report.with_help(h);
-        }
-        let _ = report
-            .finish()
-            .write((name, Source::from(sm.text.as_str())), &mut out);
+    let primary = clamp(sm, primary);
+    // ariadne draws no marker for a label without text, so always add one.
+    let text = if label.is_empty() { "here" } else { label };
+    // An empty message keeps ariadne's header to exactly one line.
+    let mut report = Report::build(ReportKind::Error, (name, primary.range()))
+        .with_config(config)
+        .with_label(Label::new((name, primary.range())).with_message(text));
+    for (span, text) in secondary {
+        report = report.with_label(Label::new((name, clamp(sm, *span).range())).with_message(text));
     }
-    String::from_utf8_lossy(&out).into_owned()
+    for h in help {
+        report = report.with_help(h);
+    }
+    let mut out = Vec::new();
+    let _ = report
+        .finish()
+        .write((name, Source::from(sm.text.as_str())), &mut out);
+    let text = String::from_utf8_lossy(&out);
+    match text.split_once('\n') {
+        Some((_, rest)) => rest.to_string(),
+        None => String::new(),
+    }
 }
+
+/// Render compile diagnostics, one report each:
+///
+/// ```text
+/// error[E0201]: undefined name `lenght`
+///    ╭─[ t.vl:1:7 ]
+///    │
+///  1 │ print(lenght(xs))
+///    │       ───┬──
+///    │          ╰──── not found in this scope
+///    │
+///    │ Help: did you mean `len`?
+/// ───╯
+/// ```
+///
+/// At most `MAX_SHOWN` diagnostics are drawn; a last line counts the rest
+/// (every stage keeps going after an error, so one typo can cascade).
+pub fn render(sm: &SourceMap, diags: &[Diagnostic], color: bool) -> String {
+    let mut out = String::new();
+    for d in diags.iter().take(MAX_SHOWN) {
+        header(&mut out, d.code, &d.message, color);
+        out.push_str(&snippet(
+            sm,
+            d.primary,
+            &d.label,
+            &d.secondary,
+            &d.help,
+            color,
+        ));
+    }
+    if diags.len() > MAX_SHOWN {
+        let more = diags.len() - MAX_SHOWN;
+        let s = if more == 1 { "" } else { "s" };
+        let _ = writeln!(out, "error: {more} more error{s} not shown");
+    }
+    out
+}
+
+/// Most compile errors `render` draws (plan M9).
+pub const MAX_SHOWN: usize = 20;
 
 /// Keep spans inside the text so ariadne never panics on EOF positions.
 fn clamp(sm: &SourceMap, s: Span) -> Span {
@@ -188,14 +320,19 @@ const TRACE_HEAD: usize = 10;
 /// Outermost stack-trace entries shown for a long trace.
 const TRACE_TAIL: usize = 5;
 
-/// Render a runtime error: header, location, notes and stack trace
-/// (plan §5). The source snippet is added in M9. A trace longer than 15
+/// Render a runtime error: header, source box of the innermost frame's
+/// instruction (M9), notes and stack trace (plan §5). A trace longer than 15
 /// entries shows the innermost 10 and the outermost 5; a frame that made
 /// tail calls (M5) is followed by `(... N tail calls elided ...)`.
 ///
 /// ```text
 /// error[R0701]: assertion failed: a == b
-///   --> t.vl:3:8
+///    ╭─[ t.vl:3:8 ]
+///    │
+///  3 │ assert a == b
+///    │        ───┬──
+///    │           ╰──── this is false
+/// ───╯
 ///   left: 4
 ///   right: 5
 /// stack trace (most recent call first):
@@ -204,7 +341,7 @@ const TRACE_TAIL: usize = 5;
 ///
 /// A failed `assert` quotes its source text: the VM has no source, but the
 /// span of the `ASSERT` instruction is the asserted expression.
-pub fn render_runtime(sm: &SourceMap, err: &RuntimeError) -> String {
+pub fn render_runtime(sm: &SourceMap, err: &RuntimeError, color: bool) -> String {
     let message = match (&err.access, err.primary_span()) {
         // R0401 (M8): name the access path, `rows[1][3]: …`.
         (Some(a), Some(span)) => match access_base(sm, span) {
@@ -213,15 +350,18 @@ pub fn render_runtime(sm: &SourceMap, err: &RuntimeError) -> String {
         },
         _ => err.message.clone(),
     };
-    let mut out = format!("error[{}]: {message}", err.kind.code());
-    if let (ErrorKind::AssertionFailed, Some(span)) = (err.kind, err.primary_span()) {
-        let s = clamp(sm, Span::new(span.start as usize, span.end as usize));
-        let _ = write!(out, ": {}", &sm.text[s.range()]);
-    }
-    out.push('\n');
+    let message = match (err.kind, err.primary_span()) {
+        (ErrorKind::AssertionFailed, Some(span)) => {
+            let s = clamp(sm, Span::new(span.start as usize, span.end as usize));
+            format!("{message}: {}", &sm.text[s.range()])
+        }
+        _ => message,
+    };
+    let mut out = String::new();
+    header(&mut out, err.kind.code(), &message, color);
     if let Some(span) = err.primary_span() {
-        let (l, c) = sm.line_col(span.start);
-        let _ = writeln!(out, "  --> {}:{l}:{c}", sm.name);
+        let span = Span::new(span.start as usize, span.end as usize);
+        out.push_str(&snippet(sm, span, err.kind.label(), &[], &[], color));
     }
     // R0601: where the Err came from and how it got here (D26, Q21).
     if let Some(trail) = &err.trail {
@@ -293,4 +433,74 @@ pub fn render_runtime(sm: &SourceMap, err: &RuntimeError) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `snippet` drops ariadne's own header line; if an ariadne upgrade
+    /// changes its layout, this fails before every golden does.
+    #[test]
+    fn header_is_ours_and_box_follows() {
+        let sm = SourceMap::new("t.vl", "1 $ 2\n");
+        let d = Diagnostic::new("E0001", "unexpected character `$`", Span::new(2, 3));
+        let out = render(&sm, &[d], false);
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some("error[E0001]: unexpected character `$`"));
+        assert_eq!(lines.next(), Some("   ╭─[ t.vl:1:3 ]"));
+        assert!(!out.contains("Error:"), "{out}");
+    }
+
+    /// Compile `src` and render every diagnostic (plain, no colour).
+    fn errors_of(src: &str) -> String {
+        let sm = SourceMap::new("t.vl", src);
+        match crate::compile_source(&sm, crate::CompileOptions::default()) {
+            Ok(_) => "(no errors)".to_string(),
+            Err(d) => render(&sm, &d, false),
+        }
+    }
+
+    // Multi-error files (plan M9): each stage reports every error it finds
+    // before the pipeline stops.
+
+    #[test]
+    fn multi_lexer_errors() {
+        insta::assert_snapshot!(errors_of("let a = 1 $ 2\nprint(\"x\\q\")\nlet b = 007\n"));
+    }
+
+    #[test]
+    fn multi_parser_errors() {
+        insta::assert_snapshot!(errors_of("let a = 1 +\nprint(a))\nif a then 1\nlet = 2\n"));
+    }
+
+    #[test]
+    fn multi_resolver_errors() {
+        insta::assert_snapshot!(errors_of(
+            "fn add(a: int, b: int) -> int = a + b\nprint(ad(1, 2))\nprint(add(1))\nlet x: integer = 1\n"
+        ));
+    }
+
+    #[test]
+    fn errors_inside_a_block_recover_per_line() {
+        insta::assert_snapshot!(errors_of(
+            "fn f(x: int) -> int:\n  let a = x +\n  let b = )\n  a\nprint(f(1) +)\n"
+        ));
+    }
+
+    #[test]
+    fn more_than_twenty_errors_are_counted() {
+        let src = "print(nope)\n".repeat(23);
+        let out = errors_of(&src);
+        assert_eq!(out.matches("error[E0201]").count(), MAX_SHOWN);
+        assert!(out.ends_with("error: 3 more errors not shown\n"), "{out}");
+    }
+
+    #[test]
+    fn color_always_marks_the_header() {
+        let sm = SourceMap::new("t.vl", "x\n");
+        let d = Diagnostic::new("E0201", "undefined name `x`", Span::new(0, 1));
+        let out = render(&sm, &[d], true);
+        assert!(out.starts_with("\x1b[1;31merror[E0201]"), "{out:?}");
+    }
 }

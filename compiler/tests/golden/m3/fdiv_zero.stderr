@@ -1,4 +1,9 @@
 error[R0102]: division by zero: 1.0 / 0.0
-  --> fdiv_zero.vl:1:1
+   ╭─[ fdiv_zero.vl:1:1 ]
+   │
+ 1 │ 1.0 / 0.0
+   │ ────┬────  
+   │     ╰────── divisor is zero
+───╯
 stack trace (most recent call first):
   0: <main> at fdiv_zero.vl:1:1

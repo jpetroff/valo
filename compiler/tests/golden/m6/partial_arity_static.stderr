@@ -1,4 +1,4 @@
-[E0205] Error: `inc` takes 1 argument but 2 were given
+error[E0205]: `inc` takes 1 argument but 2 were given
    ╭─[ partial_arity_static.vl:3:7 ]
    │
  3 │ print(inc(1, 2))

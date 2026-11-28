@@ -1,0 +1,4 @@
+# The return type is checked after 100000 tail calls, in a flat stack.
+fn countdown(n: int) -> int = if n == 0 then finish() else countdown(n - 1)
+fn finish() -> any = 0.5
+print(countdown(100000))

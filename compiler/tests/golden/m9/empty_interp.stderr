@@ -1,0 +1,9 @@
+error[E0008]: empty interpolation `{}` in a string
+   ╭─[ empty_interp.vl:2:8 ]
+   │
+ 2 │ print("{}")
+   │        ─┬  
+   │         ╰── expected an expression between the braces
+   │ 
+   │ Help: write `\{` and `\}` for literal braces
+───╯

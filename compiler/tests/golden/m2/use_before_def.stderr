@@ -1,4 +1,4 @@
-[E0203] Error: `price` is used before its definition
+error[E0203]: `price` is used before its definition
    ╭─[ use_before_def.vl:1:13 ]
    │
  1 │ let total = price * 2

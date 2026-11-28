@@ -236,7 +236,7 @@ pub fn run_program(
         Ok(_) => 0,
         Err(err) if err.kind == ErrorKind::Interrupted => EXIT_INTERRUPTED,
         Err(err) => {
-            let _ = host.write_stderr(&diagnostic::render_runtime(&sm, &err));
+            let _ = host.write_stderr(&diagnostic::render_runtime(&sm, &err, false));
             EXIT_RUNTIME
         }
     }

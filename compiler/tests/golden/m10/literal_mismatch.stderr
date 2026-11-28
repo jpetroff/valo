@@ -1,0 +1,29 @@
+error[E0401]: parameter retries of f: expected int, got str ("3")
+   ╭─[ literal_mismatch.vl:3:21 ]
+   │
+ 3 │ fn f(retries: int = "3") -> int = retries
+   │               ─┬─   ─┬─  
+   │                ╰───────── annotation
+   │                      │   
+   │                      ╰─── this is str
+───╯
+error[E0401]: binding port: expected int, got none
+   ╭─[ literal_mismatch.vl:1:17 ]
+   │
+ 1 │ let port: int = none
+   │           ─┬─   ──┬─  
+   │            ╰────────── annotation
+   │                   │   
+   │                   ╰─── this is none
+───╯
+error[E0401]: binding ratio: expected float, got int (1)
+   ╭─[ literal_mismatch.vl:2:20 ]
+   │
+ 2 │ let ratio: float = 1
+   │            ──┬──   ┬  
+   │              ╰──────── annotation
+   │                    │  
+   │                    ╰── this is int
+   │ 
+   │ Help: write it as a float: 1.0
+───╯

@@ -112,6 +112,138 @@ pub struct Proto {
     /// *enclosing* function copies one value per entry into
     /// `Closure::captures`; `GETUPVAL A B` reads `captures[B]`.
     pub upvals: Vec<UpvalDesc>,
+    /// Annotation checks (M10): `CHECKTYPE A Bx` checks `R[A]` against
+    /// `checks[Bx]` (parameters in the prologue, annotated `let`s).
+    pub checks: Vec<TypeCheck>,
+    /// Declared return type (M10); `RETURN` checks the result against it,
+    /// also after tail calls (`Frame::ret_checks`).
+    pub ret_type: Option<Type>,
+}
+
+/// A type annotation as the VM checks it (M10, plan D13).
+///
+/// Strict, like Pydantic's strict mode: no coercion (an `int` is not a
+/// `float`). Type variables and `any` accept everything; a function type
+/// checks only that the value can be called with that many arguments.
+/// Deviation from plan §2.3 (`Program.types` + `TypeId`): each check carries
+/// its own small tree, because the VM keeps no `Program` while running.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    /// `any`.
+    Any,
+    /// A type variable of a generic fn (`T` in `fn first[T](…)`), or the
+    /// unchecked error type `error` of `T ! error`: accepts every value.
+    Var(Rc<str>),
+    /// `()`.
+    Unit,
+    /// `int`.
+    Int,
+    /// `float`.
+    Float,
+    /// `bool`.
+    Bool,
+    /// `str`.
+    Str,
+    /// `none` (on its own, or as a member of `T | none`).
+    None,
+    /// `list[T]`: every element is checked (plan Q9).
+    List(Box<Type>),
+    /// `A | B | …` (flattened; `T | none` is the optional type, S9).
+    Union(Vec<Type>),
+    /// `T ! E`: an `Err` is accepted as it is, `Ok(v)` needs `v: T`.
+    Result(Box<Type>, Box<Type>),
+    /// `(A, B) -> C`: a function that accepts that many arguments.
+    Fn(Vec<Type>, Box<Type>),
+}
+
+impl Type {
+    /// Whether the check accepts every value (so `list[T]` need not visit
+    /// its elements).
+    pub fn accepts_all(&self) -> bool {
+        matches!(self, Type::Any | Type::Var(_))
+    }
+
+    /// Binding strength for printing: `->` < `!` < `|` < everything else.
+    fn level(&self) -> u8 {
+        match self {
+            Type::Fn(..) => 0,
+            Type::Result(..) => 1,
+            Type::Union(_) => 2,
+            _ => 3,
+        }
+    }
+
+    fn fmt_at(&self, f: &mut std::fmt::Formatter<'_>, min: u8) -> std::fmt::Result {
+        if self.level() < min {
+            write!(f, "(")?;
+            self.fmt_at(f, 0)?;
+            return write!(f, ")");
+        }
+        match self {
+            Type::Any => write!(f, "any"),
+            Type::Var(n) => write!(f, "{n}"),
+            Type::Unit => write!(f, "()"),
+            Type::Int => write!(f, "int"),
+            Type::Float => write!(f, "float"),
+            Type::Bool => write!(f, "bool"),
+            Type::Str => write!(f, "str"),
+            Type::None => write!(f, "none"),
+            Type::List(t) => {
+                write!(f, "list[")?;
+                t.fmt_at(f, 0)?;
+                write!(f, "]")
+            }
+            Type::Union(ts) => {
+                for (i, t) in ts.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    t.fmt_at(f, 3)?;
+                }
+                Ok(())
+            }
+            Type::Result(t, e) => {
+                t.fmt_at(f, 2)?;
+                write!(f, " ! ")?;
+                e.fmt_at(f, 2)
+            }
+            Type::Fn(params, ret) => {
+                match params.as_slice() {
+                    [p] if p.level() > 0 => p.fmt_at(f, 1)?,
+                    _ => {
+                        write!(f, "(")?;
+                        for (i, p) in params.iter().enumerate() {
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
+                            p.fmt_at(f, 0)?;
+                        }
+                        write!(f, ")")?;
+                    }
+                }
+                write!(f, " -> ")?;
+                ret.fmt_at(f, 0)
+            }
+        }
+    }
+}
+
+/// User spelling (syntax.md S4): `list[int]`, `int | none`, `int ! error`,
+/// `(int, int) -> int`.
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.fmt_at(f, 0)
+    }
+}
+
+/// One `CHECKTYPE` site: the type and what is checked, for the message
+/// (`parameter n of fact`, `binding x`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeCheck {
+    /// Required type.
+    pub ty: Type,
+    /// Subject of the check, as named in R0204 messages.
+    pub what: Rc<str>,
 }
 
 /// One captured value of a closure (Lua's `Upvaldesc` in `lobject.h`).
@@ -267,6 +399,8 @@ impl ProtoBuilder {
                 protos: Vec::new(),
                 locals: Vec::new(),
                 upvals: Vec::new(),
+                checks: Vec::new(),
+                ret_type: None,
             },
             globals: Vec::new(),
         }
@@ -318,6 +452,21 @@ impl ProtoBuilder {
             src,
             name: name.into(),
         });
+        self
+    }
+
+    /// Add an annotation check (the next `CHECKTYPE` index, M10).
+    pub fn check(mut self, what: &str, ty: Type) -> ProtoBuilder {
+        self.proto.checks.push(TypeCheck {
+            ty,
+            what: what.into(),
+        });
+        self
+    }
+
+    /// Declare the return type (M10).
+    pub fn ret(mut self, ty: Type) -> ProtoBuilder {
+        self.proto.ret_type = Some(ty);
         self
     }
 

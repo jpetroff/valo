@@ -1,0 +1,6 @@
+fn half(n: int) -> int ! error =
+    if n % 2 == 0 then Ok(n // 2) else Err("odd: {n}")
+print(half(4))
+print(half(3))
+fn broken(n: int) -> int ! error = Ok(str(n))
+print(broken(1))

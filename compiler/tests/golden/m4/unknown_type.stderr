@@ -1,4 +1,4 @@
-[E0402] Error: unknown type `integer`
+error[E0402]: unknown type `integer`
    ╭─[ unknown_type.vl:1:13 ]
    │
  1 │ fn grade(p: integer) -> int = 1

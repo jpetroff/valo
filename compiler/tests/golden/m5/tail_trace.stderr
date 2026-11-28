@@ -1,5 +1,10 @@
 error[R0102]: division by zero: 1 // 0
-  --> tail_trace.vl:1:41
+   ╭─[ tail_trace.vl:1:41 ]
+   │
+ 1 │ fn down(n: int) -> int = if n == 0 then 1 // n else down(n - 1)
+   │                                         ───┬──  
+   │                                            ╰──── divisor is zero
+───╯
 stack trace (most recent call first):
   0: down   at tail_trace.vl:1:41
      (... 5 tail calls elided ...)

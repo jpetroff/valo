@@ -1,4 +1,4 @@
-[E0410] Error: parameter p of fn grade needs a type annotation, e.g. p: int
+error[E0410]: parameter p of fn grade needs a type annotation, e.g. p: int
    ╭─[ missing_ann.vl:1:10 ]
    │
  1 │ fn grade(p) -> int = p

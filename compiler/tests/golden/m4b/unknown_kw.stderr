@@ -1,4 +1,4 @@
-[E0424] Error: `run` has no parameter named `timeuot`
+error[E0424]: `run` has no parameter named `timeuot`
    ╭─[ unknown_kw.vl:2:14 ]
    │
  2 │ print(run(1, timeuot=5))

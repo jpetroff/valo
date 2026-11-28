@@ -1,0 +1,4 @@
+fn area(w: int, h: int) -> int = w * h
+let width = 3
+print(area(widht, 4))
+print(lenn([1, 2]))

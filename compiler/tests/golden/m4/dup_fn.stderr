@@ -1,4 +1,4 @@
-[E0207] Error: fn `f` is defined twice
+error[E0207]: fn `f` is defined twice
    ╭─[ dup_fn.vl:2:4 ]
    │
  2 │ fn f() -> int = 2

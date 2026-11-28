@@ -1,0 +1,16 @@
+# A fully annotated program runs unchanged under the checks.
+fn mean(xs: list[float]) -> float | none =
+    if len(xs) == 0 then none else reduce(xs, 0.0, (a, x) => a + x) / float(len(xs))
+fn parse_all(lines: list[str]) -> list[int] ! error:
+    let nums: list[int | none] = map(lines, parse_int)
+    if none in nums then Err("not a number") else Ok(map(nums, unwrap))
+fn apply[T](f: T -> T, x: T) -> T = f(x)
+let total: int = reduce(parse_all(["1", "2", "3"])?, 0, (a, x) => a + x)
+print(total)
+print(mean([1.5, 2.5]))
+print(mean([]))
+print(parse_all(["1", "x"]))
+print(apply(x => x * 2, 21))
+let maybe: str | none = none
+print(maybe)
+let unit: () = print("side effect")

@@ -1,4 +1,4 @@
-[E0423] Error: required parameter `b` comes after a parameter with a default
+error[E0423]: required parameter `b` comes after a parameter with a default
    ╭─[ required_after_default.vl:1:18 ]
    │
  1 │ fn f(a: int = 1, b: int) -> int = a + b

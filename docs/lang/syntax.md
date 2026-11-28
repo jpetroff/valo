@@ -816,7 +816,7 @@ print("never")
 
 ```text
 error[R0601]: unhandled Err: "bad port"
-  --> example.vl:5:1
+   ╭─[ example.vl:5:1 ]   (source box with line 5 shortened here)
   context (outermost first):
     loading config
   origin: inner at example.vl:1:29
@@ -858,8 +858,8 @@ values.
 | `()`                 | the unit type                               |
 | `any`                | any value                                   |
 | `error`              | the error payload type                      |
-| `list[int]`, `dict[str, int]`, `tuple[int, str]` | generic built-in types |
-| `(int, str)`         | tuple type; `(int,)` is a one-element tuple |
+| `list[int]`          | list whose elements are all `int`           |
+| `dict[str, int]`, `tuple[int, str]`, `(int, str)` | reserved for dicts and tuples (not supported yet, E0009) |
 | `T | none`           | union / optional                            |
 | `T ! error`          | result: `Ok(T)` or `Err(error)`             |
 | `int -> int`         | function type                               |
@@ -881,6 +881,30 @@ print(f(2, 3) + g(4)(5))                       # → 25
 
 Unknown type names (E0402) and the wrong number of type arguments
 (`list[int, int]`, E0403) are compile errors.
+
+**Annotations are checked when the program runs** (strict, like Pydantic's
+strict mode): a value that does not match stops the program with R0204.
+Nothing is converted — an `int` is not a `float`.
+
+- `let x: T = e` checks the value of `e`; parameters are checked when the
+  function starts (also defaults, and also calls through a function value);
+  the return type is checked when the function returns, even after tail
+  calls.
+- `list[T]` checks every element and names the first bad one:
+  `binding rows: expected list[list[int]], but element [2][2] is str ("5")`.
+- `T | none` accepts `none` or a `T`. `T ! error` accepts any `Err` and an
+  `Ok(v)` whose `v` is a `T` — a plain `T` is *not* wrapped in `Ok` for you
+  (the message says `wrap the value in Ok(...)`).
+- A function type checks only that the function accepts that many
+  arguments. Type variables (`T`) and `any` accept everything.
+- A literal that cannot match is found at compile time (E0401):
+
+```valo
+let ratio: float = 1          # error[E0401]: binding ratio: expected float, got int (1)
+fn mean(xs: list[float]) -> float = reduce(xs, 0.0, (a, x) => a + x) / float(len(xs))
+print(mean([1.0, 2.0]))       # → 1.5
+print(mean([1, 2]))           # error[R0204]: parameter xs of mean: expected list[float], but element [0] is int (1)
+```
 
 ---
 

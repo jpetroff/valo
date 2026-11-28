@@ -1,0 +1,7 @@
+error[E0009]: command literals are not supported yet
+   ╭─[ not_supported.vl:1:13 ]
+   │
+ 1 │ let files = `ls -l`
+   │             ───┬───  
+   │                ╰───── here
+───╯

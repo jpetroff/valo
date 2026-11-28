@@ -1,0 +1,7 @@
+error[E0009]: `dict` types are not supported yet
+   ╭─[ dict_ann.vl:1:23 ]
+   │
+ 1 │ fn load(path: str) -> dict[str, int] = none
+   │                       ───────┬──────  
+   │                              ╰──────── tuples and dicts come in a later version
+───╯

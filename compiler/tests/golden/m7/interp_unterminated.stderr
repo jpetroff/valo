@@ -1,4 +1,4 @@
-[E0007] Error: unterminated interpolation in a string
+error[E0007]: unterminated interpolation in a string
    ╭─[ interp_unterminated.vl:2:15 ]
    │
  2 │ print("value: {x")

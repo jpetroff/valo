@@ -1,0 +1,6 @@
+fn lookup(key: str) -> int | none = if key == "a" then 5 else none
+let a: int | none = lookup("a")
+let b: int | none = lookup("b")
+print(a)
+print(b)
+let c: int | none = trim(" x ")

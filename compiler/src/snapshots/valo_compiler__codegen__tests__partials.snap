@@ -18,15 +18,17 @@ function <main> arity=0 regs=4 consts=0 protos=2   ; t.vl:1:1
   0012  [3:22]  LOADUNIT  0
   0013  [3:22]  RETURN    0
 constants: (none)
-  function add arity=2 regs=4 consts=0 protos=0   ; t.vl:1:4
-    0000  [1:33]  MOVE      2 0
-    0001  [1:37]  MOVE      3 1
-    0002  [1:33]  ADD       2 2 3
-    0003  [1:33]  RETURN    2
+  function add arity=2 regs=4 consts=0 protos=0 -> int   ; t.vl:1:4
+    0000  [1:8]   CHECKTYPE 0 0      ; parameter a of add: int
+    0001  [1:16]  CHECKTYPE 1 1      ; parameter b of add: int
+    0002  [1:33]  MOVE      2 0
+    0003  [1:37]  MOVE      3 1
+    0004  [1:33]  ADD       2 2 3
+    0005  [1:33]  RETURN    2
   constants: (none)
   locals:
-    R0   a          pc 0000..0004
-    R1   b          pc 0000..0004
+    R0   a          pc 0000..0006
+    R1   b          pc 0000..0006
   function <partial add@2:11> arity=1 regs=4 consts=0 upvals=1 protos=0   ; t.vl:2:11
     0000  [2:11]  GETGLOBAL 1 32     ; add
     0001  [2:11]  GETUPVAL  2 0      ; $a0

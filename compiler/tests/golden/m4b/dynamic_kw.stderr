@@ -1,4 +1,4 @@
-[E0422] Error: keyword arguments need a function known at compile time
+error[E0422]: keyword arguments need a function known at compile time
    ╭─[ dynamic_kw.vl:2:49 ]
    │
  2 │ fn apply(f: (int) -> int, x: int) -> int = f(x, times=2)

@@ -160,13 +160,28 @@ impl Value {
     }
 
     /// Type and value for error messages: `int (3)`, `str ("a")`, `none`.
+    /// The value part is cut to `PREVIEW_CHARS` characters (`…` marks the
+    /// cut), so a long list or string cannot flood the message (M9).
     pub fn describe(&self) -> String {
         match self {
             Value::None => "none".to_string(),
             Value::Unit => "()".to_string(),
-            other => format!("{} ({})", other.type_name(), other.repr()),
+            other => format!("{} ({})", other.type_name(), preview(&other.repr())),
         }
     }
+}
+
+/// Longest value text shown inside an error message.
+pub const PREVIEW_CHARS: usize = 40;
+
+/// `text` cut to `PREVIEW_CHARS` characters, ending in `…` when cut.
+pub fn preview(text: &str) -> String {
+    if text.chars().count() <= PREVIEW_CHARS {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(PREVIEW_CHARS - 1).collect();
+    out.push('…');
+    out
 }
 
 /// `s` as a valo string literal: `"a\"b\n"`. Braces are escaped too, so
@@ -235,6 +250,17 @@ impl fmt::Display for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describe_cuts_long_values() {
+        let short = Value::Str("é".repeat(38).into());
+        assert_eq!(short.describe(), format!("str (\"{}\")", "é".repeat(38)));
+        let long = Value::List(Rc::new((0..100).map(Value::Int).collect()));
+        let d = long.describe();
+        assert_eq!(d, "list ([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, …)");
+        assert_eq!(preview(&"x".repeat(40)), "x".repeat(40));
+        assert_eq!(preview(&"x".repeat(41)).chars().count(), 40);
+    }
 
     #[test]
     fn display() {

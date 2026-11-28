@@ -1,4 +1,9 @@
-error[R0203]: expected a bool, found int
-  --> cond_not_bool.vl:2:4
+error[R0203]: expected a bool, found int (1)
+   ╭─[ cond_not_bool.vl:2:4 ]
+   │
+ 2 │ if n then 2 else 3
+   │    ┬  
+   │    ╰── not a bool
+───╯
 stack trace (most recent call first):
   0: <main> at cond_not_bool.vl:2:4

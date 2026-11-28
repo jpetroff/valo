@@ -1,5 +1,10 @@
 error[R0402]: unwrap of none
-  --> unwrap_none.vl:1:34
+   ╭─[ unwrap_none.vl:1:34 ]
+   │
+ 1 │ fn first_number(s: str) -> int = unwrap(parse_int(s))
+   │                                  ──────────┬─────────  
+   │                                            ╰─────────── value is none
+───╯
   help: test for none first (`x == none`) or use or_else(x, default)
 stack trace (most recent call first):
   0: first_number at unwrap_none.vl:1:34

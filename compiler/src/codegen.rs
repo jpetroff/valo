@@ -49,6 +49,7 @@
 //! | add an optimisation (constant folding…)     | `FuncState::expr` (see the `-<literal>` fold)    |
 //! | change register limits                      | `MAX_REGS`, `FuncState::alloc`                   |
 //! | change debug info for locals (debugger, D3)  | `FuncState::declare_local`, `close_locals`        |
+//! | change annotation checks (M10)              | `lower_type`, `FuncState::check_annotation` (`CHECKTYPE`, E0401), `Proto::ret_type` in `compile_function` |
 //!
 //! ## Functions and calls (M4)
 //!
@@ -91,14 +92,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use valo_vm::chunk::{
-    Const, GlobalDesc, GlobalKind, LocalInfo, NativeId, Program, Proto, SrcSpan, UpvalDesc,
-    UpvalSrc,
+    Const, GlobalDesc, GlobalKind, LocalInfo, NativeId, Program, Proto, SrcSpan, Type, TypeCheck,
+    UpvalDesc, UpvalSrc,
 };
 use valo_vm::opcode::{Instr, MAX_SJ, MIN_SJ, OpCode};
+use valo_vm::value::Value;
+use valo_vm::vm::find_mismatch;
 
 use crate::ast::{
     self, Arg, BinOp, Binding, CmpLink, CmpOp, Expr, ExprKind, Item, Lambda, LambdaOrigin, LogicOp,
-    NodeId, Param, StrPart, UnaryOp,
+    NodeId, Param, StrPart, TypeExpr, TypeKind, UnaryOp,
 };
 use crate::diagnostic::Diagnostic;
 use crate::resolve::{BindingId, CaptureFrom, GlobalId, GlobalSlot, Res, Resolved, Slot};
@@ -128,7 +131,15 @@ pub fn compile(
     let mut diags = Vec::new();
     for item in &program.items {
         let Item::Fn(d) = item else { continue };
-        let child = match compile_function(&d.name, d.name_span, &d.params, &d.body, resolved, sm) {
+        let child = match compile_function(
+            &d.name,
+            d.name_span,
+            &d.params,
+            d.ret.as_ref(),
+            &d.body,
+            resolved,
+            sm,
+        ) {
             Ok(p) => p,
             Err(ds) => {
                 diags.extend(ds);
@@ -214,6 +225,7 @@ fn compile_function(
     name: &str,
     def_span: Span,
     params: &[Param],
+    ret: Option<&TypeExpr>,
     body: &Expr,
     resolved: &Resolved,
     sm: &SourceMap,
@@ -243,6 +255,19 @@ fn compile_function(
         fs.expr(default, i as u8);
         fs.patch_sbx(at);
     }
+    // Annotation checks (M10), after the defaults so that those are checked
+    // too. In the callee, so calls through a value are covered as well.
+    for (i, p) in params.iter().enumerate() {
+        if let Some(ann) = &p.ann {
+            let what = format!("parameter {} of {name}", p.name);
+            let span = Span::new(p.span.start as usize, ann.span.end as usize);
+            // A literal default is checked now (E0401); the runtime check
+            // stays, for the values callers pass.
+            fs.check_literal(ann, &what, p.default.as_ref());
+            fs.check_annotation(ann, &what, i as u8, span);
+        }
+    }
+    fs.proto.ret_type = ret.map(lower_type).filter(|t| !t.accepts_all());
     let dst = fs.alloc(body.span);
     // The body is in tail position: a call there becomes TAILCALL (M5).
     fs.expr_at(body, dst, true);
@@ -285,6 +310,79 @@ enum ConstKey {
 /// Registers are 8-bit operands.
 const MAX_REGS: u16 = 255;
 
+/// The checkable form of an annotation (M10). The resolver has already
+/// rejected unknown names (E0402), wrong type-argument counts (E0403) and
+/// dict/tuple types (E0009, until M8b), so every other name here is a type
+/// variable. `T | none | none` flattens to `T | none`; the error type of
+/// `T ! E` is not checked (MVP).
+fn lower_type(t: &TypeExpr) -> Type {
+    match &t.kind {
+        TypeKind::Unit => Type::Unit,
+        TypeKind::Name(n) => match n.as_str() {
+            "int" => Type::Int,
+            "float" => Type::Float,
+            "bool" => Type::Bool,
+            "str" => Type::Str,
+            "none" => Type::None,
+            "any" => Type::Any,
+            // The error type of `T ! error` is not checked in the MVP; a
+            // `Var` checks nothing and keeps the name for messages.
+            "error" => Type::Var("error".into()),
+            var => Type::Var(var.into()),
+        },
+        TypeKind::Generic(n, args) if n == "list" && args.len() == 1 => {
+            Type::List(Box::new(lower_type(&args[0])))
+        }
+        TypeKind::Generic(..) | TypeKind::Tuple(_) => Type::Any,
+        TypeKind::Union(a, b) => {
+            let mut members: Vec<Type> = Vec::new();
+            for side in [lower_type(a), lower_type(b)] {
+                let parts = match side {
+                    Type::Union(ts) => ts,
+                    t => vec![t],
+                };
+                for t in parts {
+                    if !members.contains(&t) {
+                        members.push(t);
+                    }
+                }
+            }
+            if members.iter().any(Type::accepts_all) {
+                Type::Any
+            } else {
+                Type::Union(members)
+            }
+        }
+        TypeKind::Result(a, b) => Type::Result(Box::new(lower_type(a)), Box::new(lower_type(b))),
+        TypeKind::Fn(params, ret) => Type::Fn(
+            params.iter().map(lower_type).collect(),
+            Box::new(lower_type(ret)),
+        ),
+    }
+}
+
+/// The value of a literal initialiser (`3`, `-2.5`, `"a"`, `none`, `()`,
+/// `true`), for the compile-time annotation check E0401.
+fn literal_value(e: &Expr) -> Option<Value> {
+    Some(match &e.kind {
+        ExprKind::Int(n) => Value::Int(*n),
+        ExprKind::Float(x) => Value::Float(*x),
+        ExprKind::Bool(b) => Value::Bool(*b),
+        ExprKind::Str(s) => Value::Str(s.as_str().into()),
+        ExprKind::None => Value::None,
+        ExprKind::Unit => Value::Unit,
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => match &operand.kind {
+            ExprKind::Int(n) => Value::Int(n.checked_neg()?),
+            ExprKind::Float(x) => Value::Float(-x),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
 /// `LocalInfo::end_pc` of a local whose scope has not ended yet.
 const OPEN: u32 = u32::MAX;
 
@@ -306,6 +404,8 @@ impl<'r> FuncState<'r> {
                 protos: Vec::new(),
                 locals: Vec::new(),
                 upvals: Vec::new(),
+                checks: Vec::new(),
+                ret_type: None,
             },
             free_reg: 0,
             max_reg: 0,
@@ -730,6 +830,59 @@ impl<'r> FuncState<'r> {
             }
             _ => self.expr(&b.init, dst),
         }
+        if let Some(ann) = &b.ann {
+            let what = format!("binding {}", b.name);
+            // A literal is fully checked at compile time.
+            if !self.check_literal(ann, &what, Some(&b.init)) {
+                self.check_annotation(ann, &what, dst, b.init.span);
+            }
+        }
+    }
+
+    /// If `init` is a literal, check it against `ann` now (M10): a
+    /// mismatch is E0401. Returns whether `init` was a literal.
+    fn check_literal(&mut self, ann: &TypeExpr, what: &str, init: Option<&Expr>) -> bool {
+        let Some((e, v)) = init.and_then(|e| Some((e, literal_value(e)?))) else {
+            return false;
+        };
+        let ty = lower_type(ann);
+        let mut path = Vec::new();
+        if let Some(bad) = find_mismatch(&v, &ty, &mut path) {
+            let d = Diagnostic::new(
+                "E0401",
+                format!("{what}: expected {ty}, got {}", bad.describe()),
+                e.span,
+            )
+            .label(format!("this is {}", bad.type_name()))
+            .with(ann.span, "annotation");
+            self.diags.push(match (&ty, &v) {
+                (Type::Float, Value::Int(n)) => d.help(format!("write it as a float: {n}.0")),
+                _ => d,
+            });
+        }
+        true
+    }
+
+    /// Check register `r` against annotation `ann` at run time (M10):
+    /// `CHECKTYPE r k`, or nothing for `any` / a type variable.
+    fn check_annotation(&mut self, ann: &TypeExpr, what: &str, r: u8, span: Span) {
+        let ty = lower_type(ann);
+        if ty.accepts_all() {
+            return;
+        }
+        let Ok(k) = u16::try_from(self.proto.checks.len()) else {
+            self.diags.push(Diagnostic::new(
+                "E0301",
+                "too many type checks in one function",
+                span,
+            ));
+            return;
+        };
+        self.proto.checks.push(TypeCheck {
+            ty,
+            what: what.into(),
+        });
+        self.emit(Instr::abx(OpCode::CHECKTYPE, r, k), span);
     }
 
     /// A lambda: compile its body as a function, then `CLOSURE` into `dst`.
@@ -743,7 +896,15 @@ impl<'r> FuncState<'r> {
             (LambdaOrigin::Source, Some(b)) => b.to_string(),
             (LambdaOrigin::Source, None) => format!("<lambda@{line}:{col}>"),
         };
-        match compile_function(&name, e.span, &l.params, &l.body, self.resolved, self.sm) {
+        match compile_function(
+            &name,
+            e.span,
+            &l.params,
+            None,
+            &l.body,
+            self.resolved,
+            self.sm,
+        ) {
             Ok(p) => self.closure(e.id, p, e.span, dst),
             Err(ds) => self.diags.extend(ds),
         }
@@ -872,6 +1033,7 @@ impl<'r> FuncState<'r> {
                         &d.name,
                         d.name_span,
                         &d.params,
+                        d.ret.as_ref(),
                         &d.body,
                         self.resolved,
                         self.sm,

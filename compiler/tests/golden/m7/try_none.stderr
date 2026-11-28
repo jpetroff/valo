@@ -1,5 +1,10 @@
 error[R0208]: `?` needs a result (Ok or Err), got none
-  --> try_none.vl:2:13
+   ╭─[ try_none.vl:2:13 ]
+   │
+ 2 │     let p = parse_int(s)?
+   │             ──────┬──────  
+   │                   ╰──────── not a result
+───╯
   help: `?` passes on errors of results; for an optional value use or_else(x, default) or compare with none
 stack trace (most recent call first):
   0: get_port at try_none.vl:2:13

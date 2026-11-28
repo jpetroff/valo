@@ -1,0 +1,4 @@
+fn twice(f: int -> int, x: int) -> int = f(f(x))
+print(twice(x => x + 1, 1))
+fn add(a: int, b: int) -> int = a + b
+print(twice(add, 1))

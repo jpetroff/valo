@@ -1,0 +1,10 @@
+error[R0204]: binding n: expected float, got int (3)
+   ╭─[ binding_mismatch.vl:2:16 ]
+   │
+ 2 │ let n: float = count([1, 2, 3])
+   │                ────────┬───────  
+   │                        ╰───────── does not match the annotation
+───╯
+  help: annotations never convert; use float(x)
+stack trace (most recent call first):
+  0: <main> at binding_mismatch.vl:2:16

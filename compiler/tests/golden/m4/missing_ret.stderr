@@ -1,4 +1,4 @@
-[E0410] Error: fn grade needs a return type, e.g. -> int
+error[E0410]: fn grade needs a return type, e.g. -> int
    ╭─[ missing_ret.vl:1:4 ]
    │
  1 │ fn grade(p: int):

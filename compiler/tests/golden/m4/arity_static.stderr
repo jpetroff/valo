@@ -1,4 +1,4 @@
-[E0205] Error: `add` takes 2 arguments but 1 was given
+error[E0205]: `add` takes 2 arguments but 1 was given
    ╭─[ arity_static.vl:2:7 ]
    │
  2 │ print(add(1))

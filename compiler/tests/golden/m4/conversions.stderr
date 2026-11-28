@@ -1,4 +1,9 @@
 error[R0103]: cannot convert inf to int
-  --> conversions.vl:5:7
+   ╭─[ conversions.vl:5:7 ]
+   │
+ 5 │ print(int(1e308 * 10.0))
+   │       ────────┬────────  
+   │               ╰────────── no int has this value
+───╯
 stack trace (most recent call first):
   0: <main> at conversions.vl:5:7

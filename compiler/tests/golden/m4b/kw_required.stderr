@@ -1,4 +1,4 @@
-[E0424] Error: `cmd` is a required parameter of `run`
+error[E0424]: `cmd` is a required parameter of `run`
    ╭─[ kw_required.vl:2:11 ]
    │
  2 │ print(run(cmd=1))

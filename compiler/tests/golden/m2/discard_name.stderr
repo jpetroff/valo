@@ -1,4 +1,4 @@
-[E0206] Error: `_` is not a value
+error[E0206]: `_` is not a value
    ╭─[ discard_name.vl:2:1 ]
    │
  2 │ _ * 2

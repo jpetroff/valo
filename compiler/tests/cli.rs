@@ -55,3 +55,46 @@ fn check_dumps_bytecode() {
     assert!(text.starts_with("function <main> arity=0"), "{text}");
     assert!(text.contains("ADD       0 0 1"), "{text}");
 }
+
+/// R0501: program output that cannot be written (stdout is `/dev/full`).
+#[cfg(target_os = "linux")]
+#[test]
+fn write_failure_is_r0501() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("cli");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("p.vl"), "print(\"hello\")\n").expect("write");
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let out = valo()
+        .args(["run", "p.vl"])
+        .current_dir(&dir)
+        .stdout(full)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with("error[R0501]: cannot write output"),
+        "{err}"
+    );
+}
+
+/// `--color always` colours the header even when stderr is not a terminal.
+#[test]
+fn color_flag() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("cli");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("c.vl"), "print(nope)\n").expect("write");
+    for (flag, colored) in [("always", true), ("never", false), ("auto", false)] {
+        let out = valo()
+            .args(["check", "c.vl", "--color", flag])
+            .current_dir(&dir)
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(2));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(err.starts_with("\x1b["), colored, "--color {flag}: {err:?}");
+    }
+}

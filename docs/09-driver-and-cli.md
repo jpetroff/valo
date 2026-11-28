@@ -16,6 +16,7 @@ valo run   <file> [--echo] [--trace-exec] [--dump tokens|ast|resolved|bytecode]
 valo check <file> [--dump tokens|ast|resolved|bytecode]
 valo build <file> [-o out]           not implemented yet (bytecode files, M11)
 valo --help | --version
+every command: [--color auto|always|never]
 ```
 
 | Flag | Effect |
@@ -26,6 +27,7 @@ valo --help | --version
 | `--dump ast` | syntax tree as S-expressions (chapter 4) |
 | `--dump resolved` | name resolution: global and local slots, and the slot each name use refers to (chapter 6) |
 | `--dump bytecode` | disassembly (chapter 5) |
+| `--color auto\|always\|never` | colour error messages; `auto` (default) colours when stderr is a terminal and `NO_COLOR` is unset (chapter 8) |
 
 With `check`, dumps go to stdout and nothing runs. With `run`, dumps go to
 **stderr** before running, so stdout contains only the program's own output.

@@ -1,4 +1,9 @@
-error[R0202]: cannot call a value of type int
-  --> not_callable.vl:2:7
+error[R0202]: cannot call int (3): it is not a function
+   ╭─[ not_callable.vl:2:7 ]
+   │
+ 2 │ print(x(1))
+   │       ──┬─  
+   │         ╰─── not a function
+───╯
 stack trace (most recent call first):
   0: <main> at not_callable.vl:2:7

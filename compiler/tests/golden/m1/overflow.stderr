@@ -1,4 +1,9 @@
 error[R0101]: integer overflow: 9223372036854775807 + 1
-  --> overflow.vl:1:1
+   ╭─[ overflow.vl:1:1 ]
+   │
+ 1 │ 9223372036854775807 + 1
+   │ ───────────┬───────────  
+   │            ╰───────────── result does not fit in an int
+───╯
 stack trace (most recent call first):
   0: <main> at overflow.vl:1:1

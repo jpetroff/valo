@@ -1,5 +1,10 @@
-error[R0201]: unsupported operand types for +: int and float
-  --> mix_error.vl:2:1
+error[R0201]: unsupported operand types for `+`: int (1) and float (2.0)
+   ╭─[ mix_error.vl:2:1 ]
+   │
+ 2 │ n + 2.0
+   │ ───┬───  
+   │    ╰───── wrong operand type
+───╯
   help: int and float never mix implicitly (only `/` converts); make both operands the same type
 stack trace (most recent call first):
   0: <main> at mix_error.vl:2:1

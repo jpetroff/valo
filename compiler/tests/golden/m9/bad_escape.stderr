@@ -1,0 +1,9 @@
+error[E0005]: invalid escape sequence in a string
+   ╭─[ bad_escape.vl:1:9 ]
+   │
+ 1 │ print("a\qb")
+   │         ─┬  
+   │          ╰── an unknown escape `\q`
+   │ 
+   │ Help: valid escapes: \n \t \r \0 \" \\ \{ \} \u{…}; use a raw string r"…" for backslashes
+───╯
